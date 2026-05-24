@@ -164,6 +164,9 @@ def direct_link_generator(link):
             "teraboxshare.com",
             "terafileshare.com",
             "terabox.club",
+            "terabox.fun",
+            "terastream.fun",
+            "dubox.com",
         ]
     ):
         return terabox(link)
@@ -792,10 +795,45 @@ def uploadee(url):
         raise DirectDownloadLinkException("ERROR: Direct Link not found")
 
 
+_TERABOX_JSTOKEN_CACHE = {}
+_TERABOX_JSTOKEN_TTL = 30 * 60
+_TERABOX_DEAD_DOMAINS = ("dubox.com",)
+_TERABOX_SHORTENERS = ("terabox.fun", "terastream.fun")
+
+
 def terabox(url):
 
     if "/file/" in url:
         return url
+
+    parsed_in = urlparse(url)
+    host_in = (parsed_in.hostname or "").lower()
+    if any(host_in == d or host_in.endswith("." + d) for d in _TERABOX_SHORTENERS):
+        try:
+            r = get(
+                url.replace("http://", "https://", 1),
+                allow_redirects=False, timeout=30,
+                headers={"User-Agent": user_agent},
+            )
+        except Exception as e:
+            raise DirectDownloadLinkException(
+                f"ERROR: {e.__class__.__name__}"
+            ) from e
+        if r.status_code == 404:
+            raise DirectDownloadLinkException(
+                "ERROR: Shortlink not found (404)"
+            )
+        target = r.headers.get("Location")
+        if not target:
+            raise DirectDownloadLinkException(
+                "ERROR: Shortlink did not redirect"
+            )
+        url = target
+
+    for dead in _TERABOX_DEAD_DOMAINS:
+        if host_in == dead or host_in.endswith("." + dead):
+            url = url.replace(dead, "terabox.com", 1)
+            break
 
     COOKIE_DOMAINS = (
         "terabox", "1024tera", "freeterabox", "nephobox", "4funbox",
@@ -847,6 +885,32 @@ def terabox(url):
             )
         return surl, password
 
+    def __cache_key(cookies):
+        return cookies.get("BDUSS") or cookies.get("ndus") or ""
+
+    def __get_cached_token(cookies):
+        key = __cache_key(cookies)
+        if not key:
+            return None
+        cached = _TERABOX_JSTOKEN_CACHE.get(key)
+        if not cached:
+            return None
+        if time() - cached["ts"] > _TERABOX_JSTOKEN_TTL:
+            _TERABOX_JSTOKEN_CACHE.pop(key, None)
+            return None
+        return cached
+
+    def __store_cached_token(cookies, js_token, pcftoken, base):
+        key = __cache_key(cookies)
+        if not key:
+            return
+        _TERABOX_JSTOKEN_CACHE[key] = {
+            "js_token": js_token,
+            "pcftoken": pcftoken,
+            "base": base,
+            "ts": time(),
+        }
+
     def __bootstrap(session, surl, password):
         try:
             resp = session.get(
@@ -858,8 +922,9 @@ def terabox(url):
                 f"ERROR: {e.__class__.__name__}"
             ) from e
         html_text = resp.text
-        m = search(r'fn%28%22([0-9A-F]+)%22%29', html_text) or \
-            search(r'fn\("([0-9A-F]+)"\)', html_text)
+        base = "https://" + urlparse(resp.url).netloc
+        m = search(r'fn%28%22([0-9A-F]{30,})%22%29', html_text) or \
+            search(r'fn\("([0-9A-F]{30,})"\)', html_text)
         if not m:
             raise DirectDownloadLinkException(
                 "ERROR: jsToken not found (login expired?)"
@@ -870,7 +935,7 @@ def terabox(url):
         if password:
             try:
                 v = session.post(
-                    f"https://{resp.url.split('/')[2]}/share/verify",
+                    f"{base}/share/verify",
                     params={**API_PARAMS, "surl": surl},
                     data={"pwd": password},
                     timeout=30,
@@ -880,16 +945,22 @@ def terabox(url):
                         f"ERROR: Share password verification failed "
                         f"(errno={v.get('errno')})"
                     )
+                randsk = v.get("randsk")
+                if randsk:
+                    for d in (urlparse(base).hostname, "terabox.com",
+                              "www.terabox.com", "dm.terabox.com"):
+                        if d:
+                            session.cookies.set("BOXCLND", randsk, domain=d)
             except DirectDownloadLinkException:
                 raise
             except Exception as e:
                 raise DirectDownloadLinkException(
                     f"ERROR: {e.__class__.__name__}"
                 ) from e
-        return js_token, pcftoken
+        return js_token, pcftoken, base
 
-    def __share_list(session, surl, js_token, pcftoken, *, dir_path=None,
-                     root=False, page=1, num=200):
+    def __share_list(session, base, surl, js_token, pcftoken, *,
+                     dir_path=None, root=False, page=1, num=200):
         params = {
             **API_PARAMS, "jsToken": js_token, "pcftoken": pcftoken,
             "shorturl": surl, "page": str(page), "num": str(num),
@@ -901,7 +972,7 @@ def terabox(url):
             params["dir"] = dir_path
         try:
             data = session.get(
-                "https://dm.terabox.com/share/list",
+                f"{base}/share/list",
                 params=params, timeout=30,
             ).json()
         except Exception as e:
@@ -914,10 +985,10 @@ def terabox(url):
             )
         return data
 
-    def __shorturlinfo(session, surl, js_token):
+    def __shorturlinfo(session, base, surl, js_token):
         try:
             data = session.get(
-                "https://www.terabox.com/api/shorturlinfo",
+                f"{base}/api/shorturlinfo",
                 params={
                     **API_PARAMS, "jsToken": js_token,
                     "shorturl": "1" + surl, "root": "1",
@@ -935,12 +1006,12 @@ def terabox(url):
             )
         return data
 
-    def __resolve_dlinks(session, js_token, meta, fs_ids):
+    def __resolve_dlinks(session, base, js_token, meta, fs_ids):
         out = {}
         for fid in fs_ids:
             try:
                 data = session.post(
-                    "https://www.terabox.com/share/download",
+                    f"{base}/share/download",
                     params={
                         **API_PARAMS, "jsToken": js_token,
                         "sign": meta["sign"],
@@ -979,8 +1050,16 @@ def terabox(url):
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": f"https://www.terabox.com/sharing/link?surl={surl}",
         })
-        js_token, pcftoken = __bootstrap(session, surl, password)
-        info = __shorturlinfo(session, surl, js_token)
+        cached = None if password else __get_cached_token(cookies)
+        if cached:
+            js_token = cached["js_token"]
+            pcftoken = cached["pcftoken"]
+            base = cached["base"]
+        else:
+            js_token, pcftoken, base = __bootstrap(session, surl, password)
+            if not password:
+                __store_cached_token(cookies, js_token, pcftoken, base)
+        info = __shorturlinfo(session, base, surl, js_token)
         meta = {
             "sign": info.get("sign", ""),
             "timestamp": info.get("timestamp", ""),
@@ -994,7 +1073,7 @@ def terabox(url):
             page = 1
             while True:
                 data = __share_list(
-                    session, surl, js_token, pcftoken,
+                    session, base, surl, js_token, pcftoken,
                     dir_path=dir_path, root=root, page=page, num=200,
                 )
                 if root and page == 1 and not details["title"]:
@@ -1026,7 +1105,7 @@ def terabox(url):
 
         if pending:
             resolved = __resolve_dlinks(
-                session, js_token, meta, [fid for fid, _ in pending]
+                session, base, js_token, meta, [fid for fid, _ in pending]
             )
             for fid, idx in pending:
                 if fid in resolved:
