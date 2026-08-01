@@ -3,8 +3,9 @@ from aiofiles.os import path as aiopath
 from os import path as ospath
 from base64 import b64encode
 from re import match as re_match
+from secrets import token_urlsafe
 
-from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, task_dict_lock, multi_tags, multi_batches, DOWNLOAD_DIR
 from ..helper.ext_utils.bot_utils import (
     get_content_type,
     sync_to_async,
@@ -51,6 +52,7 @@ from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.telegram_helper.bot_commands import BotCommands
 
 
 class Mirror(TaskListener):
@@ -246,8 +248,31 @@ class Mirror(TaskListener):
             self.bulk = reply_to
             b_msg = input_list[:1]
             self.options = " ".join(input_list[1:])
+
+            if not self.multi_tag:
+                self.multi_tag = token_urlsafe(3)
+                multi_tags.add(self.multi_tag)
+
+            if self.is_leech and "-m" not in self.options:
+                self.options += f" -m bulk-{self.multi_tag}"
+
             b_msg.append(f"{self.bulk[0]} -i {len(self.bulk)} {self.options}")
-            nextmsg = await send_message(self.message, " ".join(b_msg))
+            msg = " ".join(b_msg)
+            if len(self.bulk) > 2:
+                msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+            nextmsg = await send_message(self.message, msg)
+
+            if self.multi_tag not in multi_batches:
+                multi_batches[self.multi_tag] = {
+                    "anchor": nextmsg,
+                    "total": len(self.bulk),
+                    "done": 0,
+                    "results": [],
+                    "errors": [],
+                    "cmd_msgs": set(),
+                    "name": self.multi_tag,
+                }
+
             if self.message.from_user:
                 nextmsg.from_user = self.user
             else:

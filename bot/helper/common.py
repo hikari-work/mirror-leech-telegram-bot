@@ -1,6 +1,7 @@
 from aiofiles.os import path as aiopath, remove, makedirs, listdir
 from aiofiles import open as aiopen
 from asyncio import sleep, gather
+from html import escape
 from os import walk, path as ospath
 from secrets import token_urlsafe
 from aioshutil import move, rmtree
@@ -14,6 +15,7 @@ from natsort import natsorted
 from .. import (
     user_data,
     multi_tags,
+    multi_batches,
     LOGGER,
     task_dict_lock,
     task_dict,
@@ -42,6 +44,7 @@ from .ext_utils.files_utils import (
     split_file,
     SevenZ,
 )
+from .ext_utils.status_utils import get_readable_file_size
 from .ext_utils.links_utils import (
     is_gdrive_id,
     is_rclone_path,
@@ -58,6 +61,8 @@ from .ext_utils.media_utils import (
 from .telegram_helper.message_utils import (
     send_message,
     send_status_message,
+    edit_message,
+    delete_message,
     get_tg_link_message,
     temp_download,
 )
@@ -588,13 +593,124 @@ class TaskConfig:
             else:
                 self.tag = self.user.title
 
+    def _batch(self):
+        if not self.multi_tag or self.multi_tag not in multi_batches:
+            return None
+        return multi_batches[self.multi_tag]
+
+    async def update_batch_progress(self):
+        batch = self._batch()
+        if not batch:
+            return
+        done = batch["done"]
+        total = batch["total"]
+        errors = len(batch["errors"])
+        name = batch.get("name", self.multi_tag)
+        status = f"<b>Batch {name}:</b> {done}/{total} completed"
+        if errors > 0:
+            status += f", {errors} failed"
+        await edit_message(batch["anchor"], status)
+
+    async def finalize_batch(self):
+        batch = self._batch()
+        if not batch or batch["done"] + len(batch["errors"]) < batch["total"]:
+            return
+        results = batch["results"]
+        errors = batch["errors"]
+        name = batch.get("name", self.multi_tag)
+
+        if self.is_leech:
+            msg = f"<b>Batch {name} Complete</b>\n\n"
+            total_files = 0
+            total_corrupted = 0
+            all_files = {}
+
+            for res in results:
+                total_files += res["folders"]
+                total_corrupted += res["corrupted"]
+                if res["files"]:
+                    all_files.update(res["files"])
+
+            msg += f"<b>Total Files:</b> {total_files}"
+            if total_corrupted > 0:
+                msg += f"\n<b>Corrupted Files:</b> {total_corrupted}"
+            msg += f"\n<b>cc:</b> {self.tag}\n\n"
+
+            if all_files:
+                fmsg = ""
+                anchor_used = False
+                for index, (flink, fname) in enumerate(all_files.items(), start=1):
+                    fmsg += f"{index}. <a href='{flink}'>{fname}</a>\n"
+                    if len(fmsg.encode() + msg.encode()) > 4000:
+                        if anchor_used:
+                            await send_message(batch["anchor"], msg + fmsg)
+                        else:
+                            await edit_message(batch["anchor"], msg + fmsg)
+                            anchor_used = True
+                        await sleep(1)
+                        fmsg = ""
+                        msg = ""
+                if fmsg:
+                    if anchor_used:
+                        await send_message(batch["anchor"], msg + fmsg)
+                    else:
+                        await edit_message(batch["anchor"], msg + fmsg)
+            elif msg:
+                await edit_message(batch["anchor"], msg)
+        else:
+            msg = f"<b>Batch {name} Complete</b>\n\n"
+            for idx, res in enumerate(results, 1):
+                msg += f"{idx}. <b>{escape(res['name'])}</b>\n"
+                msg += f"   Size: {get_readable_file_size(res['size'])}\n"
+                if res.get("link"):
+                    msg += f"   <a href='{res['link']}'>Link</a>\n"
+
+            if errors:
+                msg += f"\n<b>Failures:</b> {len(errors)}"
+            msg += f"\n<b>cc:</b> {self.tag}"
+
+            await edit_message(batch["anchor"], msg)
+
+        if self.multi_tag in multi_tags:
+            multi_tags.discard(self.multi_tag)
+        if self.multi_tag in multi_batches:
+            for cmd_msg in batch.get("cmd_msgs", set()):
+                try:
+                    await delete_message(cmd_msg)
+                except:
+                    pass
+            del multi_batches[self.multi_tag]
+
     @new_task
     async def run_multi(self, input_list, obj):
-        await sleep(7)
         if not self.multi_tag and self.multi > 1:
             self.multi_tag = token_urlsafe(3)
             multi_tags.add(self.multi_tag)
-        elif self.multi <= 1:
+
+        if (
+            self.multi > 1
+            and self.multi_tag
+            and self.multi_tag not in multi_batches
+        ):
+            batch_name = (
+                self.folder_name.strip("/") if self.folder_name else self.multi_tag
+            )
+            anchor = await send_message(
+                self.message,
+                f"<b>Batch {batch_name}:</b> 0/{self.multi} completed",
+            )
+            multi_batches[self.multi_tag] = {
+                "anchor": anchor,
+                "total": self.multi,
+                "done": 0,
+                "results": [],
+                "errors": [],
+                "cmd_msgs": set(),
+                "name": batch_name,
+            }
+
+        await sleep(7)
+        if self.multi <= 1:
             if self.multi_tag in multi_tags:
                 multi_tags.discard(self.multi_tag)
             return
@@ -606,7 +722,20 @@ class TaskConfig:
             async with task_dict_lock:
                 for fd_name in self.same_dir:
                     self.same_dir[fd_name]["total"] -= self.multi
+            if self.multi_tag in multi_batches:
+                batch = multi_batches[self.multi_tag]
+                await edit_message(
+                    batch["anchor"],
+                    f"<b>Batch {batch.get('name', self.multi_tag)}:</b> cancelled!",
+                )
+                for cmd_msg in batch.get("cmd_msgs", set()):
+                    try:
+                        await delete_message(cmd_msg)
+                    except:
+                        pass
+                del multi_batches[self.multi_tag]
             return
+
         if len(self.bulk) != 0:
             msg = input_list[:1]
             msg.append(f"{self.bulk[0]} -i {self.multi - 1} {self.options}")
@@ -633,6 +762,10 @@ class TaskConfig:
             if self.multi > 2:
                 msgts += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
             nextmsg = await send_message(nextmsg, msgts)
+
+        if self.multi_tag and self.multi_tag in multi_batches:
+            multi_batches[self.multi_tag]["cmd_msgs"].add(nextmsg)
+
         if self.message.from_user:
             nextmsg.from_user = self.user
         else:
@@ -657,20 +790,38 @@ class TaskConfig:
             self.bulk = await extract_bulk_links(self.message, bulk_start, bulk_end)
             if len(self.bulk) == 0:
                 raise ValueError("Bulk Empty!")
+
+            self.multi_tag = token_urlsafe(3)
+            multi_tags.add(self.multi_tag)
+
             b_msg = input_list[:1]
             self.options = input_list[1:]
             index = self.options.index("-b")
             del self.options[index]
             if bulk_start or bulk_end:
                 del self.options[index]
+
+            if self.is_leech and "-m" not in " ".join(self.options):
+                self.options.append(f"-m bulk-{self.multi_tag}")
+
             self.options = " ".join(self.options)
             b_msg.append(f"{self.bulk[0]} -i {len(self.bulk)} {self.options}")
             msg = " ".join(b_msg)
             if len(self.bulk) > 2:
-                self.multi_tag = token_urlsafe(3)
-                multi_tags.add(self.multi_tag)
                 msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+
             nextmsg = await send_message(self.message, msg)
+
+            multi_batches[self.multi_tag] = {
+                "anchor": nextmsg,
+                "total": len(self.bulk),
+                "done": 0,
+                "results": [],
+                "errors": [],
+                "cmd_msgs": set(),
+                "name": self.options.split("-m")[-1].split()[0] if "-m" in self.options else self.multi_tag,
+            }
+
             if self.message.from_user:
                 nextmsg.from_user = self.user
             else:

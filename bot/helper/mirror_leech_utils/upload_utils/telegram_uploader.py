@@ -530,9 +530,27 @@ class TelegramUploader:
             if not self._listener.is_cancelled and (
                 self._sent_msg.photo or self._sent_msg.video
             ):
-                self._album_msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
-                if len(self._album_msgs) == 10:
-                    await self._send_album()
+                is_split = bool(re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", o_path))
+                if is_split and self._media_group and self._sent_msg.video:
+                    key = "videos"
+                    pname = re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", o_path).group(0)
+                    if pname in self._media_dict[key]:
+                        self._media_dict[key][pname].append(
+                            [self._sent_msg.chat.id, self._sent_msg.id]
+                        )
+                    else:
+                        self._media_dict[key][pname] = [
+                            [self._sent_msg.chat.id, self._sent_msg.id]
+                        ]
+                    msgs = self._media_dict[key][pname]
+                    if len(msgs) == 10:
+                        await self._send_media_group(pname, key, msgs)
+                    else:
+                        self._last_msg_in_group = True
+                elif self._media_group:
+                    self._album_msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
+                    if len(self._album_msgs) == 10:
+                        await self._send_album()
             elif (
                 not self._listener.is_cancelled
                 and self._media_group

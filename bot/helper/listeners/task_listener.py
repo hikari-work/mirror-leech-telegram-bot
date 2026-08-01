@@ -14,6 +14,7 @@ from ... import (
     queued_dl,
     queue_dict_lock,
     same_directory_lock,
+    multi_batches,
     DOWNLOAD_DIR,
 )
 from ...core.config_manager import Config
@@ -49,6 +50,7 @@ from ..telegram_helper.button_build import ButtonMaker
 from ..telegram_helper.message_utils import (
     send_message,
     delete_status,
+    delete_message,
     update_status_message,
 )
 
@@ -144,8 +146,19 @@ class TaskListener(TaskConfig):
         if multi_links:
             self.seed = False
             await self.on_upload_error(
-                f"{self.name} Downloaded!\n\nWaiting for other tasks to finish..."
+                f"{self.name} Downloaded!\n\nWaiting for other tasks to finish...",
+                silent=True,
             )
+            batch = self._batch()
+            if batch:
+                batch["done"] += 1
+                await self.update_batch_progress()
+                if self.message != batch["anchor"]:
+                    try:
+                        await delete_message(self.message)
+                    except:
+                        pass
+                await self.finalize_batch()
             return
         elif self.same_dir:
             self.seed = False
@@ -356,70 +369,95 @@ class TaskListener(TaskConfig):
             and Config.DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
-        msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
+
         LOGGER.info(f"Task Done: {self.name}")
-        if self.is_leech:
-            msg += f"\n<b>Total Files: </b>{folders}"
-            if mime_type != 0:
-                msg += f"\n<b>Corrupted Files: </b>{mime_type}"
-            msg += f"\n<b>cc: </b>{self.tag}\n\n"
-            if not files:
-                await send_message(self.message, msg)
-            else:
-                fmsg = ""
-                for index, (link, name) in enumerate(files.items(), start=1):
-                    fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
-                    if len(fmsg.encode() + msg.encode()) > 4000:
-                        await send_message(self.message, msg + fmsg)
-                        await sleep(1)
-                        fmsg = ""
-                if fmsg != "":
-                    await send_message(self.message, msg + fmsg)
+
+        batch = self._batch()
+        if batch:
+            batch["results"].append({
+                "name": self.name,
+                "size": self.size,
+                "folders": folders,
+                "corrupted": mime_type if self.is_leech else 0,
+                "files": files if self.is_leech else {},
+                "link": link,
+                "mime_type": mime_type if not self.is_leech else "",
+            })
+            batch["done"] += 1
+
+            if self.message != batch["anchor"]:
+                try:
+                    await delete_message(self.message)
+                except:
+                    pass
+
+            await self.update_batch_progress()
+            await self.finalize_batch()
         else:
-            msg += f"\n\n<b>Type: </b>{mime_type}"
-            if mime_type == "Folder":
-                msg += f"\n<b>SubFolders: </b>{folders}"
-                msg += f"\n<b>Files: </b>{files}"
-            if self.is_buzzheavier:
-                buttons = ButtonMaker()
-                buttons.url_button("☁️ Cloud Link", link)
-                button = buttons.build_menu()
-            elif (
-                link
-                or rclone_path
-                and Config.RCLONE_SERVE_URL
-                and not self.private_link
-            ):
-                buttons = ButtonMaker()
-                if link:
+            msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
+            if self.is_leech:
+                msg += f"\n<b>Total Files: </b>{folders}"
+                if mime_type != 0:
+                    msg += f"\n<b>Corrupted Files: </b>{mime_type}"
+                msg += f"\n<b>cc: </b>{self.tag}\n\n"
+                if not files:
+                    await send_message(self.message, msg)
+                else:
+                    fmsg = ""
+                    for index, (link, name) in enumerate(files.items(), start=1):
+                        fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
+                        if len(fmsg.encode() + msg.encode()) > 4000:
+                            await send_message(self.message, msg + fmsg)
+                            await sleep(1)
+                            fmsg = ""
+                    if fmsg != "":
+                        await send_message(self.message, msg + fmsg)
+            else:
+                msg += f"\n\n<b>Type: </b>{mime_type}"
+                if mime_type == "Folder":
+                    msg += f"\n<b>SubFolders: </b>{folders}"
+                    msg += f"\n<b>Files: </b>{files}"
+                if self.is_buzzheavier:
+                    buttons = ButtonMaker()
                     buttons.url_button("☁️ Cloud Link", link)
+                    button = buttons.build_menu()
+                elif (
+                    link
+                    or rclone_path
+                    and Config.RCLONE_SERVE_URL
+                    and not self.private_link
+                ):
+                    buttons = ButtonMaker()
+                    if link:
+                        buttons.url_button("☁️ Cloud Link", link)
+                    else:
+                        msg += f"\n\nPath: <code>{rclone_path}</code>"
+                    if rclone_path and Config.RCLONE_SERVE_URL and not self.private_link:
+                        remote, rpath = rclone_path.split(":", 1)
+                        url_path = rutils.quote(f"{rpath}")
+                        share_url = f"{Config.RCLONE_SERVE_URL}/{remote}/{url_path}"
+                        if mime_type == "Folder":
+                            share_url += "/"
+                        buttons.url_button("🔗 Rclone Link", share_url)
+                    if not rclone_path and dir_id:
+                        INDEX_URL = ""
+                        if self.private_link:
+                            INDEX_URL = self.user_dict.get("INDEX_URL", "") or ""
+                        elif Config.INDEX_URL:
+                            INDEX_URL = Config.INDEX_URL
+                        if INDEX_URL:
+                            share_url = f"{INDEX_URL}findpath?id={dir_id}"
+                            buttons.url_button("⚡ Index Link", share_url)
+                            if mime_type.startswith(("image", "video", "audio")):
+                                share_urls = f"{INDEX_URL}findpath?id={dir_id}&view=true"
+                                buttons.url_button("🌐 View Link", share_urls)
+                    button = buttons.build_menu(2)
                 else:
                     msg += f"\n\nPath: <code>{rclone_path}</code>"
-                if rclone_path and Config.RCLONE_SERVE_URL and not self.private_link:
-                    remote, rpath = rclone_path.split(":", 1)
-                    url_path = rutils.quote(f"{rpath}")
-                    share_url = f"{Config.RCLONE_SERVE_URL}/{remote}/{url_path}"
-                    if mime_type == "Folder":
-                        share_url += "/"
-                    buttons.url_button("🔗 Rclone Link", share_url)
-                if not rclone_path and dir_id:
-                    INDEX_URL = ""
-                    if self.private_link:
-                        INDEX_URL = self.user_dict.get("INDEX_URL", "") or ""
-                    elif Config.INDEX_URL:
-                        INDEX_URL = Config.INDEX_URL
-                    if INDEX_URL:
-                        share_url = f"{INDEX_URL}findpath?id={dir_id}"
-                        buttons.url_button("⚡ Index Link", share_url)
-                        if mime_type.startswith(("image", "video", "audio")):
-                            share_urls = f"{INDEX_URL}findpath?id={dir_id}&view=true"
-                            buttons.url_button("🌐 View Link", share_urls)
-                button = buttons.build_menu(2)
-            else:
-                msg += f"\n\nPath: <code>{rclone_path}</code>"
-                button = None
-            msg += f"\n\n<b>cc: </b>{self.tag}"
-            await send_message(self.message, msg, button)
+                    button = None
+                msg += f"\n\n<b>cc: </b>{self.tag}"
+                await send_message(self.message, msg, button)
+
         if self.seed:
             await clean_target(self.up_dir)
             async with queue_dict_lock:
@@ -483,6 +521,13 @@ class TaskListener(TaskConfig):
         self._torbox_web_id = 0
         msg = f"{self.tag} Download: {escape(str(error))}"
         await send_message(self.message, msg, button)
+
+        batch = self._batch()
+        if batch:
+            batch["errors"].append({"name": getattr(self, 'name', 'Unknown'), "error": str(error)})
+            await self.update_batch_progress()
+            await self.finalize_batch()
+
         if count == 0:
             await self.clean()
         else:
@@ -515,12 +560,20 @@ class TaskListener(TaskConfig):
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
 
-    async def on_upload_error(self, error):
+    async def on_upload_error(self, error, silent=False):
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
             count = len(task_dict)
-        await send_message(self.message, f"{self.tag} {escape(str(error))}")
+
+        if not silent:
+            await send_message(self.message, f"{self.tag} {escape(str(error))}")
+            batch = self._batch()
+            if batch:
+                batch["errors"].append({"name": self.name, "error": str(error)})
+                await self.update_batch_progress()
+                await self.finalize_batch()
+
         if count == 0:
             await self.clean()
         else:

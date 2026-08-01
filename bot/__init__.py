@@ -64,6 +64,7 @@ sudo_users = []
 non_queued_dl = set()
 non_queued_up = set()
 multi_tags = set()
+multi_batches = {}
 task_dict_lock = Lock()
 queue_dict_lock = Lock()
 qb_listener_lock = Lock()
