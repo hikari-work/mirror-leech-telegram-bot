@@ -45,6 +45,7 @@ qb_torrents = {}
 jd_downloads = {}
 nzb_jobs = {}
 user_data = {}
+user_clients = {}
 aria2_options = {}
 qbit_options = {}
 nzb_options = {}

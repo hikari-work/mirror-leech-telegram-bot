@@ -21,6 +21,7 @@ from .. import (
     sudo_users,
 )
 from ..helper.ext_utils.db_handler import database
+from ..helper.ext_utils.user_sessions import load_user_sessions
 from .config_manager import Config
 from .telegram_manager import TgClient
 from .torrent_manager import TorrentManager
@@ -66,6 +67,7 @@ async def update_nzb_options():
 
 async def load_settings():
     if not Config.DATABASE_URL:
+        await load_user_sessions()
         return
 
     for p in ["thumbnails", "tokens", "rclone"]:
@@ -74,6 +76,7 @@ async def load_settings():
 
     await database.connect()
     if database.db is None:
+        await load_user_sessions()
         return
 
     BOT_ID = Config.BOT_TOKEN.split(":", 1)[0]

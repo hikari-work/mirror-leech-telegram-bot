@@ -2,7 +2,7 @@ from pyrogram import Client, enums
 from pyrogram.types import LinkPreviewOptions
 from asyncio import Lock
 
-from .. import LOGGER
+from .. import LOGGER, user_data, user_clients
 from .config_manager import Config
 
 
@@ -67,6 +67,7 @@ class TgClient:
     @classmethod
     async def stop(cls):
         async with cls._lock:
+            await stop_user_clients()
             if cls.bot:
                 await cls.bot.stop()
             if cls.user:
@@ -80,3 +81,69 @@ class TgClient:
             if cls.user:
                 await cls.user.restart()
             LOGGER.info("Client(s) restarted")
+
+
+_user_client_locks = {}
+_locks_guard = Lock()
+
+
+async def _user_client_lock(user_id):
+    async with _locks_guard:
+        return _user_client_locks.setdefault(user_id, Lock())
+
+
+async def get_user_client(user_id):
+    """Return the personal client of user_id, starting it on demand.
+
+    Returns None if the user never logged in or his session can't be started.
+    """
+    if not user_id:
+        return None
+    if client := user_clients.get(user_id):
+        return client
+    session_string = user_data.get(user_id, {}).get("USER_SESSION_STRING")
+    if not session_string:
+        return None
+    async with await _user_client_lock(user_id):
+        if client := user_clients.get(user_id):
+            return client
+        LOGGER.info(f"Creating client from USER_SESSION_STRING of {user_id}")
+        client = Client(
+            f"user_{user_id}",
+            Config.TELEGRAM_API,
+            Config.TELEGRAM_HASH,
+            proxy=Config.TG_PROXY,
+            session_string=session_string,
+            in_memory=True,
+            no_updates=True,
+            parse_mode=enums.ParseMode.HTML,
+            sleep_threshold=60,
+            max_concurrent_transmissions=5,
+            max_message_cache_size=1000,
+            max_topic_cache_size=1000,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        try:
+            await client.start()
+        except Exception as e:
+            LOGGER.error(f"Failed to start client of {user_id}. {e}")
+            try:
+                await client.stop()
+            except Exception:
+                pass
+            return None
+        user_clients[user_id] = client
+        return client
+
+
+async def stop_user_client(user_id):
+    if client := user_clients.pop(user_id, None):
+        try:
+            await client.stop()
+        except Exception as e:
+            LOGGER.error(f"Failed to stop client of {user_id}. {e}")
+
+
+async def stop_user_clients():
+    for user_id in list(user_clients.keys()):
+        await stop_user_client(user_id)

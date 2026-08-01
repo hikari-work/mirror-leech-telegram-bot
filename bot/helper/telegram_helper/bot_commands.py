@@ -45,3 +45,5 @@ class BotCommands:
     RssCommand = f"rss{i}"
     NzbSearchCommand = f"nzbsearch{i}"
     BypassCommand = [f"bypass{i}", f"bp{i}"]
+    LoginCommand = f"login{i}"
+    LogoutCommand = f"logout{i}"

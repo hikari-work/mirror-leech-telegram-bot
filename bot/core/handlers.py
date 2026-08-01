@@ -307,6 +307,20 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            user_login,
+            filters=command(BotCommands.LoginCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
+            user_logout,
+            filters=command(BotCommands.LogoutCommand, case_sensitive=True)
+            & CustomFilters.authorized,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             ytdl,
             filters=command(BotCommands.YtdlCommand, case_sensitive=True)
             & CustomFilters.authorized,

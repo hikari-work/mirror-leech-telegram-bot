@@ -7,7 +7,7 @@ from .... import (
     task_dict,
     task_dict_lock,
 )
-from ....core.telegram_manager import TgClient
+from ....core.telegram_manager import TgClient, get_user_client
 from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ...mirror_leech_utils.status_utils.telegram_status import TelegramStatus
@@ -23,6 +23,7 @@ class TelegramDownloadHelper:
         self._start_time = 1
         self._listener = listener
         self._id = ""
+        self._client = None
         self.session = ""
 
     @property
@@ -51,7 +52,9 @@ class TelegramDownloadHelper:
 
     async def _on_download_progress(self, current, _):
         if self._listener.is_cancelled:
-            if self.session == "user":
+            if self._client is not None:
+                self._client.stop_transmission()
+            elif self.session == "user":
                 TgClient.user.stop_transmission()
             else:
                 TgClient.bot.stop_transmission()
@@ -95,11 +98,22 @@ class TelegramDownloadHelper:
         if not self.session:
             if self._listener.user_transmission and self._listener.is_super_chat:
                 self.session = "user"
-                message = await TgClient.user.get_messages(
+                self._client = TgClient.user
+                message = await self._client.get_messages(
                     chat_id=message.chat.id, message_ids=message.id
                 )
             else:
                 self.session = "bot"
+                self._client = self._listener.client
+        elif self.session == "user":
+            self._client = (
+                await get_user_client(self._listener.user_id) or TgClient.user
+            )
+            if self._client is None:
+                await self._on_download_error("User session is not available anymore!")
+                return
+        else:
+            self._client = self._listener.client
         media = (
             message.document
             or message.photo
@@ -147,14 +161,9 @@ class TelegramDownloadHelper:
                     if self._listener.multi <= 1:
                         await send_status_message(self._listener.message)
                     await event.wait()
-                    if self.session == "bot":
-                        message = await self._listener.client.get_messages(
-                            chat_id=message.chat.id, message_ids=message.id
-                        )
-                    else:
-                        message = await TgClient.user.get_messages(
-                            chat_id=message.chat.id, message_ids=message.id
-                        )
+                    message = await self._client.get_messages(
+                        chat_id=message.chat.id, message_ids=message.id
+                    )
                     if self._listener.is_cancelled:
                         async with global_lock:
                             if self._id in GLOBAL_GID:

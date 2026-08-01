@@ -14,4 +14,6 @@ list_drives.txt
 cookies.txt
 downloads/*
 *.session
+user_sessions.json
 __pycache__/
+/user_session_plan.md

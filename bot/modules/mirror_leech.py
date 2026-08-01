@@ -234,7 +234,9 @@ class Mirror(TaskListener):
                 self.link = reply_to.text.split("\n", 1)[0].strip()
         if is_telegram_link(self.link):
             try:
-                reply_to, session = await get_tg_link_message(self.link)
+                reply_to, session = await get_tg_link_message(
+                    self.link, user_id=self.user_id
+                )
             except Exception as e:
                 await send_message(self.message, f"ERROR: {e}")
                 await self.remove_from_same_dir()

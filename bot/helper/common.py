@@ -574,7 +574,7 @@ class TaskConfig:
                         temp_dict[ch] = {"thread_id": None, "last_sent_msg": None}
                 self.clone_dump_chats = temp_dict
             if self.thumb != "none" and is_telegram_link(self.thumb):
-                msg = (await get_tg_link_message(self.thumb))[0]
+                msg = (await get_tg_link_message(self.thumb, self.user_id))[0]
                 self.thumb = (
                     await create_thumb(msg) if msg.photo or msg.document else ""
                 )
@@ -835,7 +835,7 @@ class TaskConfig:
                         if cmd[index + 1].startswith("mltb"):
                             var_cmd[index + 1] = file_path
                         elif is_telegram_link(cmd[index + 1]):
-                            msg = (await get_tg_link_message(cmd[index + 1]))[0]
+                            msg = (await get_tg_link_message(cmd[index + 1], self.user_id))[0]
                             file_dir = await temp_download(msg)
                             inputs[index + 1] = file_dir
                             var_cmd[index + 1] = file_dir
@@ -909,7 +909,7 @@ class TaskConfig:
                                     else:
                                         var_cmd[index + 1] = f_path
                                 elif is_telegram_link(cmd[index + 1]):
-                                    msg = (await get_tg_link_message(cmd[index + 1]))[0]
+                                    msg = (await get_tg_link_message(cmd[index + 1], self.user_id))[0]
                                     file_dir = await temp_download(msg)
                                     inputs[index + 1] = file_dir
                                     var_cmd[index + 1] = file_dir

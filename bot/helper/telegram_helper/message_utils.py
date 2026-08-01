@@ -5,7 +5,7 @@ from time import time
 
 from ... import LOGGER, status_dict, task_dict_lock, intervals, DOWNLOAD_DIR
 from ...core.config_manager import Config
-from ...core.telegram_manager import TgClient
+from ...core.telegram_manager import TgClient, get_user_client
 from ..ext_utils.bot_utils import SetInterval
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
@@ -102,9 +102,10 @@ async def delete_status():
                 LOGGER.error(str(e))
 
 
-async def get_tg_link_message(link):
+async def get_tg_link_message(link, user_id=None):
     message = None
     links = []
+    user_client = await get_user_client(user_id) or TgClient.user
     if link.startswith("https://t.me/"):
         private = False
         msg = re_match(
@@ -116,7 +117,7 @@ async def get_tg_link_message(link):
         msg = re_match(
             r"tg:\/\/openmessage\?user_id=([0-9]+)&message_id=([0-9-]+)", link
         )
-        if not TgClient.user:
+        if not user_client:
             raise TgLinkException("USER_SESSION_STRING required for this private link!")
     if not msg:
         raise TgLinkException("Wrong link format!")
@@ -152,14 +153,14 @@ async def get_tg_link_message(link):
                 private = True
         except Exception as e:
             private = True
-            if not TgClient.user:
+            if not user_client:
                 raise e
 
     if not private:
         return (links, "bot") if links else (message, "bot")
-    elif TgClient.user:
+    elif user_client:
         try:
-            user_message = await TgClient.user.get_messages(
+            user_message = await user_client.get_messages(
                 chat_id=chat, message_ids=msg_id
             )
         except Exception as e:

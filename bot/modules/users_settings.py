@@ -772,6 +772,7 @@ async def edit_user_settings(client, query):
                     "THUMBNAIL",
                     "RCLONE_CONFIG",
                     "TOKEN_PICKLE",
+                    "USER_SESSION_STRING",
                 ]:
                     del user_dict[k]
             await update_user_settings(query)
@@ -816,7 +817,8 @@ async def get_users_settings(_, message):
         for u, d in user_data.items():
             kmsg = f"\n<b>{u}:</b>\n"
             if vmsg := "".join(
-                f"{k}: <code>{v or None}</code>\n" for k, v in d.items()
+                f"{k}: <code>{'Exists' if k == 'USER_SESSION_STRING' and v else v or None}</code>\n"
+                for k, v in d.items()
             ):
                 msg += kmsg + vmsg
         if not msg:
