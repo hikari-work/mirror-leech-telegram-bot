@@ -674,7 +674,7 @@ class TaskConfig:
         if self.multi_tag in multi_tags:
             multi_tags.discard(self.multi_tag)
         if self.multi_tag in multi_batches:
-            for cmd_msg in batch.get("cmd_msgs", set()):
+            for cmd_msg in batch.get("cmd_msgs", []):
                 try:
                     await delete_message(cmd_msg)
                 except:
@@ -699,15 +699,19 @@ class TaskConfig:
                 self.message,
                 f"<b>Batch {batch_name}:</b> 0/{self.multi} completed",
             )
-            multi_batches[self.multi_tag] = {
-                "anchor": anchor,
-                "total": self.multi,
-                "done": 0,
-                "results": [],
-                "errors": [],
-                "cmd_msgs": set(),
-                "name": batch_name,
-            }
+            if isinstance(anchor, str):
+                # anchor failed to send, fall back to per task messages
+                LOGGER.error(f"Can't send batch anchor: {anchor}")
+            else:
+                multi_batches[self.multi_tag] = {
+                    "anchor": anchor,
+                    "total": self.multi,
+                    "done": 0,
+                    "results": [],
+                    "errors": [],
+                    "cmd_msgs": [],
+                    "name": batch_name,
+                }
 
         await sleep(7)
         if self.multi <= 1:
@@ -728,7 +732,7 @@ class TaskConfig:
                     batch["anchor"],
                     f"<b>Batch {batch.get('name', self.multi_tag)}:</b> cancelled!",
                 )
-                for cmd_msg in batch.get("cmd_msgs", set()):
+                for cmd_msg in batch.get("cmd_msgs", []):
                     try:
                         await delete_message(cmd_msg)
                     except:
@@ -764,7 +768,7 @@ class TaskConfig:
             nextmsg = await send_message(nextmsg, msgts)
 
         if self.multi_tag and self.multi_tag in multi_batches:
-            multi_batches[self.multi_tag]["cmd_msgs"].add(nextmsg)
+            multi_batches[self.multi_tag]["cmd_msgs"].append(nextmsg)
 
         if self.message.from_user:
             nextmsg.from_user = self.user
@@ -811,6 +815,8 @@ class TaskConfig:
                 msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
 
             nextmsg = await send_message(self.message, msg)
+            if isinstance(nextmsg, str):
+                raise ValueError(nextmsg)
 
             multi_batches[self.multi_tag] = {
                 "anchor": nextmsg,
@@ -818,7 +824,7 @@ class TaskConfig:
                 "done": 0,
                 "results": [],
                 "errors": [],
-                "cmd_msgs": set(),
+                "cmd_msgs": [],
                 "name": self.options.split("-m")[-1].split()[0] if "-m" in self.options else self.multi_tag,
             }
 

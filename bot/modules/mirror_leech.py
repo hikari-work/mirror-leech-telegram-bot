@@ -261,6 +261,9 @@ class Mirror(TaskListener):
             if len(self.bulk) > 2:
                 msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
             nextmsg = await send_message(self.message, msg)
+            if isinstance(nextmsg, str):
+                LOGGER.error(f"Can't send bulk message: {nextmsg}")
+                return
 
             if self.multi_tag not in multi_batches:
                 multi_batches[self.multi_tag] = {
@@ -269,7 +272,7 @@ class Mirror(TaskListener):
                     "done": 0,
                     "results": [],
                     "errors": [],
-                    "cmd_msgs": set(),
+                    "cmd_msgs": [],
                     "name": self.multi_tag,
                 }
 
