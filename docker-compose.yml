@@ -4,3 +4,14 @@ services:
     command: bash start.sh
     restart: on-failure
     network_mode: "host"
+    environment:
+      # Encrypts private files (cookies, rclone.conf, token.pickle,
+      # accounts.zip) before they are stored in MongoDB GridFS. Set it in a
+      # .env file next to this compose file; never in config.py, whose
+      # contents are themselves persisted to the database.
+      #
+      # Compose refuses to start if this is unset: an empty value would make
+      # the bot fall back to storing those files as plaintext.
+      #
+      # Changing or losing the key makes previously stored blobs unreadable.
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?set DB_ENCRYPTION_KEY in .env (any passphrase) before starting}
