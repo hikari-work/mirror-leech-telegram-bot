@@ -3,6 +3,7 @@ from aiofiles import open as aiopen
 from aioshutil import rmtree
 from asyncio import create_subprocess_exec, create_subprocess_shell, sleep
 from importlib import import_module
+from os.path import dirname
 
 from .. import (
     aria2_options,
@@ -20,6 +21,7 @@ from .. import (
     auth_chats,
     sudo_users,
 )
+from ..helper.ext_utils.blob_crypto import KEY_VAR
 from ..helper.ext_utils.db_handler import database
 from ..helper.ext_utils.user_sessions import load_user_sessions
 from .config_manager import Config
@@ -86,7 +88,7 @@ async def load_settings():
         config_file = {
             key: value.strip() if isinstance(value, str) else value
             for key, value in vars(settings).items()
-            if not key.startswith("__")
+            if not key.startswith("__") and key != KEY_VAR
         }
     except ModuleNotFoundError:
         config_file = {}
@@ -110,14 +112,7 @@ async def load_settings():
         if config_dict:
             Config.load_dict(config_dict)
 
-    if pf_dict := await database.db.settings.files.find_one(
-        {"_id": BOT_ID}, {"_id": 0}
-    ):
-        for key, value in pf_dict.items():
-            if value:
-                file_ = key.replace("__", ".")
-                async with aiopen(file_, "wb+") as f:
-                    await f.write(value)
+    await restore_private_files(BOT_ID)
 
     if a2c_options := await database.db.settings.aria2c.find_one(
         {"_id": BOT_ID}, {"_id": 0}
@@ -129,39 +124,7 @@ async def load_settings():
     ):
         qbit_options.update(qbit_opt)
 
-    if nzb_opt := await database.db.settings.nzb.find_one({"_id": BOT_ID}, {"_id": 0}):
-        if await aiopath.exists("sabnzbd/SABnzbd.ini.bak"):
-            await remove("sabnzbd/SABnzbd.ini.bak")
-        ((key, value),) = nzb_opt.items()
-        file_ = key.replace("__", ".")
-        async with aiopen(f"sabnzbd/{file_}", "wb+") as f:
-            await f.write(value)
-
-    if await database.db.users.find_one():
-        for p in ["thumbnails", "tokens", "rclone"]:
-            if not await aiopath.exists(p):
-                await makedirs(p)
-        rows = database.db.users.find({})
-        async for row in rows:
-            uid = row["_id"]
-            del row["_id"]
-            thumb_path = f"thumbnails/{uid}.jpg"
-            rclone_config_path = f"rclone/{uid}.conf"
-            token_path = f"tokens/{uid}.pickle"
-            if row.get("THUMBNAIL"):
-                async with aiopen(thumb_path, "wb+") as f:
-                    await f.write(row["THUMBNAIL"])
-                row["THUMBNAIL"] = thumb_path
-            if row.get("RCLONE_CONFIG"):
-                async with aiopen(rclone_config_path, "wb+") as f:
-                    await f.write(row["RCLONE_CONFIG"])
-                row["RCLONE_CONFIG"] = rclone_config_path
-            if row.get("TOKEN_PICKLE"):
-                async with aiopen(token_path, "wb+") as f:
-                    await f.write(row["TOKEN_PICKLE"])
-                row["TOKEN_PICKLE"] = token_path
-            user_data[uid] = row
-        LOGGER.info("Users data has been imported from Database")
+    await restore_users(BOT_ID)
 
     if await database.db.rss[BOT_ID].find_one():
         rows = database.db.rss[BOT_ID].find({})
@@ -170,6 +133,62 @@ async def load_settings():
             del row["_id"]
             rss_dict[user_id] = row
         LOGGER.info("Rss data has been imported from Database.")
+
+
+async def restore_private_files(bot_id):
+    """Write every stored private file back to disk.
+
+    Blobs are keyed by their real relative path, so a name doubles as the
+    destination and nested paths such as sabnzbd/SABnzbd.ini need no mapping.
+    """
+    for name in await database.list_blobs(bot_id=bot_id):
+        if name.startswith("users/"):
+            continue
+        if not (blob := await database.get_blob(name, bot_id=bot_id)):
+            continue
+        if folder := dirname(name):
+            await makedirs(folder, exist_ok=True)
+        async with aiopen(name, "wb+") as f:
+            await f.write(blob)
+        if name == "sabnzbd/SABnzbd.ini" and await aiopath.exists(
+            "sabnzbd/SABnzbd.ini.bak"
+        ):
+            await remove("sabnzbd/SABnzbd.ini.bak")
+
+
+async def restore_users(bot_id):
+    """Rebuild user_data from the scalar records plus their stored files.
+
+    A user may own files without holding any scalar setting, since uploading a
+    thumbnail only calls update_user_doc. Those ids exist solely as blob names,
+    so both sources are merged here.
+    """
+    rows = {}
+    async for row in database.db.users.find({}):
+        rows[row.pop("_id")] = row
+    for name in await database.list_blobs("users/", bot_id=bot_id):
+        # users/<uid>/<KEY>
+        parts = name.split("/")
+        if len(parts) == 3 and parts[1].lstrip("-").isdigit():
+            rows.setdefault(int(parts[1]), {})
+    if not rows:
+        return
+
+    for p in ["thumbnails", "tokens", "rclone"]:
+        if not await aiopath.exists(p):
+            await makedirs(p)
+    for uid, row in rows.items():
+        for key, path_ in (
+            ("THUMBNAIL", f"thumbnails/{uid}.jpg"),
+            ("RCLONE_CONFIG", f"rclone/{uid}.conf"),
+            ("TOKEN_PICKLE", f"tokens/{uid}.pickle"),
+        ):
+            if blob := await database.get_blob(f"users/{uid}/{key}", bot_id=bot_id):
+                async with aiopen(path_, "wb+") as f:
+                    await f.write(blob)
+                row[key] = path_
+        user_data[uid] = row
+    LOGGER.info("Users data has been imported from Database")
 
 
 async def save_settings():
@@ -185,12 +204,8 @@ async def save_settings():
         )
     if await database.db.settings.qbittorrent.find_one({"_id": TgClient.ID}) is None:
         await database.save_qbit_settings()
-    if await database.db.settings.nzb.find_one({"_id": TgClient.ID}) is None:
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
-            nzb_conf = await pf.read()
-        await database.db.settings.nzb.update_one(
-            {"_id": TgClient.ID}, {"$set": {"SABnzbd__ini": nzb_conf}}, upsert=True
-        )
+    if await database.get_blob("sabnzbd/SABnzbd.ini") is None:
+        await database.update_nzb_config()
 
 
 async def update_variables():

@@ -1,5 +1,6 @@
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
+from gridfs.asynchronous import AsyncGridFSBucket
 from importlib import import_module
 from pymongo import AsyncMongoClient
 from pymongo.server_api import ServerApi
@@ -8,6 +9,11 @@ from pymongo.errors import PyMongoError
 from ... import LOGGER, user_data, rss_dict, qbit_options
 from ...core.telegram_manager import TgClient
 from ...core.config_manager import Config
+from .blob_crypto import KEY_VAR, blob_box
+
+# Keys whose value is a file on disk rather than a scalar. They live in GridFS
+# under users/<uid>/<key>, so the users collection only ever holds scalars.
+USER_DOC_KEYS = ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE")
 
 
 class DbManager:
@@ -15,6 +21,7 @@ class DbManager:
         self._return = True
         self._conn = None
         self.db = None
+        self._bucket = None
 
     async def connect(self):
         try:
@@ -27,10 +34,12 @@ class DbManager:
                 serverSelectionTimeoutMS=60000,
             )
             self.db = self._conn[Config.DATABASE_NAME]
+            self._bucket = AsyncGridFSBucket(self.db, bucket_name="files")
             self._return = False
         except PyMongoError as e:
             LOGGER.error(f"Error in DB connection: {e}")
             self.db = None
+            self._bucket = None
             self._return = True
             self._conn = None
 
@@ -39,6 +48,65 @@ class DbManager:
         if self._conn is not None:
             await self._conn.close()
         self._conn = None
+        self._bucket = None
+
+    # ---------------------------------------------------------------- GridFS
+
+    @staticmethod
+    def _blob_name(path, bot_id=None):
+        """Namespace a blob by bot id so one database can host several bots."""
+        return f"{bot_id or TgClient.ID}/{path}"
+
+    async def save_blob(self, path, data: bytes, bot_id=None):
+        """Store data under path, replacing whatever revision was there.
+
+        The upload happens before the prune so that a crash in between leaves
+        the new revision in place rather than nothing at all.
+        """
+        if self._return:
+            return
+        name = self._blob_name(path, bot_id)
+        await self._bucket.upload_from_stream(name, blob_box.encrypt(data))
+        await self._prune_blob(name)
+
+    async def _prune_blob(self, name, keep=1):
+        cursor = self._bucket.find({"filename": name}).sort("uploadDate", -1)
+        for idx, doc in enumerate(await cursor.to_list(None)):
+            if idx >= keep:
+                await self._bucket.delete(doc._id)
+
+    async def get_blob(self, path, bot_id=None) -> bytes | None:
+        if self._return:
+            return None
+        name = self._blob_name(path, bot_id)
+        try:
+            stream = await self._bucket.open_download_stream_by_name(name)
+        except Exception:
+            return None
+        try:
+            return blob_box.decrypt(await stream.read()) or None
+        finally:
+            await stream.close()
+
+    async def list_blobs(self, prefix="", bot_id=None) -> list[str]:
+        """Return stored paths under prefix, with the bot namespace stripped."""
+        if self._return:
+            return []
+        root = self._blob_name(prefix, bot_id)
+        names = set()
+        # Range scan rather than a regex so that dots and slashes in the path
+        # need no escaping. ￿ sorts above any character a name may hold.
+        cursor = self._bucket.find(
+            {"filename": {"$gte": root, "$lt": root + "￿"}}
+        )
+        for doc in await cursor.to_list(None):
+            names.add(doc.filename.split("/", 1)[1])
+        return sorted(names)
+
+    async def delete_blob(self, path, bot_id=None):
+        if self._return:
+            return
+        await self._prune_blob(self._blob_name(path, bot_id), keep=0)
 
     async def update_deploy_config(self):
         if self._return:
@@ -48,7 +116,7 @@ class DbManager:
             config_file = {
                 key: value.strip() if isinstance(value, str) else value
                 for key, value in vars(settings).items()
-                if not key.startswith("__")
+                if not key.startswith("__") and key != KEY_VAR
             }
         except ModuleNotFoundError:
             return
@@ -87,80 +155,41 @@ class DbManager:
     async def update_private_file(self, path):
         if self._return:
             return
-        db_path = path.replace(".", "__")
         if await aiopath.exists(path):
-            async with aiopen(path, "rb+") as pf:
+            async with aiopen(path, "rb") as pf:
                 pf_bin = await pf.read()
-            await self.db.settings.files.update_one(
-                {"_id": TgClient.ID}, {"$set": {db_path: pf_bin}}, upsert=True
-            )
+            await self.save_blob(path, pf_bin)
             if path == "config.py":
                 await self.update_deploy_config()
         else:
-            await self.db.settings.files.update_one(
-                {"_id": TgClient.ID}, {"$unset": {db_path: ""}}, upsert=True
-            )
+            await self.delete_blob(path)
 
     async def update_nzb_config(self):
         if self._return:
             return
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
+        async with aiopen("sabnzbd/SABnzbd.ini", "rb") as pf:
             nzb_conf = await pf.read()
-        await self.db.settings.nzb.replace_one(
-            {"_id": TgClient.ID}, {"SABnzbd__ini": nzb_conf}, upsert=True
-        )
+        await self.save_blob("sabnzbd/SABnzbd.ini", nzb_conf)
 
     async def update_user_data(self, user_id):
         if self._return:
             return
-        data = user_data.get(user_id, {})
-        data = data.copy()
-        for key in ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE"):
+        data = user_data.get(user_id, {}).copy()
+        # Files are kept in GridFS, so the record is plain scalars and can be
+        # replaced wholesale.
+        for key in USER_DOC_KEYS:
             data.pop(key, None)
-        pipeline = [
-            {
-                "$replaceRoot": {
-                    "newRoot": {
-                        "$mergeObjects": [
-                            data,
-                            {
-                                "$arrayToObject": {
-                                    "$filter": {
-                                        "input": {"$objectToArray": "$$ROOT"},
-                                        "as": "field",
-                                        "cond": {
-                                            "$in": [
-                                                "$$field.k",
-                                                [
-                                                    "THUMBNAIL",
-                                                    "RCLONE_CONFIG",
-                                                    "TOKEN_PICKLE",
-                                                ],
-                                            ]
-                                        },
-                                    }
-                                }
-                            },
-                        ]
-                    }
-                }
-            }
-        ]
-        await self.db.users.update_one({"_id": user_id}, pipeline, upsert=True)
+        await self.db.users.replace_one({"_id": user_id}, data, upsert=True)
 
     async def update_user_doc(self, user_id, key, path=""):
         if self._return:
             return
         if path:
-            async with aiopen(path, "rb+") as doc:
+            async with aiopen(path, "rb") as doc:
                 doc_bin = await doc.read()
-            await self.db.users.update_one(
-                {"_id": user_id}, {"$set": {key: doc_bin}}, upsert=True
-            )
+            await self.save_blob(f"users/{user_id}/{key}", doc_bin)
         else:
-            await self.db.users.update_one(
-                {"_id": user_id}, {"$unset": {key: ""}}, upsert=True
-            )
+            await self.delete_blob(f"users/{user_id}/{key}")
 
     async def rss_update_all(self):
         if self._return:

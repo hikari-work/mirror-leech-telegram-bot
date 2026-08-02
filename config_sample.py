@@ -11,6 +11,13 @@ AUTHORIZED_CHATS = ""
 SUDO_USERS = ""
 DATABASE_URL = ""
 DATABASE_NAME = "mltb"
+# DB_ENCRYPTION_KEY encrypts private files (cookies.txt, .netrc, rclone.conf,
+# token.pickle, accounts.zip) before they are stored in MongoDB. It is read from
+# the environment ONLY and is deliberately not a config variable: this file is
+# itself saved to the database, so a key here would sit next to the data it
+# protects. Set any passphrase, e.g. DB_ENCRYPTION_KEY=... in your .env or
+# docker-compose. Leave it unset to store private files as plain bytes.
+# Changing or losing it makes already-stored private files unreadable.
 STATUS_LIMIT = 4
 DEFAULT_UPLOAD = "rc"
 STATUS_UPDATE_INTERVAL = 15
