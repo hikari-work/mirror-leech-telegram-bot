@@ -112,12 +112,14 @@ class Clone(TaskListener):
             await send_message(
                 self.message, COMMAND_USAGE["clone"][0], COMMAND_USAGE["clone"][1]
             )
+            await self.register_batch_failure("No link provided")
             return
         LOGGER.info(self.link)
         try:
             await self.before_start()
         except Exception as e:
             await send_message(self.message, e)
+            await self.register_batch_failure(str(e))
             return
         await self._proceed_to_clone(sync)
 

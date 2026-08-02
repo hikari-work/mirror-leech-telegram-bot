@@ -76,6 +76,24 @@ class TelegramUploader:
         self._last_uploaded = current
         self._processed_bytes += chunk_size
 
+    async def _wait_flood(self, func, *args, **kwargs):
+        """Run a telegram call, waiting out any flood limit instead of failing.
+
+        Telegram answers with FloodWait on almost any call once the account is
+        rate limited, including the very first message of an upload. Those are
+        transient, so wait the requested time and try again rather than killing
+        the task. Returns None if the task gets cancelled while waiting.
+        """
+        while True:
+            if self._listener.is_cancelled:
+                return None
+            try:
+                return await func(*args, **kwargs)
+            except (FloodWait, FloodPremiumWait) as f:
+                name = getattr(func, "__name__", str(func))
+                LOGGER.warning(f"Rate limited on {name}: waiting {f.value}s. {f}")
+                await sleep(f.value * 1.3)
+
     async def _user_settings(self):
         self._media_group = self._listener.user_dict.get("MEDIA_GROUP", False) or (
             Config.MEDIA_GROUP
@@ -104,35 +122,48 @@ class TelegramUploader:
             )
             try:
                 if self._user_session:
-                    self._sent_msg = await TgClient.user.send_message(
+                    self._sent_msg = await self._wait_flood(
+                        TgClient.user.send_message,
                         chat_id=self._listener.up_dest,
                         text=msg,
                         message_thread_id=self._listener.chat_thread_id,
                         disable_notification=True,
                     )
                 else:
-                    self._sent_msg = await self._listener.client.send_message(
+                    self._sent_msg = await self._wait_flood(
+                        self._listener.client.send_message,
                         chat_id=self._listener.up_dest,
                         text=msg,
                         message_thread_id=self._listener.chat_thread_id,
                         disable_notification=True,
                     )
-                    self._is_private = self._sent_msg.chat.type.name == "PRIVATE"
+                    if self._sent_msg is not None:
+                        self._is_private = self._sent_msg.chat.type.name == "PRIVATE"
+                if self._sent_msg is None:
+                    # only reachable when the task was cancelled mid wait
+                    return False
             except Exception as e:
                 await self._listener.on_upload_error(str(e))
                 return False
             finally:
                 self._base_msg = self._sent_msg
         elif self._user_session:
-            self._sent_msg = await TgClient.user.get_messages(
-                chat_id=self._listener.message.chat.id, message_ids=self._listener.mid
+            self._sent_msg = await self._wait_flood(
+                TgClient.user.get_messages,
+                chat_id=self._listener.message.chat.id,
+                message_ids=self._listener.mid,
             )
             if self._sent_msg is None:
-                self._sent_msg = await TgClient.user.send_message(
+                if self._listener.is_cancelled:
+                    return False
+                self._sent_msg = await self._wait_flood(
+                    TgClient.user.send_message,
                     chat_id=self._listener.message.chat.id,
                     text="Deleted Cmd Message! Don't delete the cmd message again!",
                     disable_notification=True,
                 )
+                if self._sent_msg is None:
+                    return False
         else:
             self._sent_msg = self._listener.message
         return True
@@ -188,12 +219,14 @@ class TelegramUploader:
         ]
         for i in range(0, len(inputs), 10):
             batch = inputs[i : i + 10]
-            self._sent_msg = (
-                await self._sent_msg.reply_media_group(
-                    media=batch,
-                    disable_notification=True,
-                )
-            )[-1]
+            sent = await self._wait_flood(
+                self._sent_msg.reply_media_group,
+                media=batch,
+                disable_notification=True,
+            )
+            if sent is None:
+                return
+            self._sent_msg = sent[-1]
 
     @property
     def _group_client(self):
@@ -202,8 +235,10 @@ class TelegramUploader:
         return TgClient.user
 
     async def _get_message(self, chat_id, message_id):
-        return await self._group_client.get_messages(
-            chat_id=chat_id, message_ids=message_id
+        return await self._wait_flood(
+            self._group_client.get_messages,
+            chat_id=chat_id,
+            message_ids=message_id,
         )
 
     async def _copy_group_to_clone_dumps(self, from_chat_id, message_id):
@@ -214,7 +249,8 @@ class TelegramUploader:
         """
         for ch, ch_data in list(self._listener.clone_dump_chats.items()):
             try:
-                res = await TgClient.bot.copy_media_group(
+                res = await self._wait_flood(
+                    TgClient.bot.copy_media_group,
                     chat_id=ch,
                     from_chat_id=from_chat_id,
                     message_id=message_id,
@@ -222,6 +258,8 @@ class TelegramUploader:
                     reply_to_message_id=ch_data["last_sent_msg"]
                     or ch_data["thread_id"],
                 )
+                if res is None:
+                    return
                 self._listener.clone_dump_chats[ch]["last_sent_msg"] = res[-1].id
             except Exception as e:
                 LOGGER.error(
@@ -249,12 +287,15 @@ class TelegramUploader:
             # telegram reclassified something on its way out, leave them alone
             LOGGER.info("Skipping album, not every message is a photo or video")
             return
-        msgs_list = await self._group_client.send_media_group(
+        msgs_list = await self._wait_flood(
+            self._group_client.send_media_group,
             chat_id=msgs[0].chat.id,
             media=media,
             reply_to_message_id=msgs[0].reply_to_message_id,
             disable_notification=True,
         )
+        if msgs_list is None:
+            return
         for msg in msgs:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -269,9 +310,13 @@ class TelegramUploader:
         if self._listener.hybrid_leech and self._user_session:
             # the album was sent by the bot client, rebind so the next reply
             # keeps using the session the current file needs
-            self._sent_msg = await TgClient.user.get_messages(
-                chat_id=self._sent_msg.chat.id, message_ids=self._sent_msg.id
+            rebound = await self._wait_flood(
+                TgClient.user.get_messages,
+                chat_id=self._sent_msg.chat.id,
+                message_ids=self._sent_msg.id,
             )
+            if rebound is not None:
+                self._sent_msg = rebound
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
@@ -279,12 +324,15 @@ class TelegramUploader:
     async def _send_media_group(self, subkey, key, msgs):
         for index, msg in enumerate(msgs):
             msgs[index] = await self._get_message(msg[0], msg[1])
-        msgs_list = await self._group_client.send_media_group(
+        msgs_list = await self._wait_flood(
+            self._group_client.send_media_group,
             chat_id=msgs[0].chat.id,
             media=self._get_input_media(subkey, key),
             reply_to_message_id=msgs[0].reply_to_message_id,
             disable_notification=True,
         )
+        if msgs_list is None:
+            return
         for msg in msgs:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -346,14 +394,16 @@ class TelegramUploader:
                                     if len(msgs) > 1:
                                         await self._send_media_group(subkey, key, msgs)
                     if self._listener.hybrid_leech and self._listener.user_transmission:
-                        self._user_session = f_size > 2097152000 
+                        self._user_session = f_size > 2097152000
                         if self._user_session:
-                            self._sent_msg = await TgClient.user.get_messages(
+                            self._sent_msg = await self._wait_flood(
+                                TgClient.user.get_messages,
                                 chat_id=self._sent_msg.chat.id,
                                 message_ids=self._sent_msg.id,
                             )
                         else:
-                            self._sent_msg = await self._listener.client.get_messages(
+                            self._sent_msg = await self._wait_flood(
+                                self._listener.client.get_messages,
                                 chat_id=self._sent_msg.chat.id,
                                 message_ids=self._sent_msg.id,
                             )

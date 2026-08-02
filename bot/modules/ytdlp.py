@@ -405,6 +405,9 @@ class YtDlp(TaskListener):
 
         await self.get_tag(text)
 
+        # hand the next bulk item off before any validation below can bail out
+        await self.run_multi(input_list, YtDlp)
+
         opt = opt or self.user_dict.get("YT_DLP_OPTIONS") or Config.YT_DLP_OPTIONS
 
         if not self.link and (reply_to := self.message.reply_to_message):
@@ -415,6 +418,7 @@ class YtDlp(TaskListener):
                 self.message, COMMAND_USAGE["yt"][0], COMMAND_USAGE["yt"][1]
             )
             await self.remove_from_same_dir()
+            await self.register_batch_failure("Invalid or missing URL")
             return
 
         if "mdisk.me" in self.link:
@@ -425,6 +429,7 @@ class YtDlp(TaskListener):
         except Exception as e:
             await send_message(self.message, e)
             await self.remove_from_same_dir()
+            await self.register_batch_failure(str(e))
             return
         options = {"usenetrc": True, "cookiefile": "cookies.txt"}
         if opt:
@@ -445,14 +450,14 @@ class YtDlp(TaskListener):
             msg = str(e).replace("<", " ").replace(">", " ")
             await send_message(self.message, f"{self.tag} {msg}")
             await self.remove_from_same_dir()
+            await self.register_batch_failure(msg)
             return
-        finally:
-            await self.run_multi(input_list, YtDlp)
 
         if not qual:
             qual = await YtSelection(self).get_quality(result)
             if qual is None:
                 await self.remove_from_same_dir()
+                await self.register_batch_failure("Quality selection cancelled or failed")
                 return
 
         LOGGER.info(f"Downloading with YT-DLP: {self.link}")

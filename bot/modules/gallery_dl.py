@@ -171,6 +171,10 @@ class GalleryDL(TaskListener):
 
         await self.get_tag(text)
 
+        # hand the next bulk item off before any validation below can bail out,
+        # otherwise a single bad link stops the whole batch from continuing
+        await self.run_multi(input_list, GalleryDL)
+
         opt = (
             opt or self.user_dict.get("GALLERY_DL_OPTIONS") or Config.GALLERY_DL_OPTIONS
         )
@@ -185,6 +189,7 @@ class GalleryDL(TaskListener):
                 COMMAND_USAGE["gdl"][1],
             )
             await self.remove_from_same_dir()
+            await self.register_batch_failure("Invalid or missing URL")
             return
 
         if not _check_gallery_dl_link(self.link):
@@ -193,6 +198,7 @@ class GalleryDL(TaskListener):
                 f"{self.tag} This link is not supported by gallery-dl.",
             )
             await self.remove_from_same_dir()
+            await self.register_batch_failure("Unsupported link for gallery-dl")
             return
 
         try:
@@ -200,9 +206,8 @@ class GalleryDL(TaskListener):
         except Exception as e:
             await send_message(self.message, e)
             await self.remove_from_same_dir()
+            await self.register_batch_failure(str(e))
             return
-
-        await self.run_multi(input_list, GalleryDL)
 
         LOGGER.info(f"Downloading with gallery-dl: {self.link}")
         gdl = GalleryDLHelper(self)

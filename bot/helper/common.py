@@ -611,6 +611,26 @@ class TaskConfig:
             status += f", {errors} failed"
         await edit_message(batch["anchor"], status)
 
+    async def register_batch_failure(self, error):
+        """Account for a task that died before the download/upload listeners ran.
+
+        new_event bails out early on dead links, failed resolvers and the like.
+        Those paths never reach on_download_error, so without recording them the
+        batch counter never adds up: the anchor stays stuck at "x/y" and the
+        multi tag leaks, which makes the rest of the batch look cancelled.
+        """
+        batch = self._batch()
+        if not batch:
+            return
+        batch["errors"].append(
+            {
+                "name": self.name or (self.link if isinstance(self.link, str) else "") or "Unknown",
+                "error": str(error),
+            }
+        )
+        await self.update_batch_progress()
+        await self.finalize_batch()
+
     async def finalize_batch(self):
         batch = self._batch()
         if not batch or batch["done"] + len(batch["errors"]) < batch["total"]:
