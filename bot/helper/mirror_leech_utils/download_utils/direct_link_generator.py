@@ -873,9 +873,15 @@ def terabox(url):
     if not details["title"]:
         details["title"] = details["contents"][0]["filename"]
 
-    if len(details["contents"]) == 1:
-        return details["contents"][0]["url"]
+    header = [
+        f"User-Agent: {user_agent}",
+        "Referer: https://www.terabox.com/"
+    ]
 
+    if len(details["contents"]) == 1:
+        return details["contents"][0]["url"], header
+
+    details["header"] = "\n".join(header)
     return details
 
 
