@@ -873,10 +873,21 @@ def terabox(url):
     if not details["title"]:
         details["title"] = details["contents"][0]["filename"]
 
+    download_info = response.get("download") or {}
+
+    cookie = (download_info.get("cookie") or "").strip()
+    if not cookie:
+        name = (download_info.get("cookie_name") or "").strip()
+        value = (download_info.get("cookie_value") or "").strip()
+        if name and value:
+            cookie = f"{name}={value}"
+
     header = [
-        f"User-Agent: {user_agent}",
-        "Referer: https://www.terabox.com/"
+        f"User-Agent: {(download_info.get('user_agent') or '').strip() or user_agent}",
+        "Referer: https://www.terabox.com/",
     ]
+    if cookie:
+        header.append(f"Cookie: {cookie}")
 
     if len(details["contents"]) == 1:
         return details["contents"][0]["url"], header
