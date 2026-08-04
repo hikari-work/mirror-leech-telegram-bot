@@ -17,6 +17,10 @@ from ..helper.ext_utils.bot_utils import (
 from ..helper.ext_utils.links_utils import is_url
 from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ..helper.listeners.task_listener import TaskListener
+from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
+    is_vidoy_link,
+    vidoy_resolve,
+)
 from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
 from ..helper.telegram_helper.button_build import ButtonMaker
 from ..helper.telegram_helper.message_utils import (
@@ -423,6 +427,23 @@ class YtDlp(TaskListener):
 
         if "mdisk.me" in self.link:
             self.name, self.link = await _mdisk(self.link, self.name)
+        elif is_vidoy_link(self.link):
+            # yt-dlp has no Vidoy extractor, but it handles the CDN stream the
+            # API hands back - both the MP4 and the HLS ladder. The MP4 CDN 403s
+            # without a Referer, so its headers ride along in the options.
+            try:
+                self.name, self.link, headers = await sync_to_async(
+                    vidoy_resolve, self.link, self.name
+                )
+                opt = {
+                    **opt,
+                    "http_headers": {**opt.get("http_headers", {}), **headers},
+                }
+            except Exception as e:
+                await send_message(self.message, e)
+                await self.remove_from_same_dir()
+                await self.register_batch_failure(str(e))
+                return
 
         try:
             await self.before_start()

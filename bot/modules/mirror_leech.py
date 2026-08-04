@@ -51,6 +51,9 @@ from ..helper.mirror_leech_utils.download_utils.rclone_download import (
 from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
+from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
+    add_ytdlp_download,
+)
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
 from ..helper.telegram_helper.bot_commands import BotCommands
 
@@ -519,7 +522,12 @@ class Mirror(TaskListener):
                 reply_to, f"{path}/", session
             )
         elif isinstance(self.link, dict):
-            await add_direct_download(self, path)
+            if self.link.get("ytdlp"):
+                # The generator resolved a stream aria2 cannot assemble on its
+                # own, so the download goes through yt-dlp instead.
+                await add_ytdlp_download(self, path)
+            else:
+                await add_direct_download(self, path)
         elif self.is_jd:
             await add_jd_download(self, path)
         elif self.is_qbit:

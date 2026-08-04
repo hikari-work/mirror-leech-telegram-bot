@@ -1,4 +1,5 @@
 from cloudscraper import create_scraper
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import sha256
 from http.cookiejar import MozillaCookieJar
 from json import loads
@@ -168,6 +169,8 @@ def direct_link_generator(link):
         ]
     ):
         return terabox(link)
+    elif is_vidoy_link(link):
+        return vidoy(link)
     elif any(
         x in domain
         for x in [
@@ -830,9 +833,10 @@ def terabox(url):
 
     api_url = "https://api.piyann.me/api/v1/scrape/terabox"
     # Terabox answers a dead/unauthorized dlink with HTTP 200 and a tiny JSON
-    # body, so aria2 happily saves it as the media file. Probe every link before
-    # handing it over and rescrape when it is not real data.
-    max_probe = 8
+    # body, so aria2 happily saves it as the media file. Usually only a couple
+    # of files in a share are affected, so probe them individually and retry
+    # just the broken ones instead of dropping the whole batch.
+    max_probe = 50
     max_attempts = 3
 
     def __build_header(download_info):
@@ -866,11 +870,17 @@ def terabox(url):
                 links.append(value)
         return links
 
-    def __probe(session, link, headers):
+    def __key(file):
+        for key in ("fs_id", "fsid", "id", "md5"):
+            if file.get(key):
+                return str(file[key])
+        return f"{file.get('path', '')}/{file.get('name', '')}"
+
+    def __probe(link, headers):
         """Return (final_url, None) when the link serves the file itself,
         otherwise (None, reason)."""
         try:
-            with session.get(
+            with Session() as session, session.get(
                 link,
                 headers={**headers, "Range": "bytes=0-511"},
                 allow_redirects=True,
@@ -900,79 +910,136 @@ def terabox(url):
         except Exception as e:
             return None, e.__class__.__name__
 
+    def __probe_file(file, headers):
+        """Try every link a file exposes and return the first that works."""
+        link = reason = None
+        for candidate in __links(file):
+            link, reason = __probe(candidate, headers)
+            if link:
+                break
+        return link, reason
+
+    def __probe_files(files, headers):
+        """Probe files concurrently, return ({key: url}, {key: reason})."""
+        resolved, failed = {}, {}
+        with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
+            futures = {
+                pool.submit(__probe_file, file, headers): __key(file) for file in files
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                link, reason = future.result()
+                if link:
+                    resolved[key] = link
+                else:
+                    failed[key] = reason or "unknown error"
+        return resolved, failed
+
+    def __scrape(session):
+        try:
+            response = session.get(
+                api_url,
+                params={"q": sanitized_url},
+                headers={"accept": "application/json"},
+                timeout=60
+            ).json()
+        except Exception as e:
+            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
+
+        if not response.get("success"):
+            error_msg = response.get("error", "Unknown error")
+            raise DirectDownloadLinkException(f"ERROR: {error_msg}")
+
+        files = [file for file in (response.get("files") or []) if __links(file)]
+        if not files:
+            raise DirectDownloadLinkException("ERROR: No download links found")
+
+        return files, __build_header(response.get("download") or {}), response.get(
+            "title", ""
+        )
+
     sanitized_url = __sanitize_url(url)
-    last_error = ""
+    contents = None
+    last_header = None
+    resolved = {}
+    failed = {}
 
     with Session() as session:
         for attempt in range(1, max_attempts + 1):
-            try:
-                response = session.get(
-                    api_url,
-                    params={"q": sanitized_url},
-                    headers={"accept": "application/json"},
-                    timeout=60
-                ).json()
-            except Exception as e:
-                raise DirectDownloadLinkException(
-                    f"ERROR: {e.__class__.__name__}"
-                ) from e
-
-            if not response.get("success"):
-                error_msg = response.get("error", "Unknown error")
-                raise DirectDownloadLinkException(f"ERROR: {error_msg}")
-
-            files = [file for file in (response.get("files") or []) if __links(file)]
-            if not files:
-                raise DirectDownloadLinkException("ERROR: No download links found")
-
-            header = __build_header(response.get("download") or {})
+            files, header, title = __scrape(session)
             headers = __header_dict(header)
 
-            details = {
-                "contents": [],
-                "title": response.get("title", ""),
-                "total_size": 0
-            }
+            if contents is None:
+                contents = files
+                probeable = {__key(file) for file in contents[:max_probe]}
+                pending = set(probeable)
+                if len(contents) > max_probe:
+                    LOGGER.info(
+                        f"Terabox: only the first {max_probe} of {len(contents)} "
+                        "files are verified, the rest are passed through unchecked"
+                    )
+            elif header != last_header:
+                # aria2 gets one header for the whole batch, so links validated
+                # with the previous cookie have to be checked again.
+                LOGGER.info("Terabox: credentials rotated, revalidating every link")
+                pending = set(probeable)
+                resolved.clear()
 
-            for index, file in enumerate(files):
-                links = __links(file)
-                if index < max_probe:
-                    link = None
-                    for candidate in links:
-                        link, last_error = __probe(session, candidate, headers)
-                        if link:
-                            break
-                    if not link:
-                        details = None
-                        break
-                else:
-                    link = links[0]
+            last_header = header
 
-                item = {
-                    "path": ospath.dirname(file.get("path", "")).lstrip("/"),
-                    "filename": file.get("name", ""),
-                    "url": link,
-                }
-                details["contents"].append(item)
-                try:
-                    details["total_size"] += int(file.get("size") or 0)
-                except (TypeError, ValueError):
-                    pass
+            # A rescrape hands out fresh dlinks, so retry only the broken files.
+            retry = [file for file in files if __key(file) in pending]
+            if not retry:
+                break
 
-            if details:
+            good, failed = __probe_files(retry, headers)
+            resolved.update(good)
+            pending = set(failed)
+            if not pending:
                 break
 
             LOGGER.info(
-                f"Terabox link rejected ({last_error}), rescraping "
+                f"Terabox: {len(pending)} link(s) rejected "
+                f"({', '.join(sorted(set(failed.values())))}), rescraping "
                 f"[{attempt}/{max_attempts}]"
             )
             if attempt < max_attempts:
                 sleep(3)
 
-    if not details:
+    details = {"contents": [], "title": title, "total_size": 0}
+    skipped = []
+
+    for index, file in enumerate(contents):
+        key = __key(file)
+        if index < max_probe:
+            if not (link := resolved.get(key)):
+                skipped.append(f"{file.get('name') or key} ({failed.get(key)})")
+                continue
+        else:
+            link = __links(file)[0]
+
+        details["contents"].append(
+            {
+                "path": ospath.dirname(file.get("path", "")).lstrip("/"),
+                "filename": file.get("name", ""),
+                "url": link,
+            }
+        )
+        try:
+            details["total_size"] += int(file.get("size") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    if not details["contents"]:
         raise DirectDownloadLinkException(
-            f"ERROR: Terabox refused the download link ({last_error}). "
+            f"ERROR: Terabox refused the download link ({'; '.join(skipped[:3])}). "
             "The share may need verification or the link has expired, try again later"
+        )
+
+    if skipped:
+        LOGGER.info(
+            f"Terabox: skipping {len(skipped)} unusable file(s) out of "
+            f"{len(contents)}: {'; '.join(skipped)}"
         )
 
     if not details["title"]:
@@ -983,6 +1050,271 @@ def terabox(url):
 
     details["header"] = "\n".join(header)
     return details
+
+
+VIDOY_API = "https://api.piyann.me/api/v1/scrape/vidoy"
+VIDOY_HOST = "vdy.to"
+VIDOY_ATTEMPTS = 3
+VIDOY_DOMAINS = (
+    "vdy.to",
+    "vidoy.com",
+    "vidoy.asia",
+    "vidoy.net",
+    "vidoy.live",
+    "vidoy.me",
+    "vidoy.to",
+)
+
+
+def is_vidoy_link(url):
+    """Match the host itself or a subdomain of it, so a lookalike like
+    notvidoy.com is not mistaken for the real thing."""
+    domain = (urlparse(url).hostname or "").lower()
+    return any(domain == x or domain.endswith(f".{x}") for x in VIDOY_DOMAINS)
+VIDOY_MEDIA_EXTS = frozenset(
+    (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".m3u8")
+)
+
+
+def vidoy_sanitize_url(url):
+    """Vidoy rotates embed domains and only bounces the retired ones through a
+    JS redirect, so aim at the current host directly."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname.lower() if parsed.hostname else ""
+    if not hostname or hostname == VIDOY_HOST:
+        return url
+    return parsed._replace(netloc=VIDOY_HOST).geturl()
+
+
+def vidoy_scrape(session, target, probe=False):
+    """Return (response, reason, retryable). A gateway hiccup is worth another
+    attempt, a removed video is not."""
+    params = {"q": target}
+    if probe:
+        params["probe"] = "true"
+    try:
+        resp = session.get(
+            VIDOY_API,
+            params=params,
+            headers={"accept": "application/json"},
+            timeout=60,
+        )
+    except Exception as e:
+        return None, e.__class__.__name__, True
+
+    try:
+        response = resp.json()
+    except Exception:
+        # A proxy in front of the API answers an outage with an HTML page.
+        return (
+            None,
+            f"HTTP {resp.status_code} (non-JSON response)",
+            resp.status_code >= 500,
+        )
+
+    if not response.get("success"):
+        reason = response.get("error") or f"HTTP {resp.status_code}"
+        return None, reason, resp.status_code >= 500
+    if not (response.get("cdn_url") or "").startswith("http"):
+        return None, "no CDN link in response", False
+    return response, None, False
+
+
+def vidoy_headers(download_info):
+    """Header map the CDN expects. Range is a leftover from the API's own
+    full-file probe rather than something the CDN gates on, so it is dropped
+    and the downloader is left to do its own ranging."""
+    headers = download_info.get("headers")
+    if not isinstance(headers, dict):
+        headers = {}
+    headers = {key: value for key, value in headers.items() if value}
+
+    headers.setdefault(
+        "User-Agent", (download_info.get("user_agent") or "").strip() or user_agent
+    )
+    headers.setdefault(
+        "Referer",
+        (download_info.get("referer") or "").strip() or f"https://{VIDOY_HOST}/",
+    )
+    headers["Accept-Encoding"] = "identity"
+    headers.pop("Range", None)
+    return headers
+
+
+def vidoy_stem(response):
+    """The title without its container suffix. yt-dlp appends the real extension
+    to listener.name, so an MP4 title handed over whole lands as "clip.mp4.mp4"."""
+    title = (response.get("title") or "").strip()
+    stem, ext = ospath.splitext(title)
+    return stem if ext.lower() in VIDOY_MEDIA_EXTS else title
+
+
+def vidoy_resolve(url, name=""):
+    """Resolve a Vidoy page to its raw CDN stream for yt-dlp, which copes with
+    both the MP4 and the HLS variants. Returns (name, link, headers) - the MP4
+    CDN 403s without a Referer, so the headers have to travel with the link."""
+    sanitized = vidoy_sanitize_url(url)
+    targets = [url] if sanitized == url else [url, sanitized]
+    reason = "unknown error"
+
+    with Session() as session:
+        for attempt in range(1, VIDOY_ATTEMPTS + 1):
+            retryable = False
+            for target in targets:
+                response, reason, retryable = vidoy_scrape(session, target)
+                if response:
+                    if not name:
+                        name = vidoy_stem(response)
+                    return (
+                        name,
+                        response["cdn_url"],
+                        vidoy_headers(response.get("download") or {}),
+                    )
+                LOGGER.info(f"Vidoy: {target} rejected by the API ({reason})")
+
+            if not retryable:
+                break
+            LOGGER.info(f"Vidoy: {reason}, retrying [{attempt}/{VIDOY_ATTEMPTS}]")
+            if attempt < VIDOY_ATTEMPTS:
+                sleep(3)
+
+    raise DirectDownloadLinkException(f"ERROR: {reason}")
+
+
+def vidoy(url):
+
+    # The CDN gates on Referer and the minted link carries an expiry, so a stale
+    # or unauthorized request comes back as a ~160 byte error body that aria2
+    # would cheerfully save as the video. Probe the link before handing it over
+    # and rescrape when the CDN turns it down.
+    max_attempts = VIDOY_ATTEMPTS
+
+    def __build_header(download_info):
+        # aria2 takes the header set as "Key: Value" lines.
+        headers = vidoy_headers(download_info)
+        return [f"{key}: {value}" for key, value in sorted(headers.items())]
+
+    def __header_dict(header):
+        headers = {}
+        for line in header:
+            key, _, value = line.partition(":")
+            headers[key.strip()] = value.strip()
+        return headers
+
+    def __filename(response):
+        name = (response.get("title") or "").strip().replace("\\", "/")
+        name = ospath.basename(name).strip()
+        if not name:
+            name = (response.get("video_id") or "").strip() or "vidoy"
+        if not ospath.splitext(name)[1]:
+            subtype = (
+                (response.get("content_type") or "video/mp4")
+                .partition("/")[2]
+                .partition(";")[0]
+                .strip()
+            )
+            name = f"{name}.{subtype or 'mp4'}"
+        return name
+
+    def __hls_link(response):
+        """Some videos only exist as an HLS ladder. The master playlist is a
+        couple hundred bytes of text that aria2 would save as the video, so it
+        has to be spotted before the link is handed over."""
+        link = response.get("cdn_url") or ""
+        if (response.get("bucket") or "").lower().endswith("hls"):
+            return link
+        if urlparse(link).path.lower().endswith((".m3u8", ".m3u")):
+            return link
+        if "mpegurl" in (response.get("content_type") or "").lower():
+            return link
+        return None
+
+    def __probe(link, headers):
+        """Return (final_url, size, None) when the CDN serves the media itself,
+        otherwise (None, 0, reason)."""
+        try:
+            with Session() as session, session.get(
+                link,
+                headers={**headers, "Range": "bytes=0-511"},
+                allow_redirects=True,
+                stream=True,
+                timeout=30,
+            ) as resp:
+                if resp.status_code >= 400:
+                    return None, 0, f"HTTP {resp.status_code}"
+                content_type = resp.headers.get("Content-Type", "").lower()
+                if (
+                    content_type.startswith(("text/", "application/json"))
+                    or "mpegurl" in content_type
+                ):
+                    return None, 0, f"got {content_type} instead of media"
+                if not next(resp.iter_content(512), b""):
+                    return None, 0, "empty response"
+                size = resp.headers.get("Content-Range", "").rpartition("/")[2]
+                return resp.url, int(size) if size.isdigit() else 0, None
+        except Exception as e:
+            return None, 0, e.__class__.__name__
+
+    sanitized_url = vidoy_sanitize_url(url)
+    targets = [url] if sanitized_url == url else [url, sanitized_url]
+    reason = "unknown error"
+
+    with Session() as session:
+        for attempt in range(1, max_attempts + 1):
+            response = None
+            retryable = False
+            for target in targets:
+                response, reason, retryable = vidoy_scrape(session, target, probe=True)
+                if response:
+                    break
+                LOGGER.info(f"Vidoy: {target} rejected by the API ({reason})")
+
+            if response:
+                if hls := __hls_link(response):
+                    # aria2 would save the playlist itself as the video, so this
+                    # one goes to yt-dlp, which muxes the ladder into a file.
+                    return {
+                        "ytdlp": True,
+                        "link": hls,
+                        "name": vidoy_stem(response),
+                        "headers": vidoy_headers(response.get("download") or {}),
+                    }
+                header = __build_header(response.get("download") or {})
+                link, probed_size, reason = __probe(
+                    response["cdn_url"], __header_dict(header)
+                )
+                if link:
+                    break
+                # A minted link is short lived, so a fresh scrape may well work.
+                reason = f"CDN link rejected ({reason})"
+                retryable = True
+
+            if not retryable:
+                raise DirectDownloadLinkException(f"ERROR: {reason}")
+
+            LOGGER.info(f"Vidoy: {reason}, retrying [{attempt}/{max_attempts}]")
+            if attempt < max_attempts:
+                sleep(3)
+        else:
+            raise DirectDownloadLinkException(
+                f"ERROR: Vidoy could not be resolved ({reason}). The link may "
+                "have expired or the video was removed, try again later"
+            )
+
+    try:
+        size = int(response.get("content_length") or 0)
+    except (TypeError, ValueError):
+        size = 0
+
+    filename = __filename(response)
+    return {
+        "contents": [{"path": "", "filename": filename, "url": link}],
+        # The CDN path carries no filename, so the title is the only way to land
+        # the right name and extension - which needs the contents form.
+        "title": ospath.splitext(filename)[0],
+        "total_size": size or probed_size,
+        "header": "\n".join(header),
+    }
 
 
 def filepress(url):

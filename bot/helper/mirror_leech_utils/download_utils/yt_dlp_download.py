@@ -356,3 +356,20 @@ class YoutubeDLHelper:
                 if key == "writethumbnail" and value is True:
                     self.keep_thumb = True
                 self.opts[key] = value
+
+
+async def add_ytdlp_download(listener, path):
+    """Take over a link the direct link generator could only resolve to a stream
+    that has to be muxed rather than fetched whole, such as an HLS ladder. The
+    generator hands back the descriptor as listener.link."""
+    details = listener.link
+    listener.link = details["link"]
+    if not listener.name:
+        listener.name = details.get("name") or ""
+    options = {}
+    # Some CDNs gate the stream on a Referer, so the headers ride with the link.
+    if headers := details.get("headers"):
+        options["http_headers"] = headers
+    await YoutubeDLHelper(listener).add_download(
+        path, details.get("format") or "bv*+ba/b", False, options
+    )
