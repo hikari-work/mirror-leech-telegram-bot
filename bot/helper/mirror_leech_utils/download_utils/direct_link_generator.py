@@ -13,6 +13,7 @@ from urllib3.util.retry import Retry
 from uuid import uuid4
 from base64 import b64decode, b64encode
 
+from .... import LOGGER
 from ....core.config_manager import Config
 from ...ext_utils.exceptions import DirectDownloadLinkException
 from ...ext_utils.help_messages import PASSWORD_ERROR_MESSAGE
@@ -827,67 +828,155 @@ def terabox(url):
 
         return url
 
-    sanitized_url = __sanitize_url(url)
     api_url = "https://api.piyann.me/api/v1/scrape/terabox"
+    # Terabox answers a dead/unauthorized dlink with HTTP 200 and a tiny JSON
+    # body, so aria2 happily saves it as the media file. Probe every link before
+    # handing it over and rescrape when it is not real data.
+    max_probe = 8
+    max_attempts = 3
 
-    try:
-        with Session() as session:
-            response = session.get(
-                api_url,
-                params={"q": sanitized_url},
-                headers={"accept": "application/json"},
-                timeout=60
-            ).json()
-    except Exception as e:
-        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
+    def __build_header(download_info):
+        cookie = (download_info.get("cookie") or "").strip()
+        if not cookie:
+            name = (download_info.get("cookie_name") or "").strip()
+            value = (download_info.get("cookie_value") or "").strip()
+            if name and value:
+                cookie = f"{name}={value}"
 
-    if not response.get("success"):
-        error_msg = response.get("error", "Unknown error")
-        raise DirectDownloadLinkException(f"ERROR: {error_msg}")
+        header = [
+            f"User-Agent: {(download_info.get('user_agent') or '').strip() or user_agent}",
+            "Referer: https://www.terabox.com/",
+        ]
+        if cookie:
+            header.append(f"Cookie: {cookie}")
+        return header
 
-    files = response.get("files", [])
-    if not files:
-        raise DirectDownloadLinkException("ERROR: No files found in the share link")
+    def __header_dict(header):
+        headers = {}
+        for line in header:
+            key, _, value = line.partition(":")
+            headers[key.strip()] = value.strip()
+        return headers
 
-    details = {
-        "contents": [],
-        "title": response.get("title", ""),
-        "total_size": 0
-    }
+    def __links(file):
+        links = []
+        for key in ("dlink", "link", "url", "download_link", "download_url"):
+            value = file.get(key)
+            if isinstance(value, str) and value.startswith("http") and value not in links:
+                links.append(value)
+        return links
 
-    for file in files:
-        if not file.get("dlink"):
-            continue
+    def __probe(session, link, headers):
+        """Return (final_url, None) when the link serves the file itself,
+        otherwise (None, reason)."""
+        try:
+            with session.get(
+                link,
+                headers={**headers, "Range": "bytes=0-511"},
+                allow_redirects=True,
+                stream=True,
+                timeout=30,
+            ) as resp:
+                if resp.status_code >= 400:
+                    return None, f"HTTP {resp.status_code}"
+                chunk = next(resp.iter_content(512), b"")
+                if not chunk:
+                    return None, "empty response"
+                if chunk.lstrip().startswith(b"{"):
+                    try:
+                        data = loads(chunk.decode("utf-8", "ignore"))
+                    except Exception:
+                        data = None
+                    if isinstance(data, dict) and ("errno" in data or "errmsg" in data):
+                        errno = data.get("errno")
+                        errmsg = (data.get("errmsg") or "").strip()
+                        return None, f"errno={errno} {errmsg}".strip()
+                    size = resp.headers.get("Content-Range", "").rpartition("/")[2]
+                    if not size.isdigit():
+                        size = resp.headers.get("Content-Length", "")
+                    if size.isdigit() and int(size) < 2048:
+                        return None, "tiny json response instead of file"
+                return resp.url, None
+        except Exception as e:
+            return None, e.__class__.__name__
 
-        item = {
-            "path": ospath.dirname(file.get("path", "")).lstrip("/"),
-            "filename": file.get("name", ""),
-            "url": file["dlink"],
-        }
-        details["contents"].append(item)
-        details["total_size"] += file.get("size", 0)
+    sanitized_url = __sanitize_url(url)
+    last_error = ""
 
-    if not details["contents"]:
-        raise DirectDownloadLinkException("ERROR: No download links found")
+    with Session() as session:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = session.get(
+                    api_url,
+                    params={"q": sanitized_url},
+                    headers={"accept": "application/json"},
+                    timeout=60
+                ).json()
+            except Exception as e:
+                raise DirectDownloadLinkException(
+                    f"ERROR: {e.__class__.__name__}"
+                ) from e
+
+            if not response.get("success"):
+                error_msg = response.get("error", "Unknown error")
+                raise DirectDownloadLinkException(f"ERROR: {error_msg}")
+
+            files = [file for file in (response.get("files") or []) if __links(file)]
+            if not files:
+                raise DirectDownloadLinkException("ERROR: No download links found")
+
+            header = __build_header(response.get("download") or {})
+            headers = __header_dict(header)
+
+            details = {
+                "contents": [],
+                "title": response.get("title", ""),
+                "total_size": 0
+            }
+
+            for index, file in enumerate(files):
+                links = __links(file)
+                if index < max_probe:
+                    link = None
+                    for candidate in links:
+                        link, last_error = __probe(session, candidate, headers)
+                        if link:
+                            break
+                    if not link:
+                        details = None
+                        break
+                else:
+                    link = links[0]
+
+                item = {
+                    "path": ospath.dirname(file.get("path", "")).lstrip("/"),
+                    "filename": file.get("name", ""),
+                    "url": link,
+                }
+                details["contents"].append(item)
+                try:
+                    details["total_size"] += int(file.get("size") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+            if details:
+                break
+
+            LOGGER.info(
+                f"Terabox link rejected ({last_error}), rescraping "
+                f"[{attempt}/{max_attempts}]"
+            )
+            if attempt < max_attempts:
+                sleep(3)
+
+    if not details:
+        raise DirectDownloadLinkException(
+            f"ERROR: Terabox refused the download link ({last_error}). "
+            "The share may need verification or the link has expired, try again later"
+        )
 
     if not details["title"]:
         details["title"] = details["contents"][0]["filename"]
-
-    download_info = response.get("download") or {}
-
-    cookie = (download_info.get("cookie") or "").strip()
-    if not cookie:
-        name = (download_info.get("cookie_name") or "").strip()
-        value = (download_info.get("cookie_value") or "").strip()
-        if name and value:
-            cookie = f"{name}={value}"
-
-    header = [
-        f"User-Agent: {(download_info.get('user_agent') or '').strip() or user_agent}",
-        "Referer: https://www.terabox.com/",
-    ]
-    if cookie:
-        header.append(f"Cookie: {cookie}")
 
     if len(details["contents"]) == 1:
         return details["contents"][0]["url"], header
