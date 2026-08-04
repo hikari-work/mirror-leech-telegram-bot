@@ -1121,9 +1121,10 @@ def vidoy_scrape(session, target, probe=False):
 
 
 def vidoy_headers(download_info):
-    """Header map the CDN expects. Range is a leftover from the API's own
-    full-file probe rather than something the CDN gates on, so it is dropped
-    and the downloader is left to do its own ranging."""
+    """Header map the CDN expects. Some of the MP4 hosts refuse a request that
+    carries no Range at all - mp4-05 answers 403 where mp4-06 answers 200 - so
+    an open-ended Range is kept. aria2 overrides it per connection and yields a
+    file byte-identical to a single-connection fetch."""
     headers = download_info.get("headers")
     if not isinstance(headers, dict):
         headers = {}
@@ -1137,7 +1138,7 @@ def vidoy_headers(download_info):
         (download_info.get("referer") or "").strip() or f"https://{VIDOY_HOST}/",
     )
     headers["Accept-Encoding"] = "identity"
-    headers.pop("Range", None)
+    headers.setdefault("Range", "bytes=0-")
     return headers
 
 
