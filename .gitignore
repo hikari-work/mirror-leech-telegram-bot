@@ -18,3 +18,4 @@ downloads/*
 user_sessions.json
 __pycache__/
 /user_session_plan.md
+.idea/

@@ -70,7 +70,6 @@ class MegaDownloadHelper:
         self._speed = 0
         self._last_time = 0.0
         self._last_bytes = 0
-        self._restarts = 0
         self._proxy = ""
         self._request_proxy = None
 
@@ -186,6 +185,9 @@ class MegaDownloadHelper:
         await makedirs(ospath.dirname(dest), exist_ok=True)
         aes_key, nonce, _ = unpack_file_key(item["key"])
         progress = None
+        # Budgeted per file: a folder share is thousands of files, and one
+        # spent budget must not condemn every file that comes after it.
+        restarts = 0
 
         while True:
             try:
@@ -228,17 +230,26 @@ class MegaDownloadHelper:
                     # would not change the address this request comes from -
                     # it would only stall every file for the reconnect timeout.
                     raise
-                if self._restarts >= int(Config.MEGA_MAX_RESTARTS or 0):
+                if restarts >= int(Config.MEGA_MAX_RESTARTS or 0):
                     raise
-                self._restarts += 1
+                restarts += 1
                 LOGGER.info(
                     f"Mega: {e} on {item['name']}, rotating the egress IP "
-                    f"[{self._restarts}/{Config.MEGA_MAX_RESTARTS}]"
+                    f"[{restarts}/{Config.MEGA_MAX_RESTARTS}]"
                 )
                 # Progress is deliberately kept: the bytes already written are
                 # valid plaintext, so the retry resumes rather than restarts.
                 if not await restart_warp():
-                    raise ConnectionError("WARP restart failed, cannot rotate IP")
+                    # The tunnel came back up but the proxy carries no traffic,
+                    # or the tunnel never reconnected. Either way rotation is
+                    # off the table, so fall back to a direct download for this
+                    # file and every file after it.
+                    LOGGER.warning(
+                        "Mega: WARP restart failed, falling back to direct download - "
+                        "further quota errors will not be recoverable"
+                    )
+                    self._proxy = ""
+                    self._request_proxy = None
                 await sleep(3)
                 # The CDN URL is one-shot, IP-locked, and dies after rotation:
                 # reuse returns 403 with no body. It must be re-resolved from

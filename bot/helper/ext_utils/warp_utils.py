@@ -33,6 +33,9 @@ PROXY_WAIT = 20
 _restart_lock = Lock()
 _last_restart = 0.0
 _last_ip = ""
+# Whether the last restart left behind a proxy that actually carries traffic.
+# Callers inside the cooldown are told this rather than an unconditional yes.
+_last_ok = False
 
 
 def warp_proxy_url():
@@ -184,13 +187,13 @@ async def _reconnect():
 
 async def restart_warp(force=False):
     """Reconnect WARP to get a different egress IP. Returns True if the tunnel
-    came back up.
+    came back up and traffic flows through the proxy.
 
     Serialised and rate-limited: when a folder download hits quota on several
     files at once they all end up here within the same second, and one restart
     answers all of them. Pass force=True to bypass the cooldown.
     """
-    global _last_restart, _last_ip
+    global _last_restart, _last_ip, _last_ok
 
     if not Config.WARP_ENABLED:
         return False
@@ -199,7 +202,7 @@ async def restart_warp(force=False):
         # A restart that another task just finished is this task's restart too.
         if not force and (time() - _last_restart) < RESTART_COOLDOWN:
             LOGGER.info("WARP: reusing the restart that just happened")
-            return True
+            return _last_ok
 
         before = await current_egress_ip() or _last_ip
         LOGGER.info(f"WARP: restarting the tunnel (egress was {before or 'unknown'})")
@@ -207,9 +210,15 @@ async def restart_warp(force=False):
         if not await _reconnect():
             LOGGER.error("WARP: the tunnel did not reconnect")
             _last_restart = time()
+            _last_ok = False
             return False
 
-        await ensure_proxy_mode()
+        if not await ensure_proxy_mode():
+            LOGGER.error("WARP: the tunnel reconnected but the proxy is unusable")
+            _last_restart = time()
+            _last_ok = False
+            return False
+
         after = await current_egress_ip()
 
         # Cloudflare often hands back the same egress on a plain reconnect.
@@ -220,11 +229,16 @@ async def restart_warp(force=False):
             if not ok:
                 LOGGER.warning(f"WARP: key rotation failed: {out}")
             elif await _reconnect():
-                await ensure_proxy_mode()
+                if not await ensure_proxy_mode():
+                    LOGGER.error("WARP: the tunnel reconnected but the proxy is unusable after key rotation")
+                    _last_restart = time()
+                    _last_ok = False
+                    return False
                 after = await current_egress_ip() or after
 
         _last_restart = time()
         _last_ip = after or before
+        _last_ok = True
 
         if after and before and after == before:
             LOGGER.warning(f"WARP: egress IP is still {after}")

@@ -77,6 +77,7 @@ def warp(monkeypatch):
     module.Config = Config
     module._last_restart = 0.0
     module._last_ip = ""
+    module._last_ok = False
     monkeypatch.setattr(module, "sleep", _no_sleep)
     return module
 
@@ -182,6 +183,36 @@ async def test_concurrent_restarts_collapse_into_one(warp, monkeypatch):
 
     assert all(results)
     assert fake.reconnects == 1
+
+
+async def test_restart_fails_when_the_proxy_carries_no_traffic(warp, monkeypatch):
+    """The bug that failed 2153 files in one go: warp-cli reported Connected,
+    so the restart was called a success, while the SOCKS listener behind it
+    swallowed every request. The caller retried into it and got 403 each time."""
+    fake = _Warp(warp, monkeypatch, ["1.1.1.1", "2.2.2.2"])
+
+    async def unusable():
+        return False
+
+    monkeypatch.setattr(warp, "ensure_proxy_mode", unusable)
+
+    assert await warp.restart_warp() is False
+
+
+async def test_cooldown_propagates_the_last_failure(warp, monkeypatch):
+    """A failed restart must tell the callers that pile up behind it the truth.
+    Reporting the stale success would send each of them back into a dead
+    proxy for as long as the cooldown lasts."""
+    fake = _Warp(warp, monkeypatch, ["1.1.1.1", "2.2.2.2"])
+
+    async def unusable():
+        return False
+
+    monkeypatch.setattr(warp, "ensure_proxy_mode", unusable)
+
+    assert await warp.restart_warp() is False
+    assert await warp.restart_warp() is False  # inside the cooldown
+    assert fake.reconnects == 1  # the second caller did not bounce it again
 
 
 async def test_force_bypasses_the_cooldown(warp, monkeypatch):
