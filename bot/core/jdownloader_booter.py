@@ -19,6 +19,7 @@ class JDownloader(MyJdApi):
         self._device_name = ""
         self.is_connected = False
         self.error = "JDownloader Credentials not provided!"
+        self._boot_attempts = 0
 
     @new_task
     async def boot(self):
@@ -85,7 +86,18 @@ class JDownloader(MyJdApi):
         _, __, code = await cmd_exec(cmd, shell=True)
         self.is_connected = False
         if code != -9:
+            self._boot_attempts += 1
+            if self._boot_attempts >= 3:
+                LOGGER.error(
+                    f"JDownloader exited {self._boot_attempts} times (last code: {code}). "
+                    "Giving up to avoid restart loop."
+                )
+                self.error = f"JDownloader failed to start (exit code {code})"
+                return
+            LOGGER.warning(f"JDownloader exited with code {code}, restarting (attempt {self._boot_attempts}/3)...")
             await self.boot()
+        else:
+            self._boot_attempts = 0
 
 
 jdownloader = JDownloader()
