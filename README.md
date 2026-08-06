@@ -216,7 +216,8 @@ programming in Python.
 > shrdsk.me (
 > sharedisk.io), akmfiles.com, wetransfer.com, pcloud.link, gofile.io (file/folders), easyupload.io, mdisk.me (with
 > ytdl),
-> tmpsend.com, qiwi.gg, berkasdrive.com, mp4upload.com, terabox.com (videos only file/folders).
+> tmpsend.com, qiwi.gg, berkasdrive.com, mp4upload.com, terabox.com (videos only file/folders),
+> mega.nz / mega.co.nz (folder shares, needs `MEGA_PROXY_URL`).
 
 </details>
 </details>
@@ -326,6 +327,10 @@ options [HERE](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/YoutubeDL.py#
 - `ALLDEBRID_API_KEY` (`Str`): Alldebrid api key.
 
 - `BUZZHEAVIER_ACCOUNT_ID` (`Str`): Buzzheavier account ID.
+
+- `MEGA_PROXY_URL` (`Str`): Base URL of a mega-proxy Worker deployment, e.g. `https://mega-proxy.example.workers.dev`. Mega encrypts files client-side, so its CDN only ever serves ciphertext — the Worker decrypts the stream in flight and hands out plain links aria2 can read. Leave empty to reject Mega links.
+
+- `MEGA_PROXY_API_KEY` (`Str`): The `API_KEY` secret set on that Worker. It authenticates the listing and token calls; the resulting download links carry no key and need no auth of their own.
 
 - `USE_SERVICE_ACCOUNTS` (`Bool`): Whether to use Service Accounts or not, with google-api-python-client. For this to work
 see [Using Service Accounts](https://github.com/anasty17/mirror-leech-telegram-bot#generate-service-accounts-what-is-service-account) section below. Default is `False`.

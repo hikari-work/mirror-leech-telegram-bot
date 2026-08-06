@@ -27,6 +27,11 @@ ALLDEBRID_API_KEY = ""
 BUZZHEAVIER_ACCOUNT_ID = ""
 BUZZHEAVIER_FOLDER_ID = ""
 GOFILE_API_KEY = ""
+# Mega links are only downloadable through a mega-proxy Worker deployment: Mega
+# encrypts files client-side, so the CDN serves ciphertext and the proxy is what
+# decrypts the stream. Leave empty to reject Mega links.
+MEGA_PROXY_URL = ""
+MEGA_PROXY_API_KEY = ""
 EXCLUDED_EXTENSIONS = ""
 INCLUDED_EXTENSIONS = ""
 INCOMPLETE_TASK_NOTIFIER = False

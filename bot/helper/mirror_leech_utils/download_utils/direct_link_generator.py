@@ -9,7 +9,7 @@ from re import findall, match, search
 from requests import Session, post, get
 from requests.adapters import HTTPAdapter
 from time import sleep, time
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote, unquote
 from urllib3.util.retry import Retry
 from uuid import uuid4
 from base64 import b64decode, b64encode
@@ -171,6 +171,8 @@ def direct_link_generator(link):
         return terabox(link)
     elif is_vidoy_link(link):
         return vidoy(link)
+    elif is_mega_link(link):
+        return mega(link)
     elif any(
         x in domain
         for x in [
@@ -1050,6 +1052,303 @@ def terabox(url):
 
     details["header"] = "\n".join(header)
     return details
+
+
+MEGA_DOMAINS = ("mega.nz", "mega.co.nz", "mega.io")
+MEGA_ATTEMPTS = 3
+# The proxy caps a token at 24h. A queued task can sit for hours before aria2
+# ever touches the link, so mint at that ceiling rather than the 1h default.
+MEGA_TOKEN_TTL = 86400
+# Every mint makes the proxy resolve a CDN URL against Mega, which is the call
+# Mega rate-limits hardest. Four at a time keeps a large folder quick without
+# walking into a -4.
+MEGA_MINT_WORKERS = 4
+
+# What the proxy's status codes mean to someone reading a Telegram message.
+MEGA_PROXY_ERRORS = {
+    401: "the proxy rejected MEGA_PROXY_API_KEY",
+    403: "Mega denied access to this share",
+    404: "the share or file no longer exists",
+    410: "the file was taken down",
+    429: "Mega bandwidth quota is exhausted, try again later",
+    503: "the proxy is misconfigured, or Mega asked for a retry",
+}
+
+
+def is_mega_link(url):
+    """Match the host itself or a subdomain of it, so megaupload.nz - an
+    unrelated host that is already listed as dead - is not caught here."""
+    domain = (urlparse(url).hostname or "").lower()
+    return any(domain == x or domain.endswith(f".{x}") for x in MEGA_DOMAINS)
+
+
+def mega_parse_link(url):
+    """Split a share link into (share_handle, share_key, target_handle).
+
+    Both layouts are accepted, and in each of them the key lives in the
+    fragment - the part a browser never sends to a server, which is the whole
+    reason Mega itself cannot read the file:
+
+        https://mega.nz/folder/<handle>#<key>[/file/<h>|/folder/<h>]
+        https://mega.nz/#F!<handle>!<key>[!<h>]                  (pre-2019)
+
+    ``target_handle`` is the node the link points at inside the share, or ""
+    when the link is the share root.
+    """
+    parsed = urlparse(url)
+    fragment = unquote(parsed.fragment or "").strip()
+    segments = [s for s in (parsed.path or "").split("/") if s]
+
+    if segments and segments[0] == "folder":
+        # Everything after the '#' is fragment, so a link pointing inside the
+        # share carries its "/file/<h>" suffix there, not in the path.
+        bits = fragment.split("/")
+        target = bits[2] if len(bits) > 2 and bits[1] in ("file", "folder") else ""
+        return (segments[1] if len(segments) > 1 else ""), bits[0], target
+
+    if fragment.startswith("F!"):
+        # The trailing handle is a file in some old links and a folder in
+        # others; which one it is only becomes clear against the listing.
+        bits = fragment[2:].split("!")
+        return (
+            bits[0] if bits else "",
+            bits[1] if len(bits) > 1 else "",
+            bits[2] if len(bits) > 2 else "",
+        )
+
+    # A single-file share has no folder to enumerate and the proxy only speaks
+    # the folder API, so say that plainly instead of failing on a 400 later.
+    if (segments and segments[0] == "file") or fragment.startswith("!"):
+        raise DirectDownloadLinkException(
+            "ERROR: Mega single-file links are not supported yet, only folder "
+            "shares (mega.nz/folder/...)"
+        )
+
+    raise DirectDownloadLinkException(f"ERROR: Unrecognised Mega link: {url}")
+
+
+def mega_proxy_request(session, endpoint, params):
+    """One call to the proxy. Returns (payload, reason, retryable)."""
+    base = (Config.MEGA_PROXY_URL or "").strip().rstrip("/")
+    api_key = (Config.MEGA_PROXY_API_KEY or "").strip()
+
+    try:
+        resp = session.get(
+            f"{base}{endpoint}",
+            params=params,
+            headers={
+                "accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout=60,
+        )
+    except Exception as e:
+        return None, e.__class__.__name__, True
+
+    try:
+        payload = resp.json()
+    except Exception:
+        # Cloudflare answers an outage in front of the Worker with an HTML page.
+        return (
+            None,
+            f"HTTP {resp.status_code} (non-JSON response)",
+            resp.status_code >= 500,
+        )
+
+    if payload.get("success"):
+        return payload, None, False
+
+    detail = (payload.get("error") or "").strip() or f"HTTP {resp.status_code}"
+    reason = MEGA_PROXY_ERRORS.get(resp.status_code)
+    reason = f"{reason} ({detail})" if reason else detail
+
+    # Mega reports rate limiting (-4) and an exhausted quota (-17) with the same
+    # status; only the first one gets better by waiting a few seconds.
+    rate_limited = resp.status_code == 429 and detail.rstrip().endswith("-4")
+    return None, reason, resp.status_code in (500, 502, 503) or rate_limited
+
+
+def mega_call(endpoint, params, what):
+    """Retry what is worth retrying - a Worker cold start, Mega's own EAGAIN -
+    and give up on the rest. Returns (payload, reason).
+
+    A session per call rather than one shared across the pool: requests'
+    Session is not thread safe, and the mints run concurrently.
+    """
+    reason = "unknown error"
+    with Session() as session:
+        for attempt in range(1, MEGA_ATTEMPTS + 1):
+            payload, reason, retryable = mega_proxy_request(session, endpoint, params)
+            if payload:
+                return payload, None
+            if not retryable:
+                break
+            LOGGER.info(f"Mega: {what} failed ({reason}), retrying [{attempt}/{MEGA_ATTEMPTS}]")
+            if attempt < MEGA_ATTEMPTS:
+                sleep(3)
+    return None, reason
+
+
+def mega_segment(name):
+    """One safe path component. Names come out of the share's own metadata, so
+    a node called "../.." would otherwise write outside the download dir."""
+    name = ospath.basename((name or "").replace("\\", "/").strip())
+    return name if name and name not in (".", "..") else "_"
+
+
+def mega_select(listing, share_handle, target_handle):
+    """Pick what the link asks for and return (title, [(path, file), ...]).
+
+    Paths are rebuilt from parent handles instead of the ``path`` strings the
+    proxy returns, because those are absolute within the share: reusing them
+    for a link that points at a subfolder would recreate every parent above it.
+    """
+    files = listing.get("files") or []
+    folders = {f["handle"]: f for f in listing.get("folders") or []}
+
+    if target_handle:
+        if single := next((f for f in files if f.get("handle") == target_handle), None):
+            return mega_segment(single.get("name")), [("", single)]
+        if target_handle not in folders:
+            raise DirectDownloadLinkException(
+                "ERROR: this Mega link points at a node that is not in the share"
+            )
+        root = target_handle
+        title = mega_segment(folders[root].get("name"))
+    else:
+        # The listing is rooted at the shared node, but nothing guarantees its
+        # handle matches the one in the URL, so find it in the tree instead: the
+        # single folder whose parent lies outside the listing. A share holding
+        # loose files has no such folder, and then everything is top level.
+        tops = [h for h, f in folders.items() if (f.get("parent") or "") not in folders]
+        root = tops[0] if len(tops) == 1 else ""
+        title = (
+            mega_segment(folders[root].get("name")) if root else f"mega-{share_handle}"
+        )
+
+    def __relative(node):
+        """Path from `root` down to the node's parent, or None when the node
+        does not sit below `root` at all. The visited set guards against a
+        malformed listing whose parent pointers form a cycle."""
+        parts = []
+        seen = set()
+        cur = node.get("parent") or ""
+        while cur != root:
+            if not cur or cur in seen or cur not in folders:
+                # With no root to anchor against, an unknown parent just means
+                # the chain ended; with one, it means the node is elsewhere.
+                return None if root else "/".join(parts)
+            seen.add(cur)
+            parts.insert(0, mega_segment(folders[cur].get("name")))
+            cur = folders[cur].get("parent") or ""
+        return "/".join(parts)
+
+    wanted = []
+    for file in files:
+        # A file with no recovered key cannot be decrypted, so there is nothing
+        # to hand aria2 even though the node itself is listed.
+        if not file.get("key"):
+            continue
+        if (path := __relative(file)) is not None:
+            wanted.append((path, file))
+
+    return title, wanted
+
+
+def mega(url):
+    """Resolve a Mega folder share into links aria2 can actually fetch.
+
+    Mega encrypts every file client-side, so the CDN only ever serves
+    ciphertext - the mega-proxy Worker is what decrypts it in flight. This
+    function does the two authenticated calls (list the share, mint a token per
+    file) and hands over the resulting opaque, expiring links, which carry no
+    key and need no auth header of their own.
+    """
+    if not (Config.MEGA_PROXY_URL or "").strip():
+        raise DirectDownloadLinkException(
+            "ERROR: MEGA_PROXY_URL is not configured. Mega files are encrypted "
+            "client-side, so they have to go through the mega-proxy Worker "
+            "before aria2 can read them"
+        )
+
+    share, key, target = mega_parse_link(url)
+    if not share or not key:
+        raise DirectDownloadLinkException("ERROR: Mega link carries no handle or key")
+
+    listing, reason = mega_call(
+        "/api/list", {"folder": share, "key": key}, "listing the share"
+    )
+    if not listing:
+        raise DirectDownloadLinkException(f"ERROR: {reason}")
+
+    title, wanted = mega_select(listing, share, target)
+    if not wanted:
+        raise DirectDownloadLinkException(
+            "ERROR: no downloadable files in this Mega share"
+        )
+
+    def __mint(entry):
+        """Trade a file key for an opaque link. Resolving here also means a
+        dead share or a wrong key surfaces now, not halfway into a download."""
+        _, file = entry
+        return mega_call(
+            "/api/token",
+            {
+                "folder": share,
+                "file": file["handle"],
+                "key": file["key"],
+                "name": file.get("name") or "",
+                "ttl": MEGA_TOKEN_TTL,
+            },
+            f"minting a link for {file.get('name')}",
+        )
+
+    # Indexed rather than appended: the pool completes out of order, and a
+    # folder that downloads in a scrambled order is needlessly confusing.
+    contents = [None] * len(wanted)
+    failed = []
+    total_size = 0
+
+    with ThreadPoolExecutor(max_workers=min(MEGA_MINT_WORKERS, len(wanted))) as pool:
+        futures = {
+            pool.submit(__mint, entry): index for index, entry in enumerate(wanted)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            path, file = wanted[index]
+            payload, reason = future.result()
+            name = mega_segment(file.get("name"))
+            if not payload:
+                failed.append(f"{name} ({reason})")
+                continue
+            contents[index] = {
+                "path": path,
+                "filename": name,
+                "url": payload["download_url"],
+            }
+            try:
+                total_size += int(payload.get("size") or file.get("size") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    contents = [content for content in contents if content]
+    if not contents:
+        raise DirectDownloadLinkException(
+            f"ERROR: Mega refused every file in this share ({'; '.join(failed[:3])})"
+        )
+
+    if failed:
+        LOGGER.info(
+            f"Mega: skipping {len(failed)} unusable file(s) out of {len(wanted)}: "
+            f"{'; '.join(failed)}"
+        )
+
+    # A lone file needs no directory of its own: the proxy sends the name in
+    # Content-Disposition, so the bare link lands correctly on its own.
+    if len(contents) == 1 and not contents[0]["path"]:
+        return contents[0]["url"]
+
+    return {"contents": contents, "title": title, "total_size": total_size}
 
 
 VIDOY_API = "https://api.piyann.me/api/v1/scrape/vidoy"

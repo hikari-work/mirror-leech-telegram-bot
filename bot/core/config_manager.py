@@ -38,6 +38,10 @@ class Config:
     LEECH_FILENAME_PREFIX = ""
     LEECH_SPLIT_SIZE = 2097152000
     MEDIA_GROUP = False
+    # Mega encrypts every file client-side, so a Mega link is only downloadable
+    # through the mega-proxy Worker, which decrypts the stream in flight.
+    MEGA_PROXY_URL = ""
+    MEGA_PROXY_API_KEY = ""
     HYBRID_LEECH = False
     HYDRA_IP = ""
     HYDRA_API_KEY = ""
@@ -165,6 +169,7 @@ class Config:
             "BASE_URL",
             "RCLONE_SERVE_URL",
             "SEARCH_API_LINK",
+            "MEGA_PROXY_URL",
         }:
             return converted_value.strip("/") if converted_value else ""
 
