@@ -109,9 +109,17 @@ class _Warp:
         async def listening(timeout=2):
             return True
 
+        async def ensure():
+            # Stubbed so the scripted IP list means what it says: the real
+            # ensure_proxy_mode() validates the tunnel with its own egress
+            # lookup, which is tested separately and would otherwise consume
+            # an observation these rotation tests have accounted for.
+            return True
+
         monkeypatch.setattr(warp, "cmd_exec", cmd_exec)
         monkeypatch.setattr(warp, "current_egress_ip", egress)
         monkeypatch.setattr(warp, "_proxy_listening", listening)
+        monkeypatch.setattr(warp, "ensure_proxy_mode", ensure)
 
     def ran(self, *args):
         return list(args) in self.commands
@@ -206,3 +214,35 @@ async def test_restart_reports_failure_when_the_tunnel_stays_down(warp, monkeypa
     monkeypatch.setattr(warp, "CONNECT_TIMEOUT", 2)
 
     assert await warp.restart_warp() is False
+
+
+async def test_proxy_mode_rejects_a_listener_that_carries_no_traffic(warp, monkeypatch):
+    """The bug that made every Mega file fail: WARP keeps the SOCKS listener
+    up while the tunnel behind it is down, so a port check alone reports a
+    working proxy and every request sent into it dies. Reporting failure lets
+    the caller fall back to a direct download instead."""
+    async def listening(timeout=2):
+        return True
+
+    async def no_egress():
+        return ""
+
+    monkeypatch.setattr(warp, "_proxy_listening", listening)
+    monkeypatch.setattr(warp, "current_egress_ip", no_egress)
+
+    assert await warp.ensure_proxy_mode() is False
+
+
+async def test_proxy_mode_accepts_a_listener_that_reaches_the_internet(warp, monkeypatch):
+    """The other half of the same check: an open port that does carry traffic
+    is exactly what the caller is asking about."""
+    async def listening(timeout=2):
+        return True
+
+    async def egress():
+        return "1.1.1.1"
+
+    monkeypatch.setattr(warp, "_proxy_listening", listening)
+    monkeypatch.setattr(warp, "current_egress_ip", egress)
+
+    assert await warp.ensure_proxy_mode() is True

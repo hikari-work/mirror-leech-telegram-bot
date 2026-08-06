@@ -276,6 +276,7 @@ def _helper(mega_dl, tmp_path, cdn, size, monkeypatch, restarts=None):
     """Wire a helper up to the fake CDN and a fake resolve_file."""
     listener = _Listener(tmp_path, {"mega": {"kind": "file"}})
     helper = mega_dl.MegaDownloadHelper(listener)
+    helper._proxy = "socks5://127.0.0.1:40000"  # rotation only makes sense with one
 
     async def resolve_file(session, handle, folder=None):
         return "https://cdn.example/dl", size
@@ -340,6 +341,25 @@ async def test_quota_rotates_warp_and_resumes(mega_dl, mc, tmp_path, monkeypatch
 
     assert len(restarts) == 1
     assert Path(dest).read_bytes() == plain
+
+
+async def test_quota_without_a_proxy_does_not_touch_the_tunnel(
+    mega_dl, mc, tmp_path, monkeypatch
+):
+    """Rotating the egress IP only means anything when the request goes through
+    the proxy. Downloading directly, a restart cannot change the address Mega
+    saw, so it is 50 wasted seconds per file and the error should surface."""
+    plain = bytes(range(251)) * 4096
+    cdn = _CDN(_ciphertext(mc, KEY32, plain), quota_first=1)
+    restarts = []
+    helper, _ = _helper(mega_dl, tmp_path, cdn, len(plain), monkeypatch, restarts)
+    helper._proxy = ""  # direct download, the fallback path
+
+    item = {"handle": "H", "name": "q.bin", "key": KEY32, "size": len(plain)}
+    with pytest.raises(Exception):
+        await helper._download_file(cdn, item, None, str(tmp_path / "q.bin"))
+
+    assert restarts == []
 
 
 async def test_interrupted_transfer_resumes_from_its_own_offset(
