@@ -190,9 +190,10 @@ class _Response:
     """Serves a byte range of the ciphertext, honouring the Range header the
     way a CDN does - which is what the resume logic depends on."""
 
-    def __init__(self, body, headers, status=200, stall=None):
+    def __init__(self, body, headers, status=200, stall=None, aligned=False):
         self.status = status
         self._stall = stall
+        self._aligned = aligned
         start, end = 0, len(body) - 1
         if (rng := headers.get("Range", "")).startswith("bytes="):
             first, _, last = rng[6:].partition("-")
@@ -211,13 +212,24 @@ class _Response:
         return self
 
     async def iter_chunked(self, size):
+        """aiohttp promises *at most* `size` bytes: it yields whatever the
+        socket buffer holds. Splitting on exact multiples of the AES block
+        would hide a wrong counter, so the ragged sizes are the point."""
         sent = 0
-        for at in range(0, len(self._body), size):
+        at = 0
+        step = 0
+        while at < len(self._body):
             if self._stall is not None and sent >= self._stall:
                 return  # connection dies mid-transfer
-            chunk = self._body[at : at + size]
+            # Deterministic, and deliberately not a multiple of 16.
+            take = size if self._aligned else self._RAGGED[step % len(self._RAGGED)]
+            chunk = self._body[at : at + min(take, size)]
+            at += len(chunk)
             sent += len(chunk)
+            step += 1
             yield chunk
+
+    _RAGGED = (1000, 4321, 16, 11_911, 7, 65_536, 333)
 
     async def __aenter__(self):
         return self
@@ -230,10 +242,11 @@ class _CDN:
     """Stands in for aiohttp: hands out ranges of one encrypted body, and can
     be told to fail the first N requests with a quota status."""
 
-    def __init__(self, body, quota_first=0, stall=None):
+    def __init__(self, body, quota_first=0, stall=None, aligned=False):
         self.body = body
         self.quota_first = quota_first
         self.stall = stall
+        self.aligned = aligned
         self.requests = []
 
     def get(self, url, headers=None, proxy=None):
@@ -245,7 +258,7 @@ class _CDN:
         stall = self.stall
         if stall is not None:
             self.stall = None  # only the first attempt is cut short
-        return _Response(self.body, headers, stall=stall)
+        return _Response(self.body, headers, stall=stall, aligned=self.aligned)
 
     async def __aenter__(self):
         return self
@@ -414,6 +427,35 @@ async def test_resume_from_an_unaligned_offset_drops_the_replayed_bytes(
 
     assert cdn.requests[0] == "bytes=12336-199999"
     assert dest.read_bytes()[12345:] == plain[12345:]
+
+
+async def test_ragged_chunk_boundaries_decrypt_correctly(
+    mega_dl, mc, tmp_path, monkeypatch
+):
+    """The bug that shipped 3.33 GB of noise: the counter was rebuilt per chunk
+    from a byte offset, which floors to a 16-byte block. aiohttp yields *at
+    most* CHUNK bytes, so the first read not divisible by 16 shifted the
+    keystream for everything after it - same file size, unreadable contents.
+
+    Pinned against the aligned case so a regression cannot pass by accident:
+    both splits of the same body must produce the same plaintext.
+    """
+    plain = bytes((i * 11 + 5) % 256 for i in range(300_000))
+    body = _ciphertext(mc, KEY32, plain)
+    item = {"handle": "H", "name": "x.bin", "key": KEY32, "size": len(plain)}
+
+    ragged_cdn = _CDN(body)  # ragged by default, as a socket really behaves
+    helper, _ = _helper(mega_dl, tmp_path, ragged_cdn, len(plain), monkeypatch)
+    ragged_dest = str(tmp_path / "ragged.bin")
+    await helper._download_file(ragged_cdn, item, None, ragged_dest)
+
+    aligned_cdn = _CDN(body, aligned=True)
+    helper, _ = _helper(mega_dl, tmp_path, aligned_cdn, len(plain), monkeypatch)
+    aligned_dest = str(tmp_path / "aligned.bin")
+    await helper._download_file(aligned_cdn, item, None, aligned_dest)
+
+    assert Path(ragged_dest).read_bytes() == plain
+    assert Path(aligned_dest).read_bytes() == plain
 
 
 def test_spans_cover_the_file_without_gaps_or_overlap(mega_dl, monkeypatch):

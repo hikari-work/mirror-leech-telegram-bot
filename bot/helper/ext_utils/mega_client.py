@@ -95,6 +95,17 @@ def ctr_decrypt(key, counter, data):
     return _aes(key, modes.CTR(counter)).update(data)
 
 
+def ctr_stream(key, counter):
+    """A CTR context to feed a whole segment through, chunk by chunk.
+
+    ctr_decrypt() derives its counter from a byte offset, which floors to a
+    block boundary - correct only if every piece handed to it is a multiple of
+    16 bytes. A socket does not promise that, so a stream is decrypted through
+    one context that carries the keystream position across reads instead.
+    """
+    return _aes(key, modes.CTR(counter))
+
+
 def unpack_file_key(k32):
     """Split a 32-byte file key into (aes_key, nonce, meta_mac).
 

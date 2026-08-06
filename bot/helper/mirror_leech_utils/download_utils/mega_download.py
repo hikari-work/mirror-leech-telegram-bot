@@ -28,7 +28,7 @@ from ...ext_utils.mega_client import (
     BLOCK,
     MegaApiError,
     counter_at,
-    ctr_decrypt,
+    ctr_stream,
     file_info,
     list_folder,
     resolve_file,
@@ -124,14 +124,18 @@ class MegaDownloadHelper:
 
             async with aiopen(path, "r+b") as f:
                 await f.seek(at)
-                offset = aligned
+                # One context for the whole segment: iter_chunked yields at
+                # most CHUNK bytes, not exactly CHUNK, and a read that is not
+                # a multiple of the AES block would restart the keystream
+                # mid-block if the counter were rebuilt per chunk. The file
+                # would keep its exact size and turn to noise from there on.
+                cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
 
                 async for chunk in resp.content.iter_chunked(CHUNK):
                     if self._listener.is_cancelled:
                         return
 
-                    plain = ctr_decrypt(aes_key, counter_at(nonce, offset), chunk)
-                    offset += len(chunk)
+                    plain = cipher.update(chunk)
 
                     if skip:
                         # Guarded against a chunk shorter than the replayed
