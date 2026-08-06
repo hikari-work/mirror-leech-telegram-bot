@@ -195,7 +195,10 @@ async def api_request(session, payload, node=None, context=""):
             params["n"] = node
 
         try:
-            async with session.post(API_URL, params=params, json=payload) as resp:
+            # The command goes in a one-element batch. Mega answers a bare
+            # object with an empty array rather than an error, so getting this
+            # wrong looks like an empty folder instead of a bad request.
+            async with session.post(API_URL, params=params, json=[payload]) as resp:
                 if resp.status != 200:
                     raise ConnectionError(f"Mega API returned HTTP {resp.status}")
                 body = await resp.json(content_type=None)
@@ -215,7 +218,15 @@ async def api_request(session, payload, node=None, context=""):
             await sleep(2 * attempt)
             continue
 
-        result = body[0] if isinstance(body, list) and body else body
+        if isinstance(body, list):
+            if not body:
+                raise ConnectionError(
+                    f"Mega returned an empty batch while {context or 'calling it'}"
+                )
+            result = body[0]
+        else:
+            result = body
+
         if isinstance(result, int):
             error = MegaApiError(result, context)
             if not error.is_transient or attempt == API_ATTEMPTS:
