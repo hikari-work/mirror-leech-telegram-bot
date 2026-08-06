@@ -233,8 +233,12 @@ class MegaDownloadHelper:
                 # Progress is deliberately kept: the bytes already written are
                 # valid plaintext, so the retry resumes rather than restarts.
                 if not await restart_warp():
-                    raise
+                    raise ConnectionError("WARP restart failed, cannot rotate IP")
                 await sleep(3)
+                # The CDN URL is one-shot, IP-locked, and dies after rotation:
+                # reuse returns 403 with no body. It must be re-resolved from
+                # the new egress before the retry can proceed.
+                continue
 
     async def _register(self, from_queue=False):
         async with task_dict_lock:
