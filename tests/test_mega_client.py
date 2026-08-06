@@ -234,7 +234,7 @@ async def test_list_folder_asks_for_the_whole_subtree(mc):
 
     await mc.list_folder(session, "ShArE001", mc.b64url_encode(share_key))
 
-    assert session.calls[0]["json"] == {"a": "f", "c": 1, "r": 1, "ca": 1}
+    assert session.calls[0]["json"] == [{"a": "f", "c": 1, "r": 1, "ca": 1}]
     assert session.calls[0]["params"]["n"] == "ShArE001"
 
 
@@ -294,6 +294,23 @@ async def test_api_request_unwraps_the_response_array(mc):
     """Mega answers a one-command batch with a one-element array."""
     session = _FakeSession([{"g": "https://cdn.example/file", "s": 42}])
     assert (await mc.api_request(session, {"a": "g"}))["s"] == 42
+
+
+async def test_api_request_sends_the_command_as_a_batch(mc):
+    """The command must go out wrapped in an array. A bare object is not
+    rejected - Mega answers it with an empty array, which used to unwrap into
+    a list and only failed later at .get(), looking like an empty folder."""
+    session = _FakeSession([{"f": []}])
+    await mc.api_request(session, {"a": "f", "c": 1})
+    assert session.calls[0]["json"] == [{"a": "f", "c": 1}]
+
+
+async def test_api_request_rejects_an_empty_batch(mc):
+    """An empty array carries no result, so it must fail loudly rather than
+    being handed on as if it were the response object."""
+    session = _FakeSession([])
+    with pytest.raises(ConnectionError):
+        await mc.api_request(session, {"a": "f"}, context="listing the folder")
 
 
 async def test_api_request_varies_the_sequence_id(mc, monkeypatch):
