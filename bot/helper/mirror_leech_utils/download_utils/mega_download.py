@@ -223,6 +223,11 @@ class MegaDownloadHelper:
             except (_QuotaReached, MegaApiError) as e:
                 if isinstance(e, MegaApiError) and not e.is_quota:
                     raise
+                if not self._proxy:
+                    # Nothing is routed through WARP, so bouncing the tunnel
+                    # would not change the address this request comes from -
+                    # it would only stall every file for the reconnect timeout.
+                    raise
                 if self._restarts >= int(Config.MEGA_MAX_RESTARTS or 0):
                     raise
                 self._restarts += 1

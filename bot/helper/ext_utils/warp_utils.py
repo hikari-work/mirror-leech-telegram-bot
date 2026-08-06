@@ -104,7 +104,18 @@ async def ensure_proxy_mode():
     if not Config.WARP_ENABLED:
         return False
     if await _proxy_listening():
-        return True
+        # The listener staying up says nothing about the tunnel behind it:
+        # WARP keeps accepting connections on the SOCKS port while the tunnel
+        # is down, and every request sent into it then dies. Falling back to a
+        # direct download beats handing the caller a proxy that swallows
+        # traffic, which is indistinguishable from Mega refusing us.
+        if await current_egress_ip():
+            return True
+        LOGGER.warning(
+            "WARP: the proxy port is open but no traffic gets through it; "
+            "the tunnel is probably down"
+        )
+        return False
 
     port = str(Config.WARP_PROXY_PORT)
     LOGGER.info(f"WARP: enabling proxy mode on port {port}")
@@ -119,8 +130,12 @@ async def ensure_proxy_mode():
 
     for _ in range(PROXY_WAIT):
         if await _proxy_listening():
-            LOGGER.info(f"WARP: proxy listening on 127.0.0.1:{port}")
-            return True
+            if await current_egress_ip():
+                LOGGER.info(f"WARP: proxy listening on 127.0.0.1:{port}")
+                return True
+            LOGGER.error(f"WARP: proxy on port {port} accepts connections but "
+                         "carries no traffic")
+            return False
         await sleep(1)
 
     LOGGER.error(f"WARP: proxy did not come up on port {port}")
