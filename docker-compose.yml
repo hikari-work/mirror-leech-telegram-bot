@@ -4,6 +4,10 @@ services:
     command: bash start.sh
     restart: on-failure
     network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
     environment:
       # Encrypts private files (cookies, rclone.conf, token.pickle,
       # accounts.zip) before they are stored in MongoDB GridFS. Set it in a

@@ -217,7 +217,7 @@ programming in Python.
 > sharedisk.io), akmfiles.com, wetransfer.com, pcloud.link, gofile.io (file/folders), easyupload.io, mdisk.me (with
 > ytdl),
 > tmpsend.com, qiwi.gg, berkasdrive.com, mp4upload.com, terabox.com (videos only file/folders),
-> mega.nz / mega.co.nz (folder shares, needs `MEGA_PROXY_URL`).
+> mega.nz / mega.co.nz (folder shares and single files).
 
 </details>
 </details>
@@ -328,9 +328,15 @@ options [HERE](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/YoutubeDL.py#
 
 - `BUZZHEAVIER_ACCOUNT_ID` (`Str`): Buzzheavier account ID.
 
-- `MEGA_PROXY_URL` (`Str`): Base URL of a mega-proxy Worker deployment, e.g. `https://mega-proxy.example.workers.dev`. Mega encrypts files client-side, so its CDN only ever serves ciphertext — the Worker decrypts the stream in flight and hands out plain links aria2 can read. Leave empty to reject Mega links.
+- `WARP_ENABLED` (`Bool`): Route Mega downloads through Cloudflare WARP's SOCKS5 proxy, and restart the tunnel for a fresh IP when Mega reports its per-IP bandwidth quota spent. Needs `warp-cli` installed and registered on the host. Note that enabling proxy mode takes the whole host off a full WARP tunnel if it was on one. Default is `True`; with `False` the downloads use the host's own IP and a quota error just fails the task.
 
-- `MEGA_PROXY_API_KEY` (`Str`): The `API_KEY` secret set on that Worker. It authenticates the listing and token calls; the resulting download links carry no key and need no auth of their own.
+- `WARP_PROXY_PORT` (`Int`): Port WARP's SOCKS5 listener is bound to. Default is `40000`.
+
+- `MEGA_PROXY_URL` (`Str`): An explicit proxy for Mega traffic, e.g. `socks5://127.0.0.1:1080`, overriding WARP's own listener. Leave empty to use WARP.
+
+- `MEGA_CONNECTIONS` (`Int`): Parallel ranged connections per Mega file. Default is `4`; more invites a rate limit.
+
+- `MEGA_MAX_RESTARTS` (`Int`): How many times one file may rotate the egress IP before giving up. Default is `3`.
 
 - `USE_SERVICE_ACCOUNTS` (`Bool`): Whether to use Service Accounts or not, with google-api-python-client. For this to work
 see [Using Service Accounts](https://github.com/anasty17/mirror-leech-telegram-bot#generate-service-accounts-what-is-service-account) section below. Default is `False`.

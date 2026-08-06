@@ -38,10 +38,19 @@ class Config:
     LEECH_FILENAME_PREFIX = ""
     LEECH_SPLIT_SIZE = 2097152000
     MEDIA_GROUP = False
-    # Mega encrypts every file client-side, so a Mega link is only downloadable
-    # through the mega-proxy Worker, which decrypts the stream in flight.
+    # Mega encrypts every file client-side, so the bot decrypts the stream as it
+    # downloads. Mega also meters anonymous downloads per IP, so the traffic
+    # goes through WARP's SOCKS5 proxy and the tunnel is restarted for a fresh
+    # IP whenever Mega reports the quota spent.
+    WARP_ENABLED = True
+    WARP_PROXY_PORT = 40000
+    # An explicit proxy for Mega traffic, overriding WARP's own listener.
     MEGA_PROXY_URL = ""
-    MEGA_PROXY_API_KEY = ""
+    # Ranged connections per file. Mega tolerates a handful; too many is what
+    # walks into a rate limit.
+    MEGA_CONNECTIONS = 4
+    # How many times one file may rotate the egress IP before giving up.
+    MEGA_MAX_RESTARTS = 3
     HYBRID_LEECH = False
     HYDRA_IP = ""
     HYDRA_API_KEY = ""

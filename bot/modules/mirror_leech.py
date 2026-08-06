@@ -41,6 +41,9 @@ from ..helper.mirror_leech_utils.download_utils.direct_downloader import (
 from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
     direct_link_generator,
 )
+from ..helper.mirror_leech_utils.download_utils.mega_download import (
+    add_mega_download,
+)
 from ..helper.mirror_leech_utils.download_utils.gd_download import add_gd_download
 from ..helper.mirror_leech_utils.download_utils.jd_download import add_jd_download
 from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torrent
@@ -526,6 +529,10 @@ class Mirror(TaskListener):
                 # The generator resolved a stream aria2 cannot assemble on its
                 # own, so the download goes through yt-dlp instead.
                 await add_ytdlp_download(self, path)
+            elif self.link.get("mega"):
+                # Mega serves ciphertext, so the bytes have to pass through a
+                # downloader that can decrypt them; aria2 would save garbage.
+                await add_mega_download(self, path)
             else:
                 await add_direct_download(self, path)
         elif self.is_jd:

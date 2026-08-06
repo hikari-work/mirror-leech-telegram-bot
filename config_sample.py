@@ -27,11 +27,17 @@ ALLDEBRID_API_KEY = ""
 BUZZHEAVIER_ACCOUNT_ID = ""
 BUZZHEAVIER_FOLDER_ID = ""
 GOFILE_API_KEY = ""
-# Mega links are only downloadable through a mega-proxy Worker deployment: Mega
-# encrypts files client-side, so the CDN serves ciphertext and the proxy is what
-# decrypts the stream. Leave empty to reject Mega links.
+# Mega encrypts files client-side, so the bot decrypts the stream as it
+# downloads. Mega also meters anonymous downloads per IP: when the quota runs
+# out the WARP tunnel is restarted for a fresh one, which needs warp-cli on the
+# host. Set WARP_ENABLED to False to download over the host's own IP instead,
+# in which case a quota error simply fails the task.
+WARP_ENABLED = True
+WARP_PROXY_PORT = 40000
+# An explicit proxy for Mega traffic, overriding WARP's own listener.
 MEGA_PROXY_URL = ""
-MEGA_PROXY_API_KEY = ""
+MEGA_CONNECTIONS = 4
+MEGA_MAX_RESTARTS = 3
 EXCLUDED_EXTENSIONS = ""
 INCLUDED_EXTENSIONS = ""
 INCOMPLETE_TASK_NOTIFIER = False

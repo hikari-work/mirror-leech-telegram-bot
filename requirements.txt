@@ -1,6 +1,7 @@
 asyncio
 aiofiles
 aioshutil
+aiohttp-socks
 anytree
 apscheduler
 aioaria2
