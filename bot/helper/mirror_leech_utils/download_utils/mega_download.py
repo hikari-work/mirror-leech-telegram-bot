@@ -143,6 +143,8 @@ class MegaDownloadHelper:
         proxied = _proxied_url(cdn_url, proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
         async with session.get(proxied, headers=headers) as resp:
+            if resp.status != 206:
+                LOGGER.error(f"DEBUG PROXIED URL: {proxied} | RESP STATUS: {resp.status}")
             if resp.status in QUOTA_STATUSES:
                 raise _QuotaReached(f"CDN answered HTTP {resp.status}")
             if resp.status in (404, 410):
