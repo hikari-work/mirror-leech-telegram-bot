@@ -138,7 +138,7 @@ class _Session:
         self._q = list(payloads)
         self.calls = []
 
-    def get(self, url, params=None):
+    def get(self, url, params=None, **kwargs):
         # url may be a yarl.URL or string
         query = dict(url.query) if hasattr(url, "query") else (params or {})
         self.calls.append({"url": str(url), "params": query})
@@ -285,7 +285,7 @@ async def test_gateway_raises_on_http_error(mc, monkeypatch):
         async def __aexit__(self, *exc): return False
 
     class _BadSession:
-        def get(self, url, params=None):
+        def get(self, url, params=None, **kwargs):
             return _BadResp()
 
     with pytest.raises(mc.MegaApiError, match="HTTP 500"):

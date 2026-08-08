@@ -84,6 +84,9 @@ def _safe_name(name, fallback):
 # Gateway HTTP helper
 # ---------------------------------------------------------------------------
 
+_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+
 async def _gateway_get(session, path, params, context):
     """GET <GATEWAY><path>?<params>, retry on transient failures.
 
@@ -93,11 +96,12 @@ async def _gateway_get(session, path, params, context):
     base = GATEWAY + path
     query_str = urlencode(params or {}, safe="%")
     req_url = URL(f"{base}?{query_str}", encoded=True) if query_str else URL(base)
+    headers = {"User-Agent": _USER_AGENT}
     error = None
 
     for attempt in range(1, _API_ATTEMPTS + 1):
         try:
-            async with session.get(req_url) as resp:
+            async with session.get(req_url, headers=headers) as resp:
                 if resp.status == 429:
                     raise MegaApiError("gateway rate limited", context)
                 if resp.status != 200:

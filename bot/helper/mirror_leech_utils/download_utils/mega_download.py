@@ -48,8 +48,12 @@ MIN_SPLIT = 8 * 1024 * 1024
 # CDN / Proxy statuses that mean rate limiting, quota exhaustion, or worker outage.
 QUOTA_STATUSES = (402, 403, 429, 502, 503, 504, 509)
 
-# Default fallback proxy worker URL if MEGA_PROXY_URL is empty
-_DEFAULT_PROXIES = ["https://proxy-1.vianstefani754.workers.dev"]
+# Default fallback proxies 1 to 5 if MEGA_PROXY_URL is empty
+_DEFAULT_PROXIES = [
+    f"https://proxy-{n}.vianstefani754.workers.dev" for n in range(1, 6)
+]
+
+_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 class _QuotaReached(Exception):
@@ -119,6 +123,7 @@ class MegaDownloadHelper:
 
     def _session(self):
         return ClientSession(
+            headers={"User-Agent": _USER_AGENT},
             timeout=ClientTimeout(total=None, sock_read=120, sock_connect=60),
         )
 
