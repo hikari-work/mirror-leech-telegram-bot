@@ -48,10 +48,8 @@ MIN_SPLIT = 8 * 1024 * 1024
 # CDN / Proxy statuses that mean rate limiting, quota exhaustion, or worker outage.
 QUOTA_STATUSES = (402, 403, 429, 502, 503, 504, 509)
 
-# Default fallback proxies 1 to 5 if MEGA_PROXY_URL is empty
-_DEFAULT_PROXIES = [
-    f"https://proxy-{n}.vianstefani754.workers.dev" for n in range(1, 6)
-]
+# Default fallback proxy worker URL if MEGA_PROXY_URL is empty
+_DEFAULT_PROXIES = ["https://proxy-1.vianstefani754.workers.dev"]
 
 
 class _QuotaReached(Exception):
@@ -105,7 +103,6 @@ class MegaDownloadHelper:
         self._speed = 0
         self._last_time = 0.0
         self._last_bytes = 0
-        self._proxy_n = 1  # current proxy index (1-5)
 
     @property
     def processed_bytes(self):
@@ -125,7 +122,7 @@ class MegaDownloadHelper:
             timeout=ClientTimeout(total=None, sock_read=120, sock_connect=60),
         )
 
-    async def _segment(self, session, cdn_url, path, aes_key, nonce, start, end, done):
+    async def _segment(self, session, cdn_url, path, aes_key, nonce, start, end, done, proxy_n=0):
         """Fetch [start, end] of ciphertext, decrypt, write at its offset.
 
         `done` carries how many bytes of this segment already landed on a prior
@@ -138,7 +135,7 @@ class MegaDownloadHelper:
         aligned = (at // BLOCK) * BLOCK
         skip = at - aligned
 
-        proxied = _proxied_url(cdn_url, self._proxy_n)
+        proxied = _proxied_url(cdn_url, proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
         async with session.get(proxied, headers=headers) as resp:
             if resp.status in QUOTA_STATUSES:
@@ -206,6 +203,7 @@ class MegaDownloadHelper:
         cdn_url = item.get("cdn_url") or ""
         progress = None
         restarts = 0
+        proxy_n = 0
 
         while True:
             try:
@@ -225,7 +223,7 @@ class MegaDownloadHelper:
                     create_task(
                         self._segment(
                             session, cdn_url, dest, aes_key, nonce,
-                            start, end, done,
+                            start, end, done, proxy_n,
                         )
                     )
                     for (start, end), done in zip(spans, progress)
@@ -244,11 +242,11 @@ class MegaDownloadHelper:
                 if restarts >= max_restarts:
                     raise
                 restarts += 1
-                self._proxy_n += 1
+                proxy_n += 1
                 if folder_handle:
                     cdn_url = ""  # Re-resolve fresh CDN URL from gateway for folder items
                 LOGGER.info(
-                    f"Mega: {e} on {item['name']}, rotating to next proxy in list "
+                    f"Mega: {e} on {item['name']}, rotating proxy index to {proxy_n} "
                     f"[{restarts}/{max_restarts}]"
                 )
                 await sleep(3)

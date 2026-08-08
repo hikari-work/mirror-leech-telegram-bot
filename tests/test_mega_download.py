@@ -449,13 +449,11 @@ def test_proxied_url_format(mega_dl):
     """CDN URL passed as ?url= query param, testing default and dynamic Config values."""
     cdn = "https://cdn.mega.co.nz/dl/aB-cD?x=1"
 
-    # 1. Default fallback (proxy 1-5)
+    # 1. Default fallback (proxy-1)
     mega_dl.Config.MEGA_PROXY_URL = ""
     url = mega_dl._proxied_url(cdn, 0)
     assert url.startswith("https://proxy-1.vianstefani754.workers.dev/?url=")
     assert "%3A%2F%2F" in url
-    url_2 = mega_dl._proxied_url(cdn, 1)
-    assert url_2.startswith("https://proxy-2.vianstefani754.workers.dev/?url=")
 
     # 2. Multi-proxy string in Config
     mega_dl.Config.MEGA_PROXY_URL = "https://p1.com, https://p2.com"
