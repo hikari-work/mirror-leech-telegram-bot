@@ -1,4 +1,4 @@
-"""Tests for the semprot thread scraper parsing helpers."""
+"""Tests for the semprot thread scraper API integration."""
 
 from __future__ import annotations
 
@@ -6,17 +6,14 @@ import importlib
 import sys
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import MagicMock
 
 import pytest
 
 
 @pytest.fixture
 def semprot_module(monkeypatch):
-    """Import ``semprot_scraper`` with minimal bot package stubs.
-
-    Mirrors the stubbing in test_alldebrid_resolver.py to avoid the real
-    bot/__init__.py side effects (uvloop, env, sockets).
-    """
+    """Import ``semprot_scraper`` with minimal bot package stubs."""
     project_root = Path(__file__).resolve().parent.parent
 
     bot_pkg = ModuleType("bot")
@@ -57,51 +54,39 @@ def semprot_module(monkeypatch):
     )
 
 
-_HTML = """
-<html><head><title>Test Thread</title>
-<link rel="canonical" href="https://www.semprot.com/threads/foo.123/"></head>
-<body>
-<a href="https://mega.nz/abc">m</a>
-<a href="https://mediafire.com/x">mf</a>
-<div class="pageNav"><a href="/threads/foo.123/page-3">p3</a></div>
-<a href="https://www.semprot.com/members/x">self</a>
-<a href="https://gambar123.com/i.jpg">imghost</a>
-<a href="mailto:a@b.com">mail</a>
-<a href="#top">anchor</a>
-<img class="bbImage" src="https://img.example/pic.jpg">
-</body></html>
-"""
+def test_normalize_url(semprot_module):
+    norm = semprot_module._normalize_url
+    assert norm("https://senang.top/threads/foo.123/") == "https://semprot.com/threads/foo.123/"
+    assert norm("https://www.senang.top/threads/bar.456") == "https://www.semprot.com/threads/bar.456"
+    assert norm("https://semprot.com/threads/foo.123/") == "https://semprot.com/threads/foo.123/"
 
 
-def test_parse_extracts_external_links_only(semprot_module):
-    title, canonical, last_page, links = semprot_module._parse(_HTML)
-    assert title == "Test Thread"
-    assert canonical.endswith("foo.123/")
-    assert last_page == 3
-    # semprot.com, gambar123.com, mailto, anchor, relative, and the bbImage
-    # are all excluded — only genuine external download links remain.
-    assert set(links) == {"https://mega.nz/abc", "https://mediafire.com/x"}
+def test_scrape_thread_success(semprot_module, monkeypatch):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "success": True,
+        "links": ["https://mega.nz/xyz", "https://pixeldrain.com/u/123"],
+    }
+    mock_get = MagicMock(return_value=mock_resp)
+    monkeypatch.setattr("requests.get", mock_get)
+
+    title, links = semprot_module.scrape_thread("https://senang.top/threads/test-thread.123/")
+    assert links == ["https://mega.nz/xyz", "https://pixeldrain.com/u/123"]
+    assert title == "test-thread.123"
+    mock_get.assert_called_once_with(
+        semprot_module.GATEWAY_API,
+        params={"q": "https://semprot.com/threads/test-thread.123/"},
+        timeout=60,
+    )
 
 
-def test_is_external_rules(semprot_module):
-    ext = semprot_module._is_external
-    assert ext("https://mega.nz/x")
-    assert not ext("/relative/path")
-    assert not ext("mailto:a@b.com")
-    assert not ext("#anchor")
-    assert not ext("https://x.semprot.com/y")
-    assert not ext("https://gambar123.com/i.jpg")
-    assert not ext("ftp://host/file")
+def test_scrape_thread_api_error(semprot_module, monkeypatch):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "success": False,
+        "error": "Failed to fetch thread page",
+    }
+    monkeypatch.setattr("requests.get", MagicMock(return_value=mock_resp))
 
-
-def test_page_num(semprot_module):
-    assert semprot_module._page_num("/threads/x/page-7") == 7
-    assert semprot_module._page_num("/threads/x/") == 0
-
-
-def test_clean_base_url(semprot_module):
-    clean = semprot_module._clean_base_url
-    assert clean("https://www.semprot.com/threads/foo.123/unread") == "https://www.semprot.com/threads/foo.123/"
-    assert clean("https://www.semprot.com/threads/foo-bar.456/page-3") == "https://www.semprot.com/threads/foo-bar.456/"
-    assert clean("https://www.semprot.com/threads/some-name.789/post-1234") == "https://www.semprot.com/threads/some-name.789/"
-    assert clean("https://www.semprot.com/threads/simple.1/") == "https://www.semprot.com/threads/simple.1/"
+    with pytest.raises(semprot_module.DirectDownloadLinkException, match="Failed to fetch thread page"):
+        semprot_module.scrape_thread("https://semprot.com/threads/test.1/")

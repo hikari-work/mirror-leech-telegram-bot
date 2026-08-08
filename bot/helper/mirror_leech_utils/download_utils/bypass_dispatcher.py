@@ -1,6 +1,6 @@
 """Generic /bypass dispatcher.
 
-Routes a URL to the right thread scraper by domain. Currently only semprot is
+Routes a URL to the right thread scraper by domain. Currently semprot.com / senang.top is
 registered; add another `if domain` branch to support more sites.
 """
 
@@ -13,7 +13,7 @@ from .semprot_scraper import scrape_thread
 def bypass_scrape(link, keyword=""):
     """Return (title, links). Filter to links containing keyword if given."""
     domain = urlparse(link).hostname or ""
-    if "semprot.com" in domain:
+    if any(h in domain for h in ("semprot.com", "senang.top")):
         title, links = scrape_thread(link)
         if keyword:
             n = keyword.lower()
