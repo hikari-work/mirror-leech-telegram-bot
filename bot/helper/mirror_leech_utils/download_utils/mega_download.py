@@ -11,7 +11,7 @@ connections never need to coordinate and an interrupted transfer can continue
 from exactly where it stopped.
 """
 
-from asyncio import CancelledError, Lock, create_task, gather, sleep
+from asyncio import CancelledError, Lock, Semaphore, create_task, gather, sleep
 from os import path as ospath
 from secrets import token_urlsafe
 from time import time
@@ -329,28 +329,30 @@ class MegaDownloadHelper:
         await self._run(path, folder_handle, files, single)
 
     async def _run(self, path, folder_handle, files, single):
-        """Download every file, then hand over to the listener."""
+        """Download files concurrently (up to 4 at once), then hand over to the listener."""
         base = path if single else f"{path}/{self._listener.name}"
         failed = []
+        sem = Semaphore(4)
+
+        async def _download_item(item):
+            if self._listener.is_cancelled:
+                return
+            name = item["name"] if not single else self._listener.name
+            dest = ospath.join(base, item.get("path", ""), name)
+            async with sem:
+                try:
+                    await self._download_file(session, item, folder_handle, dest)
+                except CancelledError:
+                    raise
+                except Exception as e:
+                    LOGGER.error(f"Mega: {item['name']} failed: {e}")
+                    failed.append(f"{item['name']} ({e})")
+                    if await aiopath.exists(dest):
+                        await remove(dest)
 
         try:
             async with self._session() as session:
-                for item in files:
-                    if self._listener.is_cancelled:
-                        return
-
-                    name = item["name"] if not single else self._listener.name
-                    dest = ospath.join(base, item.get("path", ""), name)
-
-                    try:
-                        await self._download_file(session, item, folder_handle, dest)
-                    except CancelledError:
-                        raise
-                    except Exception as e:
-                        LOGGER.error(f"Mega: {item['name']} failed: {e}")
-                        failed.append(f"{item['name']} ({e})")
-                        if await aiopath.exists(dest):
-                            await remove(dest)
+                await gather(*[_download_item(item) for item in files])
         except CancelledError:
             return
         except Exception as e:
