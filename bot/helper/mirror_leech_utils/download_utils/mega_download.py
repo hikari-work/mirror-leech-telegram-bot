@@ -58,6 +58,10 @@ class _QuotaReached(Exception):
     """Mega CDN refused because of the egress IP."""
 
 
+class _CDNExpiredError(Exception):
+    """CDN URL has expired or returned 404."""
+
+
 def _get_proxy_list():
     """Parse Config.MEGA_PROXY_URL into a list of proxy base URLs."""
     raw = getattr(Config, "MEGA_PROXY_URL", "")
@@ -139,6 +143,8 @@ class MegaDownloadHelper:
         async with session.get(proxied, headers=headers) as resp:
             if resp.status in QUOTA_STATUSES:
                 raise _QuotaReached(f"CDN answered HTTP {resp.status}")
+            if resp.status in (404, 410):
+                raise _CDNExpiredError(f"CDN answered HTTP {resp.status}")
             if resp.status not in (200, 206):
                 raise ConnectionError(f"CDN answered HTTP {resp.status}")
 
@@ -233,12 +239,14 @@ class MegaDownloadHelper:
                     raise
                 return not self._listener.is_cancelled
 
-            except (_QuotaReached, MegaApiError, ConnectionError, TimeoutError, ClientError) as e:
+            except (_QuotaReached, MegaApiError, _CDNExpiredError, ConnectionError, TimeoutError, ClientError) as e:
                 max_restarts = int(Config.MEGA_MAX_RESTARTS or 0)
                 if restarts >= max_restarts:
                     raise
                 restarts += 1
                 self._proxy_n += 1
+                if folder_handle:
+                    cdn_url = ""  # Re-resolve fresh CDN URL from gateway for folder items
                 LOGGER.info(
                     f"Mega: {e} on {item['name']}, rotating to next proxy in list "
                     f"[{restarts}/{max_restarts}]"
