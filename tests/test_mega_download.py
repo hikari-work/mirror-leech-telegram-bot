@@ -327,6 +327,22 @@ async def test_quota_rotates_proxy_and_resumes(mega_dl, mc, tmp_path, monkeypatc
     assert Path(dest).read_bytes() == plain
 
 
+async def test_quota_rotation_auto_scales_with_proxy_list(
+    mega_dl, mc, tmp_path, monkeypatch
+):
+    """Rotation budget automatically scales to len(proxies) if higher than MEGA_MAX_RESTARTS."""
+    monkeypatch.setattr(mega_dl.Config, "MEGA_PROXY_URL", "http://p1 http://p2 http://p3 http://p4 http://p5", raising=False)
+    monkeypatch.setattr(mega_dl.Config, "MEGA_MAX_RESTARTS", 2)
+    plain = bytes(range(251)) * 512
+    cdn = _CDN(_ciphertext(mc, plain), quota_first=4)
+    helper, _ = _helper(mega_dl, tmp_path, monkeypatch)
+
+    dest = str(tmp_path / "q_scale.bin")
+    item = _item(name="q_scale.bin", size=len(plain))
+    await helper._download_file(cdn, item, None, dest)
+    assert Path(dest).read_bytes() == plain
+
+
 async def test_quota_rotation_wraps_and_gives_up_at_budget(
     mega_dl, mc, tmp_path, monkeypatch
 ):

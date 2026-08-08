@@ -250,7 +250,10 @@ class MegaDownloadHelper:
                 return not self._listener.is_cancelled
 
             except (_QuotaReached, MegaApiError, _CDNExpiredError, ConnectionError, TimeoutError, ClientError) as e:
+                proxies = _get_proxy_list()
                 max_restarts = int(Config.MEGA_MAX_RESTARTS or 0)
+                if proxies:
+                    max_restarts = max(max_restarts, len(proxies))
                 if restarts >= max_restarts:
                     raise
                 restarts += 1
