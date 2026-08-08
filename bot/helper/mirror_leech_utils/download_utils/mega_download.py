@@ -178,6 +178,8 @@ class MegaDownloadHelper:
 
     def _spans(self, size):
         """Split a file into contiguous block-aligned ranges."""
+        if size <= 0:
+            return [(0, 0)]
         want = max(1, int(Config.MEGA_CONNECTIONS or 1))
         if size < MIN_SPLIT or want == 1:
             return [(0, size - 1)]
@@ -217,6 +219,11 @@ class MegaDownloadHelper:
                     size = size or item.get("size", 0)
                 else:
                     size = item.get("size", 0)
+
+                if size == 0:
+                    async with aiopen(dest, "wb") as f:
+                        pass
+                    return True
 
                 if progress is None:
                     async with aiopen(dest, "wb") as f:

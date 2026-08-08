@@ -439,6 +439,15 @@ def test_spans_cover_the_file_without_gaps_or_overlap(mega_dl, monkeypatch):
             assert next_start % 16 == 0
 
 
+async def test_zero_byte_file_is_created_without_http(mega_dl, tmp_path, monkeypatch):
+    """A zero-byte file must be created on disk without issuing range requests."""
+    helper, _ = _helper(mega_dl, tmp_path, monkeypatch)
+    dest = str(tmp_path / "empty.txt")
+    item = _item(name="empty.txt", size=0)
+    assert await helper._download_file(None, item, None, dest) is True
+    assert Path(dest).read_bytes() == b""
+
+
 def test_small_files_are_not_split(mega_dl):
     assert mega_dl.MegaDownloadHelper(None)._spans(2 * 1024 * 1024) == [
         (0, 2 * 1024 * 1024 - 1)
