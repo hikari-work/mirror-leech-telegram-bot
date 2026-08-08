@@ -46,16 +46,25 @@ def _page_num(href):
     return int(m.group(1)) if m else 0
 
 
+def _clean_base_url(url):
+    m = search(r"(/threads/[^/]+\.\d+)", url)
+    if m:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{m.group(1)}/"
+    return url
+
+
 def _parse(html):
     """Return (title, canonical, last_page, [external links]) from one page."""
     doc = HTML(html)
     title = (doc.xpath("//title/text()") or [""])[0].strip()
     canonical = (doc.xpath('//link[@rel="canonical"]/@href') or [""])[0]
     last_page = 1
-    links = []
-    for href in doc.xpath("//a/@href"):
+    for href in doc.xpath("//*[contains(@class, 'pageNav')]//a/@href"):
         if (pg := _page_num(href)) > last_page:
             last_page = pg
+    links = []
+    for href in doc.xpath("//a/@href"):
         if _is_external(href):
             links.append(href)
     return title, canonical, last_page, links
@@ -87,6 +96,7 @@ def scrape_thread(url):
             links.update(page_links)
 
             base = canonical or url
+            base = _clean_base_url(base)
             if not base.endswith("/"):
                 base += "/"
 

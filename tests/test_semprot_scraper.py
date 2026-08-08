@@ -63,7 +63,7 @@ _HTML = """
 <body>
 <a href="https://mega.nz/abc">m</a>
 <a href="https://mediafire.com/x">mf</a>
-<a href="/threads/foo.123/page-3">p3</a>
+<div class="pageNav"><a href="/threads/foo.123/page-3">p3</a></div>
 <a href="https://www.semprot.com/members/x">self</a>
 <a href="https://gambar123.com/i.jpg">imghost</a>
 <a href="mailto:a@b.com">mail</a>
@@ -97,3 +97,11 @@ def test_is_external_rules(semprot_module):
 def test_page_num(semprot_module):
     assert semprot_module._page_num("/threads/x/page-7") == 7
     assert semprot_module._page_num("/threads/x/") == 0
+
+
+def test_clean_base_url(semprot_module):
+    clean = semprot_module._clean_base_url
+    assert clean("https://www.semprot.com/threads/foo.123/unread") == "https://www.semprot.com/threads/foo.123/"
+    assert clean("https://www.semprot.com/threads/foo-bar.456/page-3") == "https://www.semprot.com/threads/foo-bar.456/"
+    assert clean("https://www.semprot.com/threads/some-name.789/post-1234") == "https://www.semprot.com/threads/some-name.789/"
+    assert clean("https://www.semprot.com/threads/simple.1/") == "https://www.semprot.com/threads/simple.1/"

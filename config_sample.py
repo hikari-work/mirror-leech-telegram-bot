@@ -28,14 +28,13 @@ BUZZHEAVIER_ACCOUNT_ID = ""
 BUZZHEAVIER_FOLDER_ID = ""
 GOFILE_API_KEY = ""
 # Mega encrypts files client-side, so the bot decrypts the stream as it
-# downloads. Mega also meters anonymous downloads per IP: when the quota runs
-# out the WARP tunnel is restarted for a fresh one, which needs warp-cli on the
-# host. Set WARP_ENABLED to False to download over the host's own IP instead,
-# in which case a quota error simply fails the task.
+# downloads. Metadata is resolved via gateway (https://api.piyann.me).
+# MEGA_PROXY_URL can be set to one or multiple Cloudflare Worker proxies (comma/space separated)
+# (e.g. "https://proxy-1.vianstefani754.workers.dev, https://proxy-2.vianstefani754.workers.dev").
+# If left empty, it defaults to proxy-1 through proxy-5.
 WARP_ENABLED = True
 WARP_PROXY_PORT = 40000
-# An explicit proxy for Mega traffic, overriding WARP's own listener.
-MEGA_PROXY_URL = ""
+MEGA_PROXY_URL = "https://proxy-1.vianstefani754.workers.dev, https://proxy-2.vianstefani754.workers.dev, https://proxy-3.vianstefani754.workers.dev, https://proxy-4.vianstefani754.workers.dev, https://proxy-5.vianstefani754.workers.dev"
 MEGA_CONNECTIONS = 4
 MEGA_MAX_RESTARTS = 3
 EXCLUDED_EXTENSIONS = ""

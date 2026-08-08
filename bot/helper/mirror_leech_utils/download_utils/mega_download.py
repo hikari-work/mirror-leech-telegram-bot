@@ -1,66 +1,97 @@
 """Downloading from Mega, decrypting as the bytes arrive.
 
-Mega serves ciphertext and nothing else, so aria2 cannot be handed one of these
-links - the file would land unreadable. The transfer therefore runs here: each
-file is fetched over a few ranged connections, decrypted in flight, and written
-straight to its final offset on disk.
+Mega serves ciphertext and nothing else. Metadata resolution (name, size,
+per-file AES key + nonce) is done by the gateway at api.piyann.me. The CDN
+URL returned by the gateway is fetched through one of five Cloudflare Worker
+proxies (proxy-{1-5}.vianstefani754.workers.dev) to avoid per-IP quota limits.
 
-AES-CTR is what makes that shape possible. Its keystream is derived from the
-absolute byte offset, so any range of the file decrypts independently of the
-rest, which is also why a download interrupted by a quota error can resume from
-where it stopped instead of starting over.
+AES-CTR makes parallel ranged downloads and mid-file resume both possible:
+the keystream for any byte offset is derived from that offset alone, so
+connections never need to coordinate and an interrupted transfer can continue
+from exactly where it stopped.
 """
 
 from asyncio import CancelledError, Lock, create_task, gather, sleep
 from os import path as ospath
 from secrets import token_urlsafe
 from time import time
+from urllib.parse import quote
 
 from aiofiles import open as aiopen
 from aiofiles.os import makedirs, remove
 from aiofiles.os import path as aiopath
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientSession, ClientTimeout
 
 from .... import LOGGER, task_dict, task_dict_lock
 from ....core.config_manager import Config
-from ...ext_utils.aiohttp_helper import proxy_connector
 from ...ext_utils.mega_client import (
     BLOCK,
     MegaApiError,
     counter_at,
     ctr_stream,
-    file_info,
+    file_cdn,
+    key_from_node,
     list_folder,
-    resolve_file,
-    unpack_file_key,
+    resolve_link,
 )
 from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
-from ...ext_utils.warp_utils import ensure_proxy_mode, restart_warp, warp_proxy_url
 from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.mega_status import MegaStatus
 from ..status_utils.queue_status import QueueStatus
 
-# Read size per connection. Large enough that the AES call is not dominated by
-# per-call overhead, small enough that cancelling stays responsive.
+# Read size per connection.
 CHUNK = 1024 * 1024
 
-# A file smaller than this is not worth splitting across connections.
+# A file smaller than this is not worth splitting.
 MIN_SPLIT = 8 * 1024 * 1024
 
-# CDN statuses that mean "this IP has had enough", as opposed to a broken URL.
-QUOTA_STATUSES = (402, 403, 429, 509)
+# CDN / Proxy statuses that mean rate limiting, quota exhaustion, or worker outage.
+QUOTA_STATUSES = (402, 403, 429, 502, 503, 504, 509)
+
+# Default fallback proxies 1 to 5 if MEGA_PROXY_URL is empty
+_DEFAULT_PROXIES = [
+    f"https://proxy-{n}.vianstefani754.workers.dev" for n in range(1, 6)
+]
 
 
 class _QuotaReached(Exception):
-    """Mega refused because of the egress IP, not because of the request."""
+    """Mega CDN refused because of the egress IP."""
+
+
+def _get_proxy_list():
+    """Parse Config.MEGA_PROXY_URL into a list of proxy base URLs."""
+    raw = getattr(Config, "MEGA_PROXY_URL", "")
+    if isinstance(raw, (list, tuple)):
+        proxies = [str(p).strip() for p in raw if str(p).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        # Support space or comma separated proxies
+        items = raw.replace(",", " ").split()
+        proxies = [p.strip() for p in items if p.strip()]
+    else:
+        proxies = []
+    return proxies or _DEFAULT_PROXIES
+
+
+def _proxied_url(cdn_url, proxy_index=0):
+    """Wrap cdn_url through the selected proxy worker from Config.MEGA_PROXY_URL or default list."""
+    proxies = _get_proxy_list()
+    base = proxies[proxy_index % len(proxies)]
+
+    encoded_cdn = quote(cdn_url, safe="")
+    if "{url}" in base:
+        return base.format(url=encoded_cdn)
+    if base.endswith("=") or base.endswith("&"):
+        return f"{base}{encoded_cdn}"
+
+    if "?" in base:
+        return f"{base}&url={encoded_cdn}"
+    if base.endswith("/"):
+        return f"{base}?url={encoded_cdn}"
+    return f"{base}/?url={encoded_cdn}"
 
 
 class MegaDownloadHelper:
-    """Drives one Mega task and reports progress to the status bar.
-
-    Shaped like the other non-aria2 downloaders (gallery-dl, GoFile): the
-    listener owns naming and completion, this owns bytes.
-    """
+    """Drives one Mega task and reports progress to the status bar."""
 
     def __init__(self, listener):
         self._listener = listener
@@ -70,8 +101,7 @@ class MegaDownloadHelper:
         self._speed = 0
         self._last_time = 0.0
         self._last_bytes = 0
-        self._proxy = ""
-        self._request_proxy = None
+        self._proxy_n = 1  # current proxy index (1-5)
 
     @property
     def processed_bytes(self):
@@ -79,8 +109,6 @@ class MegaDownloadHelper:
 
     @property
     def speed(self):
-        """Sampled rather than averaged over the whole task, so the number
-        tracks what the connection is doing now."""
         now = time()
         if (elapsed := now - self._last_time) > 0.5:
             self._speed = (self._processed - self._last_bytes) / elapsed
@@ -89,46 +117,33 @@ class MegaDownloadHelper:
         return self._speed
 
     def _session(self):
-        connector, request_proxy = proxy_connector(self._proxy)
-        self._request_proxy = request_proxy
-        # No total timeout: a multi-GB file legitimately takes hours. The
-        # per-read timeout is what catches a connection that has actually died.
         return ClientSession(
-            connector=connector,
             timeout=ClientTimeout(total=None, sock_read=120, sock_connect=60),
         )
 
-    async def _segment(self, session, url, path, aes_key, nonce, start, end, done):
-        """Fetch [start, end] of the ciphertext, decrypt it, write it at its
-        own offset. `done` carries how much of this segment already landed on
-        a previous attempt, so a retry resumes instead of refetching.
+    async def _segment(self, session, cdn_url, path, aes_key, nonce, start, end, done):
+        """Fetch [start, end] of ciphertext, decrypt, write at its offset.
 
-        Each segment opens the file separately and seeks: they write disjoint
-        ranges, so there is nothing to coordinate beyond the progress counter.
+        `done` carries how many bytes of this segment already landed on a prior
+        attempt so a retry resumes rather than refetches.
         """
         at = start + done[0]
         if at > end:
             return
 
-        # CTR can only start on a block boundary, so an unaligned resume point
-        # is backed up to one and the few replayed bytes are dropped below.
         aligned = (at // BLOCK) * BLOCK
         skip = at - aligned
 
+        proxied = _proxied_url(cdn_url, self._proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
-        async with session.get(url, headers=headers, proxy=self._request_proxy) as resp:
+        async with session.get(proxied, headers=headers) as resp:
             if resp.status in QUOTA_STATUSES:
-                raise _QuotaReached(f"the CDN answered HTTP {resp.status}")
+                raise _QuotaReached(f"CDN answered HTTP {resp.status}")
             if resp.status not in (200, 206):
-                raise ConnectionError(f"the CDN answered HTTP {resp.status}")
+                raise ConnectionError(f"CDN answered HTTP {resp.status}")
 
             async with aiopen(path, "r+b") as f:
                 await f.seek(at)
-                # One context for the whole segment: iter_chunked yields at
-                # most CHUNK bytes, not exactly CHUNK, and a read that is not
-                # a multiple of the AES block would restart the keystream
-                # mid-block if the counter were rebuilt per chunk. The file
-                # would keep its exact size and turn to noise from there on.
                 cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
 
                 async for chunk in resp.content.iter_chunked(CHUNK):
@@ -138,8 +153,6 @@ class MegaDownloadHelper:
                     plain = cipher.update(chunk)
 
                     if skip:
-                        # Guarded against a chunk shorter than the replayed
-                        # prefix, which a tiny final chunk can be.
                         if len(plain) <= skip:
                             skip -= len(plain)
                             continue
@@ -151,20 +164,12 @@ class MegaDownloadHelper:
                         self._processed += len(plain)
 
         if not self._listener.is_cancelled and done[0] < end - start + 1:
-            # A stream that stops early otherwise looks like success and leaves
-            # a hole of zero bytes in the middle of the file.
             raise ConnectionError(
-                f"the CDN closed the connection after {done[0]} of "
-                f"{end - start + 1} bytes"
+                f"CDN closed after {done[0]} of {end - start + 1} bytes"
             )
 
     def _spans(self, size):
-        """Split a file into contiguous ranges, one per connection.
-
-        Boundaries are block-aligned so no cipher block is shared between two
-        connections - each can then derive its own counter and they never need
-        to agree on anything.
-        """
+        """Split a file into contiguous block-aligned ranges."""
         want = max(1, int(Config.MEGA_CONNECTIONS or 1))
         if size < MIN_SPLIT or want == 1:
             return [(0, size - 1)]
@@ -180,27 +185,31 @@ class MegaDownloadHelper:
                 spans.append((start, end))
         return spans
 
-    async def _download_file(self, session, item, folder, dest):
-        """One file, retrying across egress IPs when Mega meters us.
-
-        The URL is re-resolved on each attempt because Mega binds it to the
-        requesting IP - after a rotation the old one is dead anyway.
-        """
+    async def _download_file(self, session, item, folder_handle, dest):
+        """One file, rotating the proxy worker on quota."""
         await makedirs(ospath.dirname(dest), exist_ok=True)
-        aes_key, nonce, _ = unpack_file_key(item["key"])
+
+        # Items from resolve_link carry pre-decoded aes_key/nonce bytes.
+        # Items from list_folder carry key_b64 and need key_from_node.
+        if "aes_key" in item:
+            aes_key = item["aes_key"]
+            nonce = item["nonce"]
+        else:
+            aes_key, nonce = key_from_node(item)
+
+        cdn_url = item.get("cdn_url") or ""
         progress = None
-        # Budgeted per file: a folder share is thousands of files, and one
-        # spent budget must not condemn every file that comes after it.
         restarts = 0
 
         while True:
             try:
-                url, size = await resolve_file(session, item["handle"], folder)
-                size = size or item["size"]
+                if not cdn_url:
+                    cdn_url, size = await file_cdn(session, folder_handle, item["handle"])
+                    size = size or item.get("size", 0)
+                else:
+                    size = item.get("size", 0)
 
                 if progress is None:
-                    # Preallocated so every connection can seek to its own
-                    # offset immediately; sparse until each range is filled.
                     async with aiopen(dest, "wb") as f:
                         await f.truncate(size)
                     progress = [[0] for _ in self._spans(size)]
@@ -209,7 +218,8 @@ class MegaDownloadHelper:
                 tasks = [
                     create_task(
                         self._segment(
-                            session, url, dest, aes_key, nonce, start, end, done
+                            session, cdn_url, dest, aes_key, nonce,
+                            start, end, done,
                         )
                     )
                     for (start, end), done in zip(spans, progress)
@@ -217,47 +227,23 @@ class MegaDownloadHelper:
                 try:
                     await gather(*tasks)
                 except BaseException:
-                    # gather propagates the first failure but leaves the other
-                    # connections reading into a URL that is about to be
-                    # replaced, so they are stopped before the retry.
                     for task in tasks:
                         task.cancel()
                     await gather(*tasks, return_exceptions=True)
                     raise
                 return not self._listener.is_cancelled
 
-            except (_QuotaReached, MegaApiError) as e:
-                if isinstance(e, MegaApiError) and not e.is_quota:
-                    raise
-                if not self._proxy:
-                    # Nothing is routed through WARP, so bouncing the tunnel
-                    # would not change the address this request comes from -
-                    # it would only stall every file for the reconnect timeout.
-                    raise
-                if restarts >= int(Config.MEGA_MAX_RESTARTS or 0):
+            except (_QuotaReached, MegaApiError, ConnectionError, TimeoutError, ClientError) as e:
+                max_restarts = int(Config.MEGA_MAX_RESTARTS or 0)
+                if restarts >= max_restarts:
                     raise
                 restarts += 1
+                self._proxy_n += 1
                 LOGGER.info(
-                    f"Mega: {e} on {item['name']}, rotating the egress IP "
-                    f"[{restarts}/{Config.MEGA_MAX_RESTARTS}]"
+                    f"Mega: {e} on {item['name']}, rotating to next proxy in list "
+                    f"[{restarts}/{max_restarts}]"
                 )
-                # Progress is deliberately kept: the bytes already written are
-                # valid plaintext, so the retry resumes rather than restarts.
-                if not await restart_warp():
-                    # The tunnel came back up but the proxy carries no traffic,
-                    # or the tunnel never reconnected. Either way rotation is
-                    # off the table, so fall back to a direct download for this
-                    # file and every file after it.
-                    LOGGER.warning(
-                        "Mega: WARP restart failed, falling back to direct download - "
-                        "further quota errors will not be recoverable"
-                    )
-                    self._proxy = ""
-                    self._request_proxy = None
                 await sleep(3)
-                # The CDN URL is one-shot, IP-locked, and dies after rotation:
-                # reuse returns 403 with no body. It must be re-resolved from
-                # the new egress before the retry can proceed.
                 continue
 
     async def _register(self, from_queue=False):
@@ -269,41 +255,33 @@ class MegaDownloadHelper:
                 await send_status_message(self._listener.message)
 
     async def _gather_files(self, session, link):
-        """Resolve the link into the file list and the task's name."""
-        if link["kind"] == "file":
-            item = await file_info(session, link["handle"], link["key"])
-            return [item], item["name"]
+        """Resolve the link into a file list and a task name."""
+        kind = link["kind"]
+        handle = link["handle"]
+        key = link["key"]
 
-        listing = await list_folder(session, link["handle"], link["key"])
-        return listing["files"], listing["name"]
+        if kind == "file":
+            resolved = await resolve_link(session, kind, handle, key)
+            return resolved["files"], resolved["name"], None
+
+        # folder: use /list for the full listing (resolve gives partial data)
+        listing = await list_folder(session, handle, key)
+        return listing["files"], listing["name"], handle
 
     async def add_download(self, path):
         link = self._listener.link["mega"]
 
-        # Proxy mode is arranged before anything is fetched, so the listing and
-        # the download share one egress and rotating it affects both.
-        self._proxy = warp_proxy_url()
-        if self._proxy.startswith("socks5://127.0.0.1"):
-            if not await ensure_proxy_mode():
-                LOGGER.warning(
-                    "Mega: WARP proxy is unavailable, downloading directly - "
-                    "a quota error will not be recoverable"
-                )
-                self._proxy = ""
-
         try:
             async with self._session() as session:
-                files, title = await self._gather_files(session, link)
+                files, title, folder_handle = await self._gather_files(session, link)
         except (MegaApiError, ValueError, ConnectionError) as e:
             await self._listener.on_download_error(f"Mega: {e}")
             return
 
-        # Known up front from the API, so the status bar shows a real total and
-        # a meaningful ETA from the first second.
-        self._listener.size = sum(item["size"] for item in files)
+        self._listener.size = sum(item.get("size", 0) for item in files)
         if not self._listener.name:
             self._listener.name = title
-        single = len(files) == 1 and not files[0]["path"]
+        single = len(files) == 1 and not files[0].get("path")
 
         msg, button = await stop_duplicate_check(self._listener)
         if msg:
@@ -330,16 +308,11 @@ class MegaDownloadHelper:
             f"({len(files)} file{'s' if len(files) != 1 else ''})"
         )
 
-        await self._run(path, link, files, single)
+        await self._run(path, folder_handle, files, single)
 
-    async def _run(self, path, link, files, single):
-        """Download every file, then hand over to the listener.
-
-        A single-file task writes straight into the task directory; a folder
-        recreates its tree under one named after the share.
-        """
+    async def _run(self, path, folder_handle, files, single):
+        """Download every file, then hand over to the listener."""
         base = path if single else f"{path}/{self._listener.name}"
-        folder = link["handle"] if link["kind"] == "folder" else None
         failed = []
 
         try:
@@ -349,15 +322,13 @@ class MegaDownloadHelper:
                         return
 
                     name = item["name"] if not single else self._listener.name
-                    dest = ospath.join(base, item["path"], name)
+                    dest = ospath.join(base, item.get("path", ""), name)
 
                     try:
-                        await self._download_file(session, item, folder, dest)
+                        await self._download_file(session, item, folder_handle, dest)
                     except CancelledError:
                         raise
                     except Exception as e:
-                        # One dead file should not lose a whole folder, so the
-                        # rest continues and the failures are reported at the end.
                         LOGGER.error(f"Mega: {item['name']} failed: {e}")
                         failed.append(f"{item['name']} ({e})")
                         if await aiopath.exists(dest):
@@ -379,8 +350,6 @@ class MegaDownloadHelper:
 
         if failed:
             LOGGER.info(f"Mega: {len(failed)} of {len(files)} file(s) failed")
-            # The total was computed from the listing, so it has to come back
-            # down or the upload would report a size that never arrived.
             self._listener.size = self._processed
 
         await self._listener.on_download_complete()
@@ -393,4 +362,3 @@ class MegaDownloadHelper:
 
 async def add_mega_download(listener, path):
     await MegaDownloadHelper(listener).add_download(path)
-
