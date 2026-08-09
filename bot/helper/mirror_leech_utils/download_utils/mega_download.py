@@ -159,21 +159,21 @@ class MegaDownloadHelper:
                     cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
 
                     async for chunk in resp.content.iter_chunked(CHUNK):
-                    if self._listener.is_cancelled:
-                        return
+                        if self._listener.is_cancelled:
+                            return
 
-                    plain = cipher.update(chunk)
+                        plain = cipher.update(chunk)
 
-                    if skip:
-                        if len(plain) <= skip:
-                            skip -= len(plain)
-                            continue
-                        plain, skip = plain[skip:], 0
+                        if skip:
+                            if len(plain) <= skip:
+                                skip -= len(plain)
+                                continue
+                            plain, skip = plain[skip:], 0
 
-                    await f.write(plain)
-                    done[0] += len(plain)
-                    async with self._lock:
-                        self._processed += len(plain)
+                        await f.write(plain)
+                        done[0] += len(plain)
+                        async with self._lock:
+                            self._processed += len(plain)
 
         if not self._listener.is_cancelled and done[0] < end - start + 1:
             raise ConnectionError(
