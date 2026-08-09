@@ -218,6 +218,8 @@ class MegaDownloadHelper:
         proxy_n = file_idx % len(proxies) if proxies else 0
 
         while True:
+            if self._listener.is_cancelled:
+                return False
             try:
                 if not cdn_url:
                     cdn_url, size = await file_cdn(session, folder_handle, item["handle"])
@@ -255,6 +257,8 @@ class MegaDownloadHelper:
                 return not self._listener.is_cancelled
 
             except (_QuotaReached, MegaApiError, _CDNExpiredError, ConnectionError, TimeoutError, ClientError) as e:
+                if self._listener.is_cancelled:
+                    return False
                 proxies = _get_proxy_list()
                 max_restarts = int(Config.MEGA_MAX_RESTARTS or 0)
                 if proxies:
@@ -361,6 +365,8 @@ class MegaDownloadHelper:
                 except CancelledError:
                     raise
                 except Exception as e:
+                    if self._listener.is_cancelled:
+                        return
                     LOGGER.error(f"Mega: {item['name']} failed: {e}")
                     failed.append(f"{item['name']} ({e})")
                     if await aiopath.exists(dest):
