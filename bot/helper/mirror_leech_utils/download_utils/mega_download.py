@@ -307,6 +307,8 @@ class MegaDownloadHelper:
         self._listener.size = sum(item.get("size", 0) for item in files)
         if not self._listener.name:
             self._listener.name = title
+        if self._listener.name.lower().endswith(".m4v"):
+            self._listener.name = f"{self._listener.name[:-4]}.mp4"
         single = len(files) == 1 and not files[0].get("path")
 
         msg, button = await stop_duplicate_check(self._listener)
@@ -346,6 +348,8 @@ class MegaDownloadHelper:
             if self._listener.is_cancelled:
                 return
             name = item["name"] if not single else self._listener.name
+            if name.lower().endswith(".m4v"):
+                name = f"{name[:-4]}.mp4"
             dest = ospath.join(base, item.get("path", ""), name)
             async with sem:
                 try:
