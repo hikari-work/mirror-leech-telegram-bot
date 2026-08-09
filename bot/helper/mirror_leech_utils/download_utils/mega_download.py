@@ -147,14 +147,14 @@ class MegaDownloadHelper:
         worker_sem = self._worker_sems[proxy_n % len(self._worker_sems)]
         async with worker_sem:
             async with session.get(proxied, headers=headers) as resp:
-            if resp.status in QUOTA_STATUSES:
-                raise _QuotaReached(f"CDN answered HTTP {resp.status}")
-            if resp.status in (404, 410):
-                raise _CDNExpiredError(f"CDN answered HTTP {resp.status}")
-            if resp.status not in (200, 206):
-                raise ConnectionError(f"CDN answered HTTP {resp.status}")
+                if resp.status in QUOTA_STATUSES:
+                    raise _QuotaReached(f"CDN answered HTTP {resp.status}")
+                if resp.status in (404, 410):
+                    raise _CDNExpiredError(f"CDN answered HTTP {resp.status}")
+                if resp.status not in (200, 206):
+                    raise ConnectionError(f"CDN answered HTTP {resp.status}")
 
-            async with aiopen(path, "r+b") as f:
+                async with aiopen(path, "r+b") as f:
                 await f.seek(at)
                 cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
 
