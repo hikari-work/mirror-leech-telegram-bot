@@ -305,6 +305,7 @@ class MegaDownloadHelper:
             return
 
         self._listener.size = sum(item.get("size", 0) for item in files)
+        self._user_set_name = bool(self._listener.name)
         if not self._listener.name:
             self._listener.name = title
         if self._listener.name.lower().endswith(".m4v"):
@@ -347,9 +348,12 @@ class MegaDownloadHelper:
         async def _download_item(item, idx):
             if self._listener.is_cancelled:
                 return
-            name = item["name"] if not single else self._listener.name
-            if name.lower().endswith(".m4v"):
-                name = f"{name[:-4]}.mp4"
+            if single:
+                name = self._listener.name
+            else:
+                name = item["name"]
+                if name.lower().endswith(".m4v"):
+                    name = f"{name[:-4]}.mp4"
             dest = ospath.join(base, item.get("path", ""), name)
             async with sem:
                 try:
