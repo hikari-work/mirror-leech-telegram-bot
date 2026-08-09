@@ -107,6 +107,8 @@ class MegaDownloadHelper:
         self._speed = 0
         self._last_time = 0.0
         self._last_bytes = 0
+        proxies = _get_proxy_list()
+        self._worker_sems = [Semaphore(6) for _ in range(max(1, len(proxies)))]
 
     @property
     def processed_bytes(self):
@@ -142,7 +144,9 @@ class MegaDownloadHelper:
 
         proxied = _proxied_url(cdn_url, proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
-        async with session.get(proxied, headers=headers) as resp:
+        worker_sem = self._worker_sems[proxy_n % len(self._worker_sems)]
+        async with worker_sem:
+            async with session.get(proxied, headers=headers) as resp:
             if resp.status in QUOTA_STATUSES:
                 raise _QuotaReached(f"CDN answered HTTP {resp.status}")
             if resp.status in (404, 410):
@@ -333,10 +337,10 @@ class MegaDownloadHelper:
         await self._run(path, folder_handle, files, single)
 
     async def _run(self, path, folder_handle, files, single):
-        """Download files concurrently (up to 4 at once), then hand over to the listener."""
+        """Download files concurrently (up to number of proxies), then hand over to the listener."""
         base = path if single else f"{path}/{self._listener.name}"
         failed = []
-        sem = Semaphore(4)
+        sem = Semaphore(len(self._worker_sems))
 
         async def _download_item(item, idx):
             if self._listener.is_cancelled:
