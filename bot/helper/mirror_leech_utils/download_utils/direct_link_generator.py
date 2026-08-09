@@ -833,7 +833,11 @@ def terabox(url):
 
         return url
 
-    api_url = "https://api.piyann.me/api/v1/scrape/terabox"
+    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    api_url = f"{gateway_base}/api/v1/scrape/terabox"
+    headers_req = {}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers_req["Authorization"] = f"Bearer {token}"
     # Terabox answers a dead/unauthorized dlink with HTTP 200 and a tiny JSON
     # body, so aria2 happily saves it as the media file. Usually only a couple
     # of files in a share are affected, so probe them individually and retry
@@ -942,7 +946,7 @@ def terabox(url):
             response = session.get(
                 api_url,
                 params={"q": sanitized_url},
-                headers={"accept": "application/json"},
+                headers={"accept": "application/json", **headers_req},
                 timeout=60
             ).json()
         except Exception as e:
@@ -1152,14 +1156,19 @@ def vidoy_sanitize_url(url):
 def vidoy_scrape(session, target, probe=False):
     """Return (response, reason, retryable). A gateway hiccup is worth another
     attempt, a removed video is not."""
+    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    vidoy_api = f"{gateway_base}/api/v1/scrape/vidoy"
+    headers = {"accept": "application/json"}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers["Authorization"] = f"Bearer {token}"
     params = {"q": target}
     if probe:
         params["probe"] = "true"
     try:
         resp = session.get(
-            VIDOY_API,
+            vidoy_api,
             params=params,
-            headers={"accept": "application/json"},
+            headers=headers,
             timeout=60,
         )
     except Exception as e:

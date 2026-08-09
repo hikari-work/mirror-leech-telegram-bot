@@ -44,6 +44,9 @@ class Config:
     # IP whenever Mega reports the quota spent.
     WARP_ENABLED = True
     WARP_PROXY_PORT = 40000
+    # Gateway configuration for scrapers and resolvers
+    GATEWAY_URL = "https://api.piyann.me"
+    GATEWAY_TOKEN = ""
     # An explicit proxy for Mega traffic, overriding WARP's own listener.
     MEGA_PROXY_URL = ""
     # Ranged connections per file. Mega tolerates a handful; too many is what

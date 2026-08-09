@@ -17,7 +17,8 @@ from yarl import URL
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-GATEWAY = "https://api.piyann.me/api/v1/scrape/mega"
+from bot.core.config_manager import Config
+
 BLOCK = 16
 _API_ATTEMPTS = 4
 
@@ -93,10 +94,13 @@ async def _gateway_get(session, path, params, context):
     Returns the parsed JSON body on success; raises MegaApiError on gateway
     error or after all attempts exhausted.
     """
-    base = GATEWAY + path
+    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    base = f"{gateway_base}/api/v1/scrape/mega{path}"
     query_str = urlencode(params or {}, safe="%")
     req_url = URL(f"{base}?{query_str}", encoded=True) if query_str else URL(base)
     headers = {"User-Agent": _USER_AGENT}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers["Authorization"] = f"Bearer {token}"
     error = None
 
     for attempt in range(1, _API_ATTEMPTS + 1):
@@ -144,13 +148,26 @@ def _reconstruct_url(kind, handle, key):
 
 def _normalise_file(f):
     """Map a MegaResolvedFile dict to the internal {handle,name,path,size,aes_key,nonce} shape."""
+    if "aes_key" in f:
+        aes_key = b64url_decode(f["aes_key"])
+        nonce = b64url_decode(f["nonce"])
+    elif f.get("key_b64"):
+        raw = b64url_decode(f["key_b64"])
+        if len(raw) < 32:
+            raise ValueError(f"node key too short: {len(raw)} bytes")
+        aes_key = bytes(a ^ b for a, b in zip(raw[:16], raw[16:32]))
+        nonce = raw[16:24]
+    else:
+        aes_key = b""
+        nonce = b""
+
     return {
         "handle": f["handle"],
         "name": _safe_name(f.get("name"), f["handle"]),
         "path": f.get("path") or "",
         "size": int(f.get("size") or 0),
-        "aes_key": b64url_decode(f["aes_key"]),   # 16 bytes
-        "nonce": b64url_decode(f["nonce"]),         # 8 bytes
+        "aes_key": aes_key,
+        "nonce": nonce,
         # cdn url is only present for single-file links
         "cdn_url": f.get("url") or "",
     }

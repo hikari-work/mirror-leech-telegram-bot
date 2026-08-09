@@ -6,9 +6,8 @@ Uses gateway API endpoint: https://api.piyann.me/api/v1/scrape/semprot
 
 from urllib.parse import urlparse, urlunparse
 
+from ....core.config_manager import Config
 from ...ext_utils.exceptions import DirectDownloadLinkException
-
-GATEWAY_API = "https://api.piyann.me/api/v1/scrape/semprot"
 
 
 def _normalize_url(url: str) -> str:
@@ -25,8 +24,13 @@ def scrape_thread(url: str):
     from requests import get as req_get
 
     target_url = _normalize_url(url)
+    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    gateway_api = f"{gateway_base}/api/v1/scrape/semprot"
+    headers = {}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        r = req_get(GATEWAY_API, params={"q": target_url}, timeout=60)
+        r = req_get(gateway_api, params={"q": target_url}, headers=headers, timeout=60)
         r.raise_for_status()
         data = r.json()
     except Exception as e:

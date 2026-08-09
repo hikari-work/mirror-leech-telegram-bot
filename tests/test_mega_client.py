@@ -187,7 +187,8 @@ async def test_resolve_link_file(mc, monkeypatch):
 async def test_resolve_link_folder(mc, monkeypatch):
     monkeypatch.setattr(mc, "sleep", _no_sleep)
     files = [
-        _file_entry("FH1", "a.mp4", ""), _file_entry("FH2", "b.mp4", "Sub"),
+        _file_entry("FH1", "a.mp4", ""),
+        {"handle": "FH2", "name": "b.mp4", "path": "Sub", "size": 200, "key_b64": "A" * 43},
     ]
     body = {
         "success": True, "kind": "folder", "name": "Films",
@@ -202,6 +203,9 @@ async def test_resolve_link_folder(mc, monkeypatch):
     assert len(result["files"]) == 2
     names = {f["name"] for f in result["files"]}
     assert names == {"a.mp4", "b.mp4"}
+    b_file = [f for f in result["files"] if f["name"] == "b.mp4"][0]
+    assert len(b_file["aes_key"]) == 16
+    assert len(b_file["nonce"]) == 8
 
 
 # list_folder

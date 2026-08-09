@@ -195,7 +195,7 @@ class MegaDownloadHelper:
                 spans.append((start, end))
         return spans
 
-    async def _download_file(self, session, item, folder_handle, dest):
+    async def _download_file(self, session, item, folder_handle, dest, file_idx=0):
         """One file, rotating the proxy worker on quota."""
         await makedirs(ospath.dirname(dest), exist_ok=True)
 
@@ -210,7 +210,8 @@ class MegaDownloadHelper:
         cdn_url = item.get("cdn_url") or ""
         progress = None
         restarts = 0
-        proxy_n = 0
+        proxies = _get_proxy_list()
+        proxy_n = file_idx % len(proxies) if proxies else 0
 
         while True:
             try:
@@ -337,14 +338,14 @@ class MegaDownloadHelper:
         failed = []
         sem = Semaphore(4)
 
-        async def _download_item(item):
+        async def _download_item(item, idx):
             if self._listener.is_cancelled:
                 return
             name = item["name"] if not single else self._listener.name
             dest = ospath.join(base, item.get("path", ""), name)
             async with sem:
                 try:
-                    await self._download_file(session, item, folder_handle, dest)
+                    await self._download_file(session, item, folder_handle, dest, idx)
                 except CancelledError:
                     raise
                 except Exception as e:
@@ -355,7 +356,7 @@ class MegaDownloadHelper:
 
         try:
             async with self._session() as session:
-                await gather(*[_download_item(item) for item in files])
+                await gather(*[_download_item(item, idx) for idx, item in enumerate(files)])
         except CancelledError:
             return
         except Exception as e:
