@@ -155,10 +155,10 @@ class MegaDownloadHelper:
                     raise ConnectionError(f"CDN answered HTTP {resp.status}")
 
                 async with aiopen(path, "r+b") as f:
-                await f.seek(at)
-                cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
+                    await f.seek(at)
+                    cipher = ctr_stream(aes_key, counter_at(nonce, aligned))
 
-                async for chunk in resp.content.iter_chunked(CHUNK):
+                    async for chunk in resp.content.iter_chunked(CHUNK):
                     if self._listener.is_cancelled:
                         return
 
