@@ -235,6 +235,15 @@ YT_HELP_DICT = {
     "FFmpeg-Cmds": ffmpeg_cmds,
 }
 
+stream_upload = """<b>Stream Upload</b>: -su
+
+Upload each file immediately after it finishes downloading, then delete it from disk before downloading the next file.
+Useful for large albums (e.g. Bunkr) that exceed disk space.
+Disk usage = size of largest single file instead of total album size.
+Note: Post-processing (extract, compress, ffmpeg) is skipped in this mode.
+
+/cmd link -su"""
+
 LEECH_HELP_DICT = {
     "main": leech,
     "New-Name": new_name,
