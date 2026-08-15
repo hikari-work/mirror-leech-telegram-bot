@@ -261,6 +261,7 @@ LEECH_HELP_DICT = {
     "FFmpeg-Cmds": ffmpeg_cmds,
     "AllDebrid": alldebrid_arg,
     "TorBox": torbox_arg,
+    "Stream-Upload": stream_upload,
 }
 
 RSS_HELP_MESSAGE = """

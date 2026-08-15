@@ -51,6 +51,7 @@ class TaskConfig(
         self.is_ytdlp = False
         self.is_alldebrid = False
         self.is_torbox = False
+        self.stream_upload = False
         self.equal_splits = False
         self.user_transmission = False
         self.hybrid_leech = False

@@ -33,6 +33,7 @@ LEECH_ARG_DEFAULTS: dict[str, object] = {
     "-ut": False,
     "-ad": False,
     "-tb": False,
+    "-su": False,
     "-i": 0,
     "-sp": 0,
     "link": "",
@@ -103,6 +104,7 @@ class LeechArgs:
     user_trans: bool = False
     is_alldebrid: bool = False
     is_torbox: bool = False
+    stream_upload: bool = False
 
     # int
     multi: int = 0
@@ -213,6 +215,7 @@ def parse_leech_args(input_list: list[str]) -> LeechArgs:
     la.user_trans = raw["-ut"]
     la.is_alldebrid = raw["-ad"]
     la.is_torbox = raw["-tb"]
+    la.stream_upload = raw["-su"]
 
     # str / list / set
     la.link = raw["link"]

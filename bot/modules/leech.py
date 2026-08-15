@@ -143,6 +143,7 @@ class Leech(TaskListener):
         self.user_trans = args.user_trans
         self.is_alldebrid = args.is_alldebrid
         self.is_torbox = args.is_torbox
+        self.stream_upload = args.stream_upload
         self.multi = args.multi
         self.ffmpeg_cmds = args.ffmpeg_cmds
 
