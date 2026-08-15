@@ -1,0 +1,349 @@
+from aiofiles.os import path as aiopath
+from base64 import b64encode
+from secrets import token_urlsafe
+
+from .. import LOGGER, bot_loop, multi_tags, multi_batches, DOWNLOAD_DIR
+from ..helper.ext_utils.bot_utils import COMMAND_USAGE
+from ..helper.ext_utils.links_utils import (
+    is_url,
+    is_magnet,
+    is_telegram_link,
+)
+from ..helper.ext_utils.task_args import parse_leech_args
+from ..helper.listeners.task_listener import TaskListener
+from ..helper.mirror_leech_utils.download_utils.aria2_download import (
+    add_aria2_download,
+)
+from ..helper.mirror_leech_utils.download_utils.direct_downloader import (
+    add_direct_download,
+)
+from ..helper.mirror_leech_utils.download_utils.link_resolver import (
+    resolve_torbox_torrent,
+    resolve_alldebrid_torrent,
+    resolve_torbox_web,
+    resolve_alldebrid_web,
+    resolve_direct_link,
+    resolve_pornhub,
+)
+from ..helper.mirror_leech_utils.download_utils.mega_download import (
+    add_mega_download,
+)
+from ..helper.mirror_leech_utils.download_utils.pornhub_download import (
+    add_pornhub_download,
+)
+from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torrent
+from ..helper.mirror_leech_utils.download_utils.telegram_download import (
+    TelegramDownloadHelper,
+)
+from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
+    add_ytdlp_download,
+)
+from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.telegram_helper.bot_commands import BotCommands
+
+
+class Leech(TaskListener):
+    def __init__(
+        self,
+        client,
+        message,
+        is_qbit=False,
+        same_dir=None,
+        bulk=None,
+        multi_tag=None,
+        options="",
+    ):
+        if same_dir is None:
+            same_dir = {}
+        if bulk is None:
+            bulk = []
+        self.message = message
+        self.client = client
+        self.multi_tag = multi_tag
+        self.options = options
+        self.same_dir = same_dir
+        self.bulk = bulk
+        super().__init__()
+        self.is_qbit = is_qbit
+
+    async def new_event(self):
+        text = self.message.text.split("\n")
+        input_list = text[0].split(" ")
+
+        args = parse_leech_args(input_list[1:])
+
+        self._apply_args(args)
+
+        headers = args.headers
+
+        if args.is_bulk:
+            await self.init_bulk(input_list, args.bulk_start, args.bulk_end, Leech)
+            return
+
+        await self.register_same_dir()
+
+        if len(self.bulk) != 0:
+            del self.bulk[0]
+
+        await self.run_multi(input_list, Leech)
+        await self.get_tag(text)
+
+        path = f"{DOWNLOAD_DIR}{self.mid}{self.folder_name}"
+
+        result = await self._resolve_reply(input_list)
+        if result is None:
+            # _resolve_reply handled everything (bulk dispatch or error)
+            return
+        reply_to, file_, session = result
+
+        if not await self._validate_link(file_):
+            return
+
+        if len(self.link) > 0:
+            LOGGER.info(self.link)
+
+        try:
+            await self.before_start()
+        except Exception as e:
+            await self.fail_task(e)
+            return
+
+        if not await self._resolve_links(headers, file_):
+            return
+
+        await self._dispatch_download(path, args, headers, file_, reply_to, session)
+
+    # ── arg application ─────────────────────────────────────────────
+
+    def _apply_args(self, args):
+        """Transfer parsed args onto *self*."""
+        self.select = args.select
+        self.seed = args.seed
+        self.name = args.name
+        self.link = args.link
+        self.compress = args.compress
+        self.extract = args.extract
+        self.join = args.join
+        self.thumb = args.thumb
+        self.split_size = args.split_size
+        self.sample_video = args.sample_video
+        self.screen_shots = args.screen_shots
+        self.force_run = args.force_run
+        self.force_download = args.force_download
+        self.force_upload = args.force_upload
+        self.convert_audio = args.convert_audio
+        self.convert_video = args.convert_video
+        self.name_sub = args.name_sub
+        self.hybrid_leech = args.hybrid_leech
+        self.thumbnail_layout = args.thumbnail_layout
+        self.as_doc = args.as_doc
+        self.as_med = args.as_med
+        self.folder_name = args.folder_name
+        self.bot_trans = args.bot_trans
+        self.user_trans = args.user_trans
+        self.is_alldebrid = args.is_alldebrid
+        self.is_torbox = args.is_torbox
+        self.multi = args.multi
+        self.ffmpeg_cmds = args.ffmpeg_cmds
+
+    # ── reply / link resolution ─────────────────────────────────────
+
+    async def _resolve_reply(self, input_list):
+        """Resolve the reply message, handling telegram links and bulk.
+
+        Returns ``(reply_to, file_, session)`` on success, or ``None``
+        if the method handled everything (bulk dispatch or error).
+        """
+        reply_to = None
+        file_ = None
+        session = ""
+
+        if not self.link and (reply_to := self.message.reply_to_message):
+            if reply_to.text:
+                self.link = reply_to.text.split("\n", 1)[0].strip()
+
+        if is_telegram_link(self.link):
+            try:
+                reply_to, session = await get_tg_link_message(
+                    self.link, user_id=self.user_id
+                )
+            except Exception as e:
+                await self.fail_task(f"ERROR: {e}")
+                return None
+
+        if isinstance(reply_to, list):
+            await self._handle_bulk(reply_to, input_list)
+            return None
+
+        if reply_to:
+            file_ = (
+                reply_to.document
+                or reply_to.photo
+                or reply_to.video
+                or reply_to.audio
+                or reply_to.voice
+                or reply_to.video_note
+                or reply_to.sticker
+                or reply_to.animation
+                or None
+            )
+
+            if file_ is None:
+                if reply_text := reply_to.text:
+                    self.link = reply_text.split("\n", 1)[0].strip()
+                else:
+                    reply_to = None
+            elif reply_to.document and (
+                file_.mime_type == "application/x-bittorrent"
+                or file_.file_name.endswith(".torrent")
+            ):
+                self.link = await reply_to.download()
+                file_ = None
+
+        return reply_to, file_, session
+
+    async def _handle_bulk(self, reply_to, input_list):
+        """Handle list-type reply_to (bulk messages from telegram link)."""
+        self.bulk = reply_to
+        b_msg = input_list[:1]
+        self.options = " ".join(input_list[1:])
+
+        if not self.multi_tag:
+            self.multi_tag = token_urlsafe(3)
+            multi_tags.add(self.multi_tag)
+
+        if "-m" not in self.options:
+            self.options += f" -m bulk-{self.multi_tag}"
+
+        b_msg.append(f"{self.bulk[0]} -i {len(self.bulk)} {self.options}")
+        msg = " ".join(b_msg)
+        if len(self.bulk) > 2:
+            msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+        nextmsg = await send_message(self.message, msg)
+        if isinstance(nextmsg, str):
+            LOGGER.error(f"Can't send bulk message: {nextmsg}")
+            return
+
+        if self.multi_tag not in multi_batches:
+            multi_batches[self.multi_tag] = {
+                "anchor": nextmsg,
+                "total": len(self.bulk),
+                "done": 0,
+                "results": [],
+                "errors": [],
+                "cmd_msgs": [],
+                "name": self.multi_tag,
+            }
+
+        if self.message.from_user:
+            nextmsg.from_user = self.user
+        else:
+            nextmsg.sender_chat = self.user
+        await Leech(
+            self.client,
+            nextmsg,
+            self.is_qbit,
+            self.same_dir,
+            self.bulk,
+            self.multi_tag,
+            self.options,
+        ).new_event()
+
+    async def _validate_link(self, file_):
+        """Return *False* (and show usage / fail) if there is no valid input."""
+        if (
+            not self.link
+            and file_ is None
+            or is_telegram_link(self.link)
+            and file_ is None
+            or file_ is None
+            and not is_url(self.link)
+            and not is_magnet(self.link)
+            and not await aiopath.exists(self.link)
+        ):
+            await send_message(
+                self.message, COMMAND_USAGE["leech"][0], COMMAND_USAGE["leech"][1]
+            )
+            await self.fail_task("Invalid or missing link", notify=False)
+            return False
+        return True
+
+    # ── debrid / direct link resolution ─────────────────────────────
+
+    async def _resolve_links(self, headers, file_):
+        """Run torbox / alldebrid / direct-link resolution.
+
+        Returns *False* if the task was failed (caller should return).
+        """
+        if self.is_torbox:
+            if not await resolve_torbox_torrent(self):
+                return False
+
+        if self.is_alldebrid:
+            if not await resolve_alldebrid_torrent(self):
+                return False
+
+        # Web link resolution (not magnet, not torrent, not qbit, no file)
+        if (
+            self.link
+            and isinstance(self.link, str)
+            and not self.is_qbit
+            and not is_magnet(self.link)
+            and not self.link.endswith(".torrent")
+            and file_ is None
+        ):
+            if self.is_torbox:
+                if not await resolve_torbox_web(self):
+                    return False
+
+            if self.is_alldebrid:
+                if not await resolve_alldebrid_web(self):
+                    return False
+
+            if isinstance(self.link, str):
+                if not await resolve_pornhub(self):
+                    return False
+
+            if isinstance(self.link, str):
+                result = await resolve_direct_link(self, headers)
+                if result is None:
+                    return False
+                headers.clear()
+                headers.extend(result)
+
+        return True
+
+    # ── download dispatch ───────────────────────────────────────────
+
+    async def _dispatch_download(self, path, args, headers, file_, reply_to, session):
+        """Start the appropriate downloader."""
+        if file_ is not None:
+            await TelegramDownloadHelper(self).add_download(
+                reply_to, f"{path}/", session
+            )
+        elif isinstance(self.link, dict):
+            if self.link.get("ytdlp"):
+                await add_ytdlp_download(self, path)
+            elif self.link.get("mega"):
+                await add_mega_download(self, path)
+            elif self.link.get("pornhub"):
+                await add_pornhub_download(self, path)
+            else:
+                await add_direct_download(self, path)
+        elif self.is_qbit:
+            await add_qb_torrent(self, path, args.ratio, args.seed_time)
+        else:
+            if args.ussr or args.pssw:
+                auth = f"{args.ussr}:{args.pssw}"
+                headers.extend(
+                    [f"authorization: Basic {b64encode(auth.encode()).decode('ascii')}"]
+                )
+            await add_aria2_download(self, path, headers, args.ratio, args.seed_time)
+
+
+async def leech(client, message):
+    bot_loop.create_task(Leech(client, message).new_event())
+
+
+async def qb_leech(client, message):
+    bot_loop.create_task(Leech(client, message, is_qbit=True).new_event())

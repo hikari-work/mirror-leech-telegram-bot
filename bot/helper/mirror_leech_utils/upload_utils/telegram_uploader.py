@@ -1,45 +1,74 @@
-from PIL import Image
-from aioshutil import rmtree
 from asyncio import sleep
+from contextlib import asynccontextmanager
 from logging import getLogger
-from natsort import natsorted
-from os import walk, path as ospath
+from os import path as ospath
+from os import walk
+from re import match as re_match
+from re import sub as re_sub
 from time import time
-from re import match as re_match, sub as re_sub
-from pyrogram.errors import FloodWait, RPCError, FloodPremiumWait, BadRequest
-from pyrogram.types import (
-    InputMediaVideo,
-    InputMediaDocument,
-    InputMediaPhoto,
+
+from aiofiles.os import (
+    path as aiopath,
 )
 from aiofiles.os import (
     remove,
-    path as aiopath,
     rename,
 )
+from aioshutil import rmtree
+from natsort import natsorted
+from PIL import Image
+from pyrogram.errors import BadRequest, FloodPremiumWait, FloodWait, RPCError
+from pyrogram.types import (
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 from tenacity import (
-    retry,
-    wait_exponential,
-    stop_after_attempt,
-    retry_if_exception_type,
     RetryError,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
 )
 
 from .... import intervals
 from ....core.config_manager import Config
 from ....core.telegram_manager import TgClient
 from ...ext_utils.bot_utils import sync_to_async
-from ...ext_utils.files_utils import is_archive, get_base_name
-from ...telegram_helper.message_utils import delete_message
+from ...ext_utils.files_utils import get_base_name, is_archive
 from ...ext_utils.media_utils import (
-    get_media_info,
-    get_document_type,
-    get_video_thumbnail,
     get_audio_thumbnail,
+    get_document_type,
+    get_media_info,
     get_multiple_frames_thumbnail,
+    get_video_thumbnail,
 )
+from ...telegram_helper.message_utils import delete_message
 
 LOGGER = getLogger(__name__)
+
+# Matches the stem of a split part, e.g. "movie.mkv" out of "movie.mkv.001"
+# or "movie.mkv.part2.rar". Parts sharing a stem are grouped into one album.
+SPLIT_NAME_RE = r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)"
+
+
+class _Attempt:
+    """Mutable state of one send, shared between the sender and its wrapper.
+
+    ``thumb`` is what the senders actually pass to telegram: they may generate
+    one, so the wrapper reads it back to know what to clean up. ``key`` is the
+    media bucket, which decides whether a BadRequest is worth retrying as a
+    document. ``aborted`` marks a send that cancellation stopped before it
+    reached telegram.
+    """
+
+    __slots__ = ("thumb", "key", "is_video", "aborted")
+
+    def __init__(self, thumb):
+        self.thumb = thumb
+        self.key = None
+        self.is_video = False
+        self.aborted = False
 
 
 class TelegramUploader:
@@ -376,7 +405,8 @@ class TelegramUploader:
                     self._total_files += 1
                     if f_size == 0:
                         LOGGER.error(
-                            f"{self._up_path} size is zero, telegram don't upload zero size files"
+                            f"{self._up_path} size is zero, "
+                            "telegram don't upload zero size files"
                         )
                         self._corrupted += 1
                         continue
@@ -454,7 +484,9 @@ class TelegramUploader:
             return
         if self._total_files == 0:
             await self._listener.on_upload_error(
-                "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, then check if all files have those extensions or not."
+                "No files to upload. In case you have filled "
+                "EXCLUDED/INCLUDED EXTENSIONS, then check if all files "
+                "have those extensions or not."
             )
             return
         if self._total_files <= self._corrupted:
@@ -468,6 +500,194 @@ class TelegramUploader:
         )
         return
 
+    async def _resolve_thumb(self, file, thumb, is_video, is_audio, is_image):
+        """Pick the thumbnail for this file, or None to let the sender make one.
+
+        yt-dlp drops a thumbnail next to the media it downloaded, so prefer
+        that over anything we could generate. Audio has no frame to grab, so it
+        falls back to the cover art embedded in the file.
+        """
+        if is_image or thumb is not None:
+            return thumb
+        file_name = ospath.splitext(file)[0]
+        thumb_path = f"{self._path}/yt-dlp-thumb/{file_name}.jpg"
+        if await aiopath.isfile(thumb_path):
+            return thumb_path
+        beside_media = thumb_path.replace("/yt-dlp-thumb", "")
+        if await aiopath.isfile(beside_media):
+            return beside_media
+        if is_audio and not is_video:
+            return await get_audio_thumbnail(self._up_path)
+        return thumb
+
+    @asynccontextmanager
+    async def _temp_thumb(self, attempt):
+        """Drop a thumbnail we generated ourselves once the send is over.
+
+        A user thumbnail (``self._thumb``) is kept for the whole task, so only
+        clean up when there is none and the sender produced one. A send that
+        cancellation aborted keeps its thumbnail: the old code returned early
+        on that path, before reaching any cleanup.
+        """
+        try:
+            yield
+        finally:
+            if (
+                not attempt.aborted
+                and self._thumb is None
+                and attempt.thumb is not None
+                and await aiopath.exists(attempt.thumb)
+            ):
+                await remove(attempt.thumb)
+
+    async def _send_as_document(self, cap_mono, attempt):
+        if attempt.is_video and attempt.thumb is None:
+            attempt.thumb = await get_video_thumbnail(self._up_path, None)
+        if self._listener.is_cancelled:
+            return False
+        if attempt.thumb == "none":
+            attempt.thumb = None
+        await self._send_album()
+        self._sent_msg = await self._sent_msg.reply_document(
+            document=self._up_path,
+            thumb=attempt.thumb,
+            caption=cap_mono,
+            force_document=True,
+            disable_notification=True,
+            progress=self._upload_progress,
+        )
+        return True
+
+    async def _send_as_video(self, cap_mono, attempt):
+        duration = (await get_media_info(self._up_path))[0]
+        if attempt.thumb is None and self._listener.thumbnail_layout:
+            attempt.thumb = await get_multiple_frames_thumbnail(
+                self._up_path,
+                self._listener.thumbnail_layout,
+                self._listener.screen_shots,
+            )
+        if attempt.thumb is None:
+            attempt.thumb = await get_video_thumbnail(self._up_path, duration)
+        if attempt.thumb is not None and attempt.thumb != "none":
+            with Image.open(attempt.thumb) as img:
+                width, height = img.size
+        else:
+            width = 480
+            height = 320
+        if self._listener.is_cancelled:
+            return False
+        if attempt.thumb == "none":
+            attempt.thumb = None
+        self._sent_msg = await self._sent_msg.reply_video(
+            video=self._up_path,
+            caption=cap_mono,
+            duration=duration,
+            width=width,
+            height=height,
+            thumb=attempt.thumb,
+            supports_streaming=True,
+            disable_notification=True,
+            progress=self._upload_progress,
+        )
+        return True
+
+    async def _send_as_audio(self, cap_mono, attempt):
+        duration, artist, title = await get_media_info(self._up_path)
+        if self._listener.is_cancelled:
+            return False
+        if attempt.thumb == "none":
+            attempt.thumb = None
+        await self._send_album()
+        self._sent_msg = await self._sent_msg.reply_audio(
+            audio=self._up_path,
+            caption=cap_mono,
+            duration=duration,
+            performer=artist,
+            title=title,
+            thumb=attempt.thumb,
+            disable_notification=True,
+            progress=self._upload_progress,
+        )
+        return True
+
+    async def _send_as_photo(self, cap_mono, attempt):
+        if self._listener.is_cancelled:
+            return False
+        self._sent_msg = await self._sent_msg.reply_photo(
+            photo=self._up_path,
+            caption=cap_mono,
+            disable_notification=True,
+            progress=self._upload_progress,
+        )
+        return True
+
+    _SENDERS = {
+        "documents": _send_as_document,
+        "videos": _send_as_video,
+        "audios": _send_as_audio,
+        "photos": _send_as_photo,
+    }
+
+    def _pick_key(self, force_document, is_video, is_audio, is_image):
+        """Pick the media bucket telegram should receive this file as."""
+        if (
+            self._listener.as_doc
+            or force_document
+            or (not is_video and not is_audio and not is_image)
+        ):
+            return "documents"
+        if is_video:
+            return "videos"
+        if is_audio:
+            return "audios"
+        return "photos"
+
+    async def _queue_in_group(self, key, pname):
+        """Hold a split part until its group is full, then send it as one."""
+        group = self._media_dict[key]
+        msgs = group.setdefault(pname, [])
+        msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
+        if len(msgs) == 10:
+            await self._send_media_group(pname, key, msgs)
+        else:
+            self._last_msg_in_group = True
+
+    async def _track_media_group(self, o_path, attempt):
+        """File the message just sent into its split group or into the album.
+
+        Parts of one split file belong together, so they are keyed by the stem
+        they share. Everything else goes to the running album.
+        """
+        if self._listener.is_cancelled:
+            return
+        if self._sent_msg.photo or self._sent_msg.video:
+            match = re_match(SPLIT_NAME_RE, o_path)
+            if match and self._media_group and self._sent_msg.video:
+                attempt.key = "videos"
+                await self._queue_in_group("videos", match.group(0))
+            elif self._media_group:
+                self._album_msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
+                if len(self._album_msgs) == 10:
+                    await self._send_album()
+        elif self._media_group and self._sent_msg.document:
+            attempt.key = "documents"
+            if match := re_match(SPLIT_NAME_RE, o_path):
+                await self._queue_in_group("documents", match.group(0))
+
+    async def _send_one(self, cap_mono, file, o_path, force_document, attempt):
+        """Send one file. Returns False if cancellation cut the send short."""
+        is_video, is_audio, is_image = await get_document_type(self._up_path)
+        attempt.is_video = is_video
+        attempt.thumb = await self._resolve_thumb(
+            file, attempt.thumb, is_video, is_audio, is_image
+        )
+        attempt.key = self._pick_key(force_document, is_video, is_audio, is_image)
+        if not await self._SENDERS[attempt.key](self, cap_mono, attempt):
+            attempt.aborted = True
+            return False
+        await self._track_media_group(o_path, attempt)
+        return True
+
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
@@ -480,191 +700,42 @@ class TelegramUploader:
             and self._thumb != "none"
         ):
             self._thumb = None
-        thumb = self._thumb
+        attempt = _Attempt(self._thumb)
         try:
-            is_video, is_audio, is_image = await get_document_type(self._up_path)
-
-            if not is_image and thumb is None:
-                file_name = ospath.splitext(file)[0]
-                thumb_path = f"{self._path}/yt-dlp-thumb/{file_name}.jpg"
-                if await aiopath.isfile(thumb_path):
-                    thumb = thumb_path
-                elif await aiopath.isfile(thumb_path.replace("/yt-dlp-thumb", "")):
-                    thumb = thumb_path.replace("/yt-dlp-thumb", "")
-                elif is_audio and not is_video:
-                    thumb = await get_audio_thumbnail(self._up_path)
-
-            if (
-                self._listener.as_doc
-                or force_document
-                or (not is_video and not is_audio and not is_image)
-            ):
-                key = "documents"
-                if is_video and thumb is None:
-                    thumb = await get_video_thumbnail(self._up_path, None)
-
-                if self._listener.is_cancelled:
-                    return
-                if thumb == "none":
-                    thumb = None
-                await self._send_album()
-                self._sent_msg = await self._sent_msg.reply_document(
-                    document=self._up_path,
-                    thumb=thumb,
-                    caption=cap_mono,
-                    force_document=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-            elif is_video:
-                key = "videos"
-                duration = (await get_media_info(self._up_path))[0]
-                if thumb is None and self._listener.thumbnail_layout:
-                    thumb = await get_multiple_frames_thumbnail(
-                        self._up_path,
-                        self._listener.thumbnail_layout,
-                        self._listener.screen_shots,
+            async with self._temp_thumb(attempt):
+                # The flood wait is handled in here so the thumbnail outlives
+                # the sleep, as it did when cleanup was written out inline.
+                try:
+                    sent = await self._send_one(
+                        cap_mono, file, o_path, force_document, attempt
                     )
-                if thumb is None:
-                    thumb = await get_video_thumbnail(self._up_path, duration)
-                if thumb is not None and thumb != "none":
-                    with Image.open(thumb) as img:
-                        width, height = img.size
-                else:
-                    width = 480
-                    height = 320
-                if self._listener.is_cancelled:
-                    return
-                if thumb == "none":
-                    thumb = None
-                self._sent_msg = await self._sent_msg.reply_video(
-                    video=self._up_path,
-                    caption=cap_mono,
-                    duration=duration,
-                    width=width,
-                    height=height,
-                    thumb=thumb,
-                    supports_streaming=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-            elif is_audio:
-                key = "audios"
-                duration, artist, title = await get_media_info(self._up_path)
-                if self._listener.is_cancelled:
-                    return
-                if thumb == "none":
-                    thumb = None
-                await self._send_album()
-                self._sent_msg = await self._sent_msg.reply_audio(
-                    audio=self._up_path,
-                    caption=cap_mono,
-                    duration=duration,
-                    performer=artist,
-                    title=title,
-                    thumb=thumb,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-            else:
-                key = "photos"
-                if self._listener.is_cancelled:
-                    return
-                self._sent_msg = await self._sent_msg.reply_photo(
-                    photo=self._up_path,
-                    caption=cap_mono,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-
-            if not self._listener.is_cancelled and (
-                self._sent_msg.photo or self._sent_msg.video
-            ):
-                is_split = bool(re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", o_path))
-                if is_split and self._media_group and self._sent_msg.video:
-                    key = "videos"
-                    pname = re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", o_path).group(0)
-                    if pname in self._media_dict[key]:
-                        self._media_dict[key][pname].append(
-                            [self._sent_msg.chat.id, self._sent_msg.id]
-                        )
-                    else:
-                        self._media_dict[key][pname] = [
-                            [self._sent_msg.chat.id, self._sent_msg.id]
-                        ]
-                    msgs = self._media_dict[key][pname]
-                    if len(msgs) == 10:
-                        await self._send_media_group(pname, key, msgs)
-                    else:
-                        self._last_msg_in_group = True
-                elif self._media_group:
-                    self._album_msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
-                    if len(self._album_msgs) == 10:
-                        await self._send_album()
-            elif (
-                not self._listener.is_cancelled
-                and self._media_group
-                and self._sent_msg.document
-            ):
-                key = "documents"
-                if match := re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", o_path):
-
-                    pname = match.group(0)
-                    if pname in self._media_dict[key].keys():
-                        self._media_dict[key][pname].append(
-                            [self._sent_msg.chat.id, self._sent_msg.id]
-                        )
-                    else:
-                        self._media_dict[key][pname] = [
-                            [self._sent_msg.chat.id, self._sent_msg.id]
-                        ]
-                    msgs = self._media_dict[key][pname]
-                    if len(msgs) == 10:
-                        await self._send_media_group(pname, key, msgs)
-                    else:
-                        self._last_msg_in_group = True
-            if (
-                self._thumb is None
-                and thumb is not None
-                and await aiopath.exists(thumb)
-            ):
-                await remove(thumb)
-            if (
-                self._base_msg
-                and not self._last_msg_in_group
-                and not self._album_msgs
-            ):
-                await delete_message(self._base_msg)
-                self._base_msg = None
-        except (FloodWait, FloodPremiumWait) as f:
-            LOGGER.warning(str(f))
-            await sleep(f.value * 1.3)
-            if (
-                self._thumb is None
-                and thumb is not None
-                and await aiopath.exists(thumb)
-            ):
-                await remove(thumb)
+                except (FloodWait, FloodPremiumWait) as f:
+                    LOGGER.warning(str(f))
+                    await sleep(f.value * 1.3)
+                    raise
+        except (FloodWait, FloodPremiumWait):
             return await self._upload_file(cap_mono, file, o_path)
         except Exception as err:
-            if (
-                self._thumb is None
-                and thumb is not None
-                and await aiopath.exists(thumb)
-            ):
-                await remove(thumb)
             err_type = "RPCError: " if isinstance(err, RPCError) else ""
             LOGGER.error(f"{err_type}{err}. Path: {self._up_path}")
-            if isinstance(err, BadRequest) and key != "documents":
+            # No bucket yet means the probe or the thumbnail failed, not the
+            # send — resending as a document would just fail the same way.
+            retryable = attempt.key is not None and attempt.key != "documents"
+            if isinstance(err, BadRequest) and retryable:
                 LOGGER.error(f"Retrying As Document. Path: {self._up_path}")
                 return await self._upload_file(cap_mono, file, o_path, True)
             raise err
+        if not sent:
+            return
+        if self._base_msg and not self._last_msg_in_group and not self._album_msgs:
+            await delete_message(self._base_msg)
+            self._base_msg = None
 
     @property
     def speed(self):
         try:
             return self._processed_bytes / (time() - self._start_time)
-        except:
+        except Exception:
             return 0
 
     @property

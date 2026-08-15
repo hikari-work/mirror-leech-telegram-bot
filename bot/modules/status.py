@@ -8,11 +8,9 @@ from .. import (
     task_dict,
     bot_start_time,
     intervals,
-    sabnzbd_client,
     DOWNLOAD_DIR,
 )
 from ..core.torrent_manager import TorrentManager
-from ..core.jdownloader_booter import jdownloader
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.status_utils import (
     MirrorStatus,
@@ -83,15 +81,7 @@ async def task_status(_, message):
 
 async def get_download_status(download):
     tool = download.tool
-    if tool in [
-        "telegram",
-        "yt-dlp",
-        "rclone",
-        "gDriveApi",
-    ]:
-        speed = download.speed()
-    else:
-        speed = 0
+    speed = download.speed() if tool in ["telegram", "yt-dlp"] else 0
     return (
         await download.status()
         if iscoroutinefunction(download.status)
@@ -127,13 +117,6 @@ async def status_pages(_, query):
         await update_status_message(key, force=True)
     elif data[2] == "ov":
         ds, ss = await TorrentManager.overall_speed()
-        if sabnzbd_client.LOGGED_IN:
-            sds = await sabnzbd_client.get_downloads()
-            sds = int(float(sds["queue"].get("kbpersec", "0"))) * 1024
-            ds += sds
-        if jdownloader.is_connected:
-            jdres = await jdownloader.device.downloadcontroller.get_speed_in_bytes()
-            ds += jdres
         message = query.message
         tasks = {
             "Download": 0,
@@ -144,7 +127,6 @@ async def status_pages(_, query):
             "Split": 0,
             "QueueDl": 0,
             "QueueUp": 0,
-            "Clone": 0,
             "CheckUp": 0,
             "Pause": 0,
             "SamVid": 0,
@@ -179,8 +161,6 @@ async def status_pages(_, query):
                         tasks["QueueDl"] += 1
                     case MirrorStatus.STATUS_QUEUEUP:
                         tasks["QueueUp"] += 1
-                    case MirrorStatus.STATUS_CLONE:
-                        tasks["Clone"] += 1
                     case MirrorStatus.STATUS_CHECK:
                         tasks["CheckUp"] += 1
                     case MirrorStatus.STATUS_PAUSED:
@@ -196,7 +176,7 @@ async def status_pages(_, query):
 
         msg = f"""<b>DL:</b> {tasks['Download']} | <b>UP:</b> {tasks['Upload']} | <b>SD:</b> {tasks['Seed']} | <b>AR:</b> {tasks['Archive']}
 <b>EX:</b> {tasks['Extract']} | <b>SP:</b> {tasks['Split']} | <b>QD:</b> {tasks['QueueDl']} | <b>QU:</b> {tasks['QueueUp']}
-<b>CL:</b> {tasks['Clone']} | <b>CK:</b> {tasks['CheckUp']} | <b>PA:</b> {tasks['Pause']} | <b>SV:</b> {tasks['SamVid']}
+<b>CK:</b> {tasks['CheckUp']} | <b>PA:</b> {tasks['Pause']} | <b>SV:</b> {tasks['SamVid']}
 <b>CM:</b> {tasks['ConvertMedia']} | <b>FF:</b> {tasks['FFmpeg']}
 
 <b>ODLS:</b> {get_readable_file_size(dl_speed)}/s

@@ -1,0 +1,356 @@
+"""Terabox direct link handler.
+
+The gateway hands back a file list plus a set of credentials, and the links it
+returns are not always usable: Terabox answers some of them with a short JSON
+error instead of the file. So the flow is scrape -> probe -> retry, and the
+handler is split along those seams:
+
+    _scrape()       one gateway call -> (files, header, title)
+    _probe_files()  verify links concurrently, keep the ones that serve bytes
+    _collect()      turn verified links into the details dict
+    terabox()       drives the retry loop over the three above
+"""
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from json import loads
+from os import path as ospath
+from time import sleep
+from urllib.parse import urlparse
+
+from requests import Session
+
+from .._common import (
+    LOGGER,
+    Config,
+    DirectDownloadLinkException,
+    user_agent,
+)
+from ..registry import register
+
+# Domains the dispatcher routes here.
+_TERABOX_DOMAINS = (
+    "terabox.com",
+    "nephobox.com",
+    "4funbox.com",
+    "mirrobox.com",
+    "momerybox.com",
+    "teraboxapp.com",
+    "1024tera.com",
+    "terabox.app",
+    "gibibox.com",
+    "goaibox.com",
+    "terasharelink.com",
+    "teraboxlink.com",
+    "freeterabox.com",
+    "1024terabox.com",
+    "teraboxshare.com",
+    "terafileshare.com",
+    "terabox.club",
+)
+
+# Mirror hostnames rewritten to terabox.com before scraping. Deliberately not
+# the same tuple as the routing list above: "terabox.com" is absent so a
+# www./sub. host is left alone, and "dm.terabox.com" is present so that one is
+# folded in.
+_TERABOX_MIRRORS = (
+    "1024terabox.com",
+    "1024tera.com",
+    "dm.terabox.com",
+    "nephobox.com",
+    "4funbox.com",
+    "mirrobox.com",
+    "momerybox.com",
+    "teraboxapp.com",
+    "terabox.app",
+    "gibibox.com",
+    "goaibox.com",
+    "terasharelink.com",
+    "teraboxlink.com",
+    "freeterabox.com",
+    "teraboxshare.com",
+    "terafileshare.com",
+    "terabox.club",
+)
+
+# Only the first _MAX_PROBE files are verified; the rest are passed through as
+# the gateway gave them, so a 5000-file share does not mean 5000 HEAD requests.
+_MAX_PROBE = 50
+_MAX_ATTEMPTS = 3
+
+
+def _sanitize_url(url):
+    parsed = urlparse(url)
+    hostname = parsed.hostname.lower() if parsed.hostname else ""
+
+    if any(variant in hostname for variant in _TERABOX_MIRRORS):
+        return url.replace(hostname, "terabox.com")
+
+    return url
+
+
+def _gateway():
+    """(url, headers) for the scrape API."""
+    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    headers = {}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers["Authorization"] = f"Bearer {token}"
+    return f"{base}/api/v1/scrape/terabox", headers
+
+
+def _build_header(download_info):
+    """Request header the CDN needs, as a list of "Key: value" lines."""
+    cookie = (download_info.get("cookie") or "").strip()
+    if not cookie:
+        name = (download_info.get("cookie_name") or "").strip()
+        value = (download_info.get("cookie_value") or "").strip()
+        if name and value:
+            cookie = f"{name}={value}"
+
+    header = [
+        f"User-Agent: {(download_info.get('user_agent') or '').strip() or user_agent}",
+        "Referer: https://www.terabox.com/",
+    ]
+    if cookie:
+        header.append(f"Cookie: {cookie}")
+    return header
+
+
+def _header_dict(header):
+    headers = {}
+    for line in header:
+        key, _, value = line.partition(":")
+        headers[key.strip()] = value.strip()
+    return headers
+
+
+def _links(file):
+    """Every candidate download URL a file entry exposes, in preference order."""
+    links = []
+    for key in ("dlink", "link", "url", "download_link", "download_url"):
+        value = file.get(key)
+        if isinstance(value, str) and value.startswith("http") and value not in links:
+            links.append(value)
+    return links
+
+
+def _key(file):
+    for key in ("fs_id", "fsid", "id", "md5"):
+        if file.get(key):
+            return str(file[key])
+    return f"{file.get('path', '')}/{file.get('name', '')}"
+
+
+def _probe(link, headers):
+    """Return (final_url, None) when the link serves the file itself,
+    otherwise (None, reason)."""
+    try:
+        with Session() as session, session.get(
+            link,
+            headers={**headers, "Range": "bytes=0-511"},
+            allow_redirects=True,
+            stream=True,
+            timeout=30,
+        ) as resp:
+            if resp.status_code >= 400:
+                return None, f"HTTP {resp.status_code}"
+            chunk = next(resp.iter_content(512), b"")
+            if not chunk:
+                return None, "empty response"
+            if chunk.lstrip().startswith(b"{"):
+                try:
+                    data = loads(chunk.decode("utf-8", "ignore"))
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and ("errno" in data or "errmsg" in data):
+                    errno = data.get("errno")
+                    return None, f"Terabox error {errno}"
+            return resp.url, None
+    except Exception as e:
+        return None, e.__class__.__name__
+
+
+def _probe_file(file, headers):
+    """Try every link a file exposes and return the first that works."""
+    link = reason = None
+    for candidate in _links(file):
+        link, reason = _probe(candidate, headers)
+        if link:
+            break
+    return link, reason
+
+
+def _probe_files(files, headers):
+    """Probe files concurrently, return ({key: url}, {key: reason})."""
+    resolved, failed = {}, {}
+    with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
+        futures = {pool.submit(_probe_file, file, headers): _key(file) for file in files}
+        for future in as_completed(futures):
+            key = futures[future]
+            link, reason = future.result()
+            if link:
+                resolved[key] = link
+            else:
+                failed[key] = reason or "unknown error"
+    return resolved, failed
+
+
+def _scrape(session, sanitized_url):
+    """One gateway call -> (files, header lines, title)."""
+    api_url, headers_req = _gateway()
+    try:
+        response = session.get(
+            api_url,
+            params={"q": sanitized_url},
+            headers={"accept": "application/json", **headers_req},
+            timeout=60,
+        ).json()
+    except Exception as e:
+        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
+
+    if not response.get("success"):
+        error_msg = response.get("error", "Unknown error")
+        raise DirectDownloadLinkException(f"ERROR: {error_msg}")
+
+    files = [file for file in (response.get("files") or []) if _links(file)]
+    if not files:
+        raise DirectDownloadLinkException("ERROR: No download links found")
+
+    return (
+        files,
+        _build_header(response.get("download") or {}),
+        response.get("title", ""),
+    )
+
+
+def _resolve_links(session, sanitized_url):
+    """Scrape and re-scrape until every probed link works or the attempts run
+    out. Returns (contents, resolved, failed, header, title)."""
+    contents = None
+    last_header = None
+    resolved, failed = {}, {}
+    probeable = pending = set()
+    
+    # Optimization: Track if we need to re-scrape or just re-probe
+    need_fresh_scrape = True
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        # Only call API if we need fresh data or credentials changed
+        if need_fresh_scrape or (contents is not None and header != last_header):
+            files, header, title = _scrape(session, sanitized_url)
+            headers = _header_dict(header)
+            LOGGER.info(f"Terabox: API call #{attempt} - got {len(files)} files")
+            need_fresh_scrape = False
+        else:
+            # Reuse existing data for retry
+            files = contents
+            headers = _header_dict(header)
+
+        if contents is None:
+            contents = files
+            probeable = {_key(file) for file in contents[:_MAX_PROBE]}
+            pending = set(probeable)
+            if len(contents) > _MAX_PROBE:
+                LOGGER.info(
+                    f"Terabox: only the first {_MAX_PROBE} of {len(contents)} "
+                    "files are verified, the rest are passed through unchecked"
+                )
+        elif header != last_header:
+            LOGGER.info("Terabox: credentials rotated, revalidating every link")
+            pending = set(probeable)
+            resolved.clear()
+
+        last_header = header
+
+        retry = [file for file in files if _key(file) in pending]
+        if not retry:
+            break
+
+        good, failed_probe = _probe_files(retry, headers)
+        resolved.update(good)
+        pending = set(failed_probe)
+        
+        if not pending:
+            break
+
+        # Check if failures are due to expired credentials (need fresh API call)
+        # vs temporary network issues (can retry with same credentials)
+        credential_errors = sum(1 for reason in failed_probe.values() 
+                              if "error" in reason.lower() or "403" in reason or "401" in reason)
+        
+        if credential_errors > len(failed_probe) * 0.5:  # More than 50% credential errors
+            need_fresh_scrape = True
+            LOGGER.info(f"Terabox: {credential_errors}/{len(failed_probe)} credential errors detected")
+        
+        LOGGER.info(
+            f"Terabox: {len(pending)} link(s) rejected "
+            f"({', '.join(sorted(set(failed_probe.values())))}), "
+            f"{'rescraping' if need_fresh_scrape else 'retrying'} "
+            f"[{attempt}/{_MAX_ATTEMPTS}]"
+        )
+        if attempt < _MAX_ATTEMPTS:
+            sleep(3)
+
+    return contents, resolved, failed, header, title
+
+
+def _collect(contents, resolved, failed, title):
+    """Fold verified links into the details dict, skipping what never worked."""
+    details = {"contents": [], "title": title, "total_size": 0}
+    skipped = []
+
+    for index, file in enumerate(contents):
+        key = _key(file)
+        if index < _MAX_PROBE:
+            if not (link := resolved.get(key)):
+                skipped.append(f"{file.get('name') or key} ({failed.get(key)})")
+                continue
+        else:
+            link = _links(file)[0]
+
+        details["contents"].append(
+            {
+                "path": ospath.dirname(file.get("path", "")).lstrip("/"),
+                "filename": file.get("name", ""),
+                "url": link,
+            }
+        )
+        try:
+            details["total_size"] += int(file.get("size") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    if not details["contents"]:
+        raise DirectDownloadLinkException(
+            f"ERROR: Terabox refused the download link ({'; '.join(skipped[:3])}). "
+            "The share may need verification or the link has expired, try again later"
+        )
+
+    if skipped:
+        LOGGER.info(
+            f"Terabox: skipping {len(skipped)} unusable file(s) out of "
+            f"{len(contents)}: {'; '.join(skipped)}"
+        )
+
+    if not details["title"]:
+        details["title"] = details["contents"][0]["filename"]
+
+    return details
+
+
+@register(*_TERABOX_DOMAINS, order=35)
+def terabox(url):
+    if "/file/" in url:
+        return url
+
+    with Session() as session:
+        contents, resolved, failed, header, title = _resolve_links(
+            session, _sanitize_url(url)
+        )
+
+    details = _collect(contents, resolved, failed, title)
+
+    if len(details["contents"]) == 1:
+        return details["contents"][0]["url"], header
+
+    details["header"] = "\n".join(header)
+    return details

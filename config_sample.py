@@ -11,22 +11,18 @@ AUTHORIZED_CHATS = ""
 SUDO_USERS = ""
 DATABASE_URL = ""
 DATABASE_NAME = "mltb"
-# DB_ENCRYPTION_KEY encrypts private files (cookies.txt, .netrc, rclone.conf,
-# token.pickle, accounts.zip) before they are stored in MongoDB. It is read from
+# DB_ENCRYPTION_KEY encrypts private files (cookies.txt, .netrc) before they
+# are stored in MongoDB. It is read from
 # the environment ONLY and is deliberately not a config variable: this file is
 # itself saved to the database, so a key here would sit next to the data it
 # protects. Set any passphrase, e.g. DB_ENCRYPTION_KEY=... in your .env or
 # docker-compose. Leave it unset to store private files as plain bytes.
 # Changing or losing it makes already-stored private files unreadable.
 STATUS_LIMIT = 4
-DEFAULT_UPLOAD = "rc"
 STATUS_UPDATE_INTERVAL = 15
 FILELION_API = ""
 STREAMWISH_API = ""
 ALLDEBRID_API_KEY = ""
-BUZZHEAVIER_ACCOUNT_ID = ""
-BUZZHEAVIER_FOLDER_ID = ""
-GOFILE_API_KEY = ""
 # Mega encrypts files client-side, so the bot decrypts the stream as it
 # downloads. Metadata is resolved via gateway (https://api.piyann.me).
 # MEGA_PROXY_URL can be set to one or multiple Cloudflare Worker proxies (comma/space separated)
@@ -37,54 +33,14 @@ WARP_PROXY_PORT = 40000
 MEGA_PROXY_URL = "https://proxy-1.vianstefani754.workers.dev, https://proxy-2.vianstefani754.workers.dev, https://proxy-3.vianstefani754.workers.dev, https://proxy-4.vianstefani754.workers.dev, https://proxy-5.vianstefani754.workers.dev"
 MEGA_CONNECTIONS = 4
 MEGA_MAX_RESTARTS = 3
+GATEWAY_URL = ""
+GATEWAY_TOKEN = ""
 EXCLUDED_EXTENSIONS = ""
 INCLUDED_EXTENSIONS = ""
 INCOMPLETE_TASK_NOTIFIER = False
 YT_DLP_OPTIONS = ""
-GALLERY_DL_OPTIONS = ""
-USE_SERVICE_ACCOUNTS = False
 NAME_SUBSTITUTE = r""
 FFMPEG_CMDS = {"merge": ["-f concat -safe 0 -i mltb.txt -c copy mltb.mp4 -del"]}
-UPLOAD_PATHS = {}
-# GDrive Tools
-GDRIVE_ID = ""
-IS_TEAM_DRIVE = False
-STOP_DUPLICATE = False
-INDEX_URL = ""
-# Rclone
-RCLONE_PATH = ""
-RCLONE_FLAGS = ""
-RCLONE_SERVE_URL = ""
-RCLONE_SERVE_PORT = 0
-RCLONE_SERVE_USER = ""
-RCLONE_SERVE_PASS = ""
-# JDownloader
-JD_EMAIL = ""
-JD_PASS = ""
-# Sabnzbd
-USENET_SERVERS = [
-    {
-        "name": "main",
-        "host": "",
-        "port": 563,
-        "timeout": 60,
-        "username": "",
-        "password": "",
-        "connections": 8,
-        "ssl": 1,
-        "ssl_verify": 2,
-        "ssl_ciphers": "",
-        "enable": 1,
-        "required": 0,
-        "optional": 0,
-        "retention": 0,
-        "send_group": 0,
-        "priority": 0,
-    }
-]
-# Nzb search
-HYDRA_IP = ""
-HYDRA_API_KEY = ""
 # Update
 UPSTREAM_REPO = ""
 UPSTREAM_BRANCH = "master"

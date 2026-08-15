@@ -1,0 +1,153 @@
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+extend-exclude = [".venv", "qBittorrent"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors (includes E722 bare except)
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort — import order
+    "UP",   # pyupgrade
+    "C901", # mccabe complexity
+    "S307", # suspicious eval usage
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+# Ledger utang lint: temuan yang sudah ada sebelum refactor, dicabut per fase
+# (lihat REFACTOR_PLAN.md §3). Saat suatu fase menyentuh file, hapus barisnya
+# dan bereskan temuan yang tersisa — baru dianggap selesai.
+[tool.ruff.lint.per-file-ignores]
+# --- Fase 1 — leech.py + ytdlp.py ---
+"bot/modules/leech.py"                                                    = ["C901", "E501", "E722", "I001"]
+"bot/modules/ytdlp.py"                                                    = ["C901", "E501", "E722", "I001", "S307"]
+
+# --- Fase 2 — task_config package (ex common.py) ---
+"bot/helper/task_config/settings_resolver.py"                             = ["C901", "E501", "E722"]
+"bot/helper/task_config/batch_tracker.py"                                 = ["C901", "E501", "E722"]
+"bot/helper/task_config/multi_link.py"                                    = ["C901", "E501", "E722"]
+"bot/helper/task_config/media_pipeline.py"                                = ["C901", "E501", "E722"]
+
+# --- Fase 3 — direct_link_generators package (ex direct_link_generator.py) ---
+# Handler dipindah apa adanya (perilaku tidak berubah), jadi utang lint ikut
+# pindah. registry.py, _common.py, hosts/__init__.py, dan __init__.py sudah
+# bersih dan sengaja tidak didaftarkan di sini.
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/cloud.py"         = ["E501"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/filehosts.py"     = ["E501"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/gofile.py"        = ["C901"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/linkbox.py"       = ["C901", "E722"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/lockers.py"       = ["C901", "E501", "E722"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/mediafire.py"     = ["C901", "E722"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/sendcm.py"        = ["C901", "E722"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/sharelinks.py"    = ["E501"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/streaming.py"     = ["C901", "E501", "E722"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/swisstransfer.py" = ["C901", "E501", "F841"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/terabox.py"       = ["E501"]
+"bot/helper/mirror_leech_utils/download_utils/direct_link_generators/hosts/vidoy.py"         = ["C901"]
+
+# --- Fase 4 — debrid resolver ---
+# alldebrid_resolver.py dan torbox_resolver.py sudah dibereskan; sisa E722
+# adalah cleanup best-effort yang memang harus menelan apa pun (Fase 10).
+"bot/helper/mirror_leech_utils/download_utils/alldebrid_resolver.py"      = ["E722"]
+
+# --- Fase 5 — telegram_uploader._upload_file ---
+# `_upload_file` sudah dipecah; E501 dan I001 dicabut. Sisa C901 ada di
+# `upload()` (CX 42) yang jadi target Fase 6, dan satu E722 di properti
+# `speed` yang masuk scope Fase 10.
+"bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py"         = ["C901", "E722"]
+
+# --- Fase 6 — task_listener.on_download_complete ---
+# `on_download_complete` sudah dipecah; F401 dan I001 dicabut. Sisa C901 ada di
+# tiga handler yang bukan target fase ini (`on_upload_complete` CX 15,
+# `on_download_error` CX 17, `on_upload_error` CX 12) berikut dua E501 di
+# dalamnya; E722 adalah cleanup best-effort. Semuanya scope Fase 10.
+"bot/helper/listeners/task_listener.py"                                   = ["C901", "E501", "E722"]
+
+# --- Fase 7 — settings UI ---
+# `get_user_settings`/`get_menu` pindah ke package settings/ dan kedua router
+# callback jadi dict dispatch, jadi C901/E501/E741/I001/E721 dicabut. S307 juga
+# sudah dicabut: empat `eval()` diganti `settings/literals.parse_literal`
+# (commit `fix:` tersendiri, karena perilakunya berubah — lihat
+# REFACTOR_PLAN.md §Fase 7). Kedua file tidak punya utang lint lagi.
+
+# --- Fase 8 — handlers.py ---
+# `add_handlers()` jadi table-driven dan `from ..modules import *` diganti impor
+# eksplisit, jadi F403/F405/I001 dicabut. File ini tidak punya utang lint lagi.
+
+# --- Fase 9 — rss.py ---
+"bot/modules/rss.py"                                                      = ["C901", "E501", "E722", "I001"]
+
+# --- Fase 10 — sapu bersih hygiene (sisanya) ---
+"bot/__init__.py"                                                         = ["E402", "I001"]
+"bot/__main__.py"                                                         = ["E402", "I001"]
+"bot/core/config_manager.py"                                              = ["C901", "E501", "I001"]
+"bot/core/startup.py"                                                     = ["C901", "E501", "I001"]
+"bot/core/telegram_manager.py"                                            = ["I001"]
+"bot/core/torrent_manager.py"                                             = ["E722", "I001"]
+"bot/helper/ext_utils/bot_utils.py"                                       = ["C901", "E722", "I001", "S307"]
+"bot/helper/ext_utils/db_handler.py"                                      = ["I001"]
+"bot/helper/ext_utils/files_utils.py"                                     = ["C901", "E722", "I001"]
+"bot/helper/ext_utils/help_messages.py"                                   = ["E501", "I001"]
+"bot/helper/ext_utils/media_utils.py"                                     = ["C901", "E501", "E722", "I001", "S307"]
+"bot/helper/ext_utils/mega_client.py"                                     = ["E501", "I001"]
+"bot/helper/ext_utils/status_utils.py"                                    = ["C901", "E501", "E722", "I001"]
+"bot/helper/ext_utils/task_manager.py"                                    = ["C901", "I001"]
+"bot/helper/ext_utils/telegraph_helper.py"                                = ["E501", "I001"]
+"bot/helper/ext_utils/user_sessions.py"                                   = ["I001", "UP015"]
+"bot/helper/listeners/aria2_listener.py"                                  = ["C901", "E501", "E722", "F841", "I001", "UP041"]
+"bot/helper/listeners/direct_listener.py"                                 = ["C901", "E501", "I001", "UP041"]
+"bot/helper/listeners/qbit_listener.py"                                   = ["C901", "E501", "E722", "I001", "UP041"]
+"bot/helper/mirror_leech_utils/download_utils/aria2_download.py"          = ["C901", "E501", "I001", "UP041"]
+"bot/helper/mirror_leech_utils/download_utils/bypass_dispatcher.py"       = ["E501", "E741"]
+"bot/helper/mirror_leech_utils/download_utils/mega_download.py"           = ["C901", "E501"]
+"bot/helper/mirror_leech_utils/download_utils/qbit_download.py"           = ["C901", "E501", "E722", "I001", "UP041"]
+"bot/helper/mirror_leech_utils/download_utils/semprot_scraper.py"         = ["E501"]
+"bot/helper/mirror_leech_utils/download_utils/telegram_download.py"       = ["C901", "E501", "I001"]
+"bot/helper/mirror_leech_utils/download_utils/url_shortener_bypass.py"    = ["E501", "I001"]
+"bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py"         = ["C901", "E501", "E722", "I001"]
+"bot/helper/mirror_leech_utils/status_utils/aria2_status.py"              = ["E501", "E722", "I001"]
+"bot/helper/mirror_leech_utils/status_utils/direct_status.py"             = ["E722"]
+"bot/helper/mirror_leech_utils/status_utils/ffmpeg_status.py"             = ["E722", "I001"]
+"bot/helper/mirror_leech_utils/status_utils/qbit_status.py"               = ["I001"]
+"bot/helper/mirror_leech_utils/status_utils/queue_status.py"              = ["I001"]
+"bot/helper/mirror_leech_utils/status_utils/sevenz_status.py"             = ["E722", "I001"]
+"bot/helper/mirror_leech_utils/status_utils/telegram_status.py"           = ["E722"]
+"bot/helper/mirror_leech_utils/status_utils/yt_dlp_status.py"             = ["E722"]
+"bot/helper/telegram_helper/button_build.py"                              = ["I001"]
+"bot/helper/telegram_helper/filters.py"                                   = ["I001"]
+"bot/helper/telegram_helper/message_utils.py"                             = ["C901", "I001"]
+"bot/modules/__init__.py"                                                 = ["I001"]
+"bot/modules/bypass.py"                                                   = ["I001"]
+"bot/modules/cancel_task.py"                                              = ["E501", "I001"]
+"bot/modules/chat_permission.py"                                          = ["E501", "I001"]
+"bot/modules/exec.py"                                                     = ["E501", "E722", "I001"]
+"bot/modules/file_selector.py"                                            = ["C901", "E501", "E722", "I001"]
+"bot/modules/force_start.py"                                              = ["C901", "E501", "I001"]
+"bot/modules/help.py"                                                     = ["E501", "I001"]
+"bot/modules/restart.py"                                                  = ["C901", "E722", "I001"]
+"bot/modules/search.py"                                                   = ["C901", "E501", "E722", "I001"]
+"bot/modules/services.py"                                                 = ["E501", "I001"]
+"bot/modules/shell.py"                                                    = ["I001"]
+"bot/modules/stats.py"                                                    = ["E501", "I001"]
+"bot/modules/status.py"                                                   = ["C901", "E501", "I001"]
+"bot/modules/user_login.py"                                               = ["C901", "E501", "I001", "UP041"]
+"config_sample.py"                                                        = ["E501"]
+"tests/test_alldebrid_resolver.py"                                        = ["F401"]
+"tests/test_arg_parser_flags.py"                                          = ["F401"]
+"tests/test_mega_client.py"                                               = ["E501", "F401"]
+"tests/test_mega_direct_link.py"                                          = ["E501"]
+"tests/test_mega_download.py"                                             = ["E501", "UP031"]
+"tests/test_semprot_scraper.py"                                           = ["E501"]
+"tests/test_telegram_uploader_album.py"                                   = ["E501"]
+"update.py"                                                               = ["I001", "UP006", "UP035"]
+"web/nodes.py"                                                            = ["C901", "E722"]
+"web/wserver.py"                                                          = ["C901", "E402", "E501", "I001"]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]

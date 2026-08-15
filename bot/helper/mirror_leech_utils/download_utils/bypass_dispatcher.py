@@ -7,16 +7,12 @@ registered; add another `if domain` branch to support more sites.
 from urllib.parse import urlparse
 
 from ...ext_utils.exceptions import DirectDownloadLinkException
-from .semprot_scraper import scrape_thread
+from .semprot_scraper import scrape_pages
 
 
-def bypass_scrape(link, keyword=""):
-    """Return (title, links). Filter to links containing keyword if given."""
+async def bypass_scrape(link, page_list="1", filter_host=""):
+    """Return (title, links, total_pages). Delegates pageList & filter to the backend."""
     domain = urlparse(link).hostname or ""
     if any(h in domain for h in ("semprot.com", "senang.top")):
-        title, links = scrape_thread(link)
-        if keyword:
-            n = keyword.lower()
-            links = [l for l in links if n in l.lower()]
-        return title, links
+        return await scrape_pages(link, page_list, filter_host)
     raise DirectDownloadLinkException(f"ERROR: No bypass scraper for {domain}")

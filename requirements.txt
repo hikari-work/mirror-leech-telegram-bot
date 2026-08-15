@@ -11,15 +11,11 @@ cryptography
 dnspython
 fastapi
 feedparser
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
 gunicorn
 httpx
 jinja2
 lxml
 natsort
-par2cmdline-turbo
 pillow
 psutil
 pymongo
@@ -33,5 +29,4 @@ urllib3
 uvicorn
 uvloop
 xattr
-gallery-dl
 yt-dlp[default,curl-cffi]

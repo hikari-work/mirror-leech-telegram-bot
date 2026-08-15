@@ -1,18 +1,28 @@
+"""TorBox torrent / web-download resolver.
+
+Turns a magnet, a ``.torrent`` file, or a plain link into the multi-file
+payload ``add_direct_download`` consumes. The poll-until-ready loop and
+the bounded fan-out over files are shared with the AllDebrid resolver and
+live in ``debrid/base.py``; this module holds the TorBox API surface.
+"""
+
 import asyncio
+from collections.abc import Awaitable, Callable
 from os import path as ospath
-from typing import Any, Awaitable, Callable
-from httpx import AsyncClient, HTTPError
+from typing import Any
 
 from bot import LOGGER
 from bot.core.config_manager import Config
 from bot.helper.ext_utils.exceptions import DirectDownloadLinkException
 
+from .debrid import base
+
 _API_BASE = "https://api.torbox.app/v1/api"
 _TIMEOUT = 45.0
-_POLL_INTERVAL = 5.0
-_MAX_WAIT = 7200.0
-_NO_SEED_WAIT = 180.0
-_UNLOCK_CONCURRENCY = 3
+_POLL_INTERVAL = base.POLL_INTERVAL_S
+_MAX_WAIT = base.MAX_DURATION_S
+_NO_SEED_WAIT = base.NO_SEED_TIMEOUT_S
+_UNLOCK_CONCURRENCY = base.UNLOCK_CONCURRENCY
 
 _READY_STATES = {"cached", "completed", "uploading"}
 _ERROR_STATES = {
@@ -27,10 +37,10 @@ _ERROR_STATES = {
 
 
 def _token() -> str:
-    if token := (getattr(Config, "TORBOX_API_KEY", "") or "").strip():
-        return token
-    else:
-        raise DirectDownloadLinkException("ERROR: TORBOX_API_KEY is not configured")
+    return base.require_key(
+        getattr(Config, "TORBOX_API_KEY", ""),
+        "ERROR: TORBOX_API_KEY is not configured",
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -59,28 +69,17 @@ async def _api(
     data: Any = None,
     files: Any = None,
 ) -> Any:
-    try:
-        async with AsyncClient(timeout=_TIMEOUT, headers=_headers()) as client:
-            res = await client.request(
-                method,
-                f"{_API_BASE}{endpoint}",
-                params=params or {},
-                data=data,
-                files=files,
-            )
-            res.raise_for_status()
-            payload = res.json()
-    except HTTPError as exc:
-        raise DirectDownloadLinkException(
-            f"ERROR: TorBox network error: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise DirectDownloadLinkException(
-            f"ERROR: TorBox returned malformed JSON: {exc}"
-        ) from exc
-
-    if not isinstance(payload, dict):
-        raise DirectDownloadLinkException("ERROR: TorBox returned unexpected payload")
+    payload = await base.request_json(
+        method,
+        f"{_API_BASE}{endpoint}",
+        provider="TorBox",
+        timeout=_TIMEOUT,
+        shape_error="ERROR: TorBox returned unexpected payload",
+        headers=_headers(),
+        params=params,
+        data=data,
+        files=files,
+    )
 
     if payload.get("success") is not True:
         raise DirectDownloadLinkException(f"ERROR: TorBox: {_err(payload)}")
@@ -218,6 +217,22 @@ async def delete_web_download(web_id: int | str) -> bool:
         return False
 
 
+def _progress_snapshot(kind: str, item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phase": kind,
+        "name": item.get("name"),
+        "state": item.get("download_state"),
+        "progress": item.get("progress"),
+        "seeds": item.get("seeds"),
+        "peers": item.get("peers"),
+        "eta": item.get("eta"),
+    }
+
+
+def _swarm_is_empty(item: dict[str, Any]) -> bool:
+    return int(item.get("seeds") or 0) == 0 and int(item.get("peers") or 0) == 0
+
+
 async def _wait_ready(
     item_id: int | str,
     kind: str,
@@ -227,55 +242,24 @@ async def _wait_ready(
 ) -> dict[str, Any]:
     getter = _get_torrent if kind == "torrent" else _get_webdl
 
-    loop = asyncio.get_event_loop()
-    started = loop.time()
-    no_seed_started = 0.0
-
-    while True:
-        if is_cancelled and is_cancelled():
-            raise DirectDownloadLinkException("ERROR: TorBox task cancelled")
-
-        item = await getter(item_id)
-
-        if progress_callback:
-            await progress_callback(
-                {
-                    "phase": kind,
-                    "name": item.get("name"),
-                    "state": item.get("download_state"),
-                    "progress": item.get("progress"),
-                    "seeds": item.get("seeds"),
-                    "peers": item.get("peers"),
-                    "eta": item.get("eta"),
-                }
-            )
-
-        if _is_ready(item):
-            return item
-
-        if err := _has_error(item):
-            raise DirectDownloadLinkException(f"ERROR: TorBox {kind} failed: {err}")
-
-        now = loop.time()
-
-        if kind == "torrent":
-            seeds = int(item.get("seeds") or 0)
-            peers = int(item.get("peers") or 0)
-
-            if seeds == 0 and peers == 0:
-                if no_seed_started == 0:
-                    no_seed_started = now
-                elif now - no_seed_started >= _NO_SEED_WAIT:
-                    raise DirectDownloadLinkException(
-                        "ERROR: TorBox no seed / no peer timeout"
-                    )
-            else:
-                no_seed_started = 0.0
-
-        if now - started >= _MAX_WAIT:
-            raise DirectDownloadLinkException("ERROR: TorBox max wait timeout")
-
-        await asyncio.sleep(_POLL_INTERVAL)
+    return await base.wait_until_ready(
+        lambda: getter(item_id),
+        is_ready=_is_ready,
+        error_message=lambda item: (
+            f"ERROR: TorBox {kind} failed: {err}" if (err := _has_error(item)) else ""
+        ),
+        # A web download has no swarm, so only torrents can stall on one.
+        is_stalled=_swarm_is_empty if kind == "torrent" else None,
+        cancelled_message="ERROR: TorBox task cancelled",
+        stall_message="ERROR: TorBox no seed / no peer timeout",
+        timeout_message="ERROR: TorBox max wait timeout",
+        progress_payload=lambda item: _progress_snapshot(kind, item),
+        progress_callback=progress_callback,
+        is_cancelled=is_cancelled,
+        poll_interval=_POLL_INTERVAL,
+        no_seed_timeout=_NO_SEED_WAIT,
+        max_duration=_MAX_WAIT,
+    )
 
 
 async def _request_file_link(kind: str, item_id: int | str, file_id: int | str) -> str:
@@ -314,30 +298,30 @@ async def _payload(
     if not isinstance(files, list) or not files:
         raise DirectDownloadLinkException("ERROR: TorBox returned no files")
 
-    semaphore = asyncio.Semaphore(_UNLOCK_CONCURRENCY)
-    contents: list[dict[str, Any]] = []
-
-    async def one(file_item: dict[str, Any]):
+    async def one(_index: int, file_item: dict[str, Any]) -> dict[str, Any] | None:
         file_id = file_item.get("id")
         if file_id is None:
-            return
+            return None
 
-        async with semaphore:
-            direct = await _request_file_link(kind, item_id, file_id)
-
+        direct = await _request_file_link(kind, item_id, file_id)
         full_name = file_item.get("name") or file_item.get("short_name") or "file"
 
-        contents.append(
-            {
-                "filename": file_item.get("short_name") or _basename(full_name),
-                "path": full_name,
-                "url": direct,
-                "size": int(file_item.get("size") or 0),
-                "headers": {},
-            }
-        )
+        return {
+            "filename": file_item.get("short_name") or _basename(full_name),
+            "path": full_name,
+            "url": direct,
+            "size": int(file_item.get("size") or 0),
+            "headers": {},
+        }
 
-    await asyncio.gather(*(one(f) for f in files if isinstance(f, dict)))
+    contents = await base.resolve_files_concurrently(
+        [f for f in files if isinstance(f, dict)],
+        one,
+        concurrency=_UNLOCK_CONCURRENCY,
+        # Preserved from the original gather-and-append: entries land in
+        # completion order, not in the order TorBox listed the files.
+        ordered=False,
+    )
 
     if not contents:
         raise DirectDownloadLinkException("ERROR: TorBox could not create direct links")
@@ -349,6 +333,42 @@ async def _payload(
     }
 
 
+async def _resolve_created(
+    entry: dict[str, Any],
+    kind: str,
+    id_keys: tuple[str, ...],
+    missing_id_error: str,
+    result_key: str,
+    delete: Callable[[int | str], Awaitable[bool]],
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """Wait out a created TorBox item and turn its files into direct links.
+
+    On any failure the item is removed from the TorBox account so a retry
+    does not pile up duplicates.
+    """
+    item_id = next((entry[key] for key in id_keys if entry.get(key)), None)
+
+    if not item_id:
+        raise DirectDownloadLinkException(missing_id_error)
+
+    try:
+        item = await _wait_ready(
+            item_id,
+            kind,
+            is_cancelled=is_cancelled,
+            progress_callback=progress_callback,
+        )
+        result = await _payload(item, kind, item_id)
+        result[result_key] = item_id
+        return result
+    except Exception:
+        await delete(item_id)
+        raise
+
+
 async def torbox_resolve_magnet(
     magnet: str,
     *,
@@ -356,24 +376,16 @@ async def torbox_resolve_magnet(
     progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     entry = await _create_torrent_from_magnet(magnet)
-    torrent_id = entry.get("torrent_id") or entry.get("id")
-
-    if not torrent_id:
-        raise DirectDownloadLinkException("ERROR: TorBox did not return torrent_id")
-
-    try:
-        item = await _wait_ready(
-            torrent_id,
-            "torrent",
-            is_cancelled=is_cancelled,
-            progress_callback=progress_callback,
-        )
-        result = await _payload(item, "torrent", torrent_id)
-        result["torbox_torrent_id"] = torrent_id
-        return result
-    except Exception:
-        await delete_torrent(torrent_id)
-        raise
+    return await _resolve_created(
+        entry,
+        "torrent",
+        ("torrent_id", "id"),
+        "ERROR: TorBox did not return torrent_id",
+        "torbox_torrent_id",
+        delete_torrent,
+        is_cancelled=is_cancelled,
+        progress_callback=progress_callback,
+    )
 
 
 async def torbox_resolve_torrent(
@@ -384,24 +396,16 @@ async def torbox_resolve_torrent(
     progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     entry = await _create_torrent_from_file(torrent_bytes, filename)
-    torrent_id = entry.get("torrent_id") or entry.get("id")
-
-    if not torrent_id:
-        raise DirectDownloadLinkException("ERROR: TorBox did not return torrent_id")
-
-    try:
-        item = await _wait_ready(
-            torrent_id,
-            "torrent",
-            is_cancelled=is_cancelled,
-            progress_callback=progress_callback,
-        )
-        result = await _payload(item, "torrent", torrent_id)
-        result["torbox_torrent_id"] = torrent_id
-        return result
-    except Exception:
-        await delete_torrent(torrent_id)
-        raise
+    return await _resolve_created(
+        entry,
+        "torrent",
+        ("torrent_id", "id"),
+        "ERROR: TorBox did not return torrent_id",
+        "torbox_torrent_id",
+        delete_torrent,
+        is_cancelled=is_cancelled,
+        progress_callback=progress_callback,
+    )
 
 
 async def torbox_resolve(
@@ -411,21 +415,13 @@ async def torbox_resolve(
     progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     entry = await _create_webdl(link)
-    web_id = entry.get("webdownload_id") or entry.get("web_id") or entry.get("id")
-
-    if not web_id:
-        raise DirectDownloadLinkException("ERROR: TorBox did not return webdownload_id")
-
-    try:
-        item = await _wait_ready(
-            web_id,
-            "webdl",
-            is_cancelled=is_cancelled,
-            progress_callback=progress_callback,
-        )
-        result = await _payload(item, "webdl", web_id)
-        result["torbox_web_id"] = web_id
-        return result
-    except Exception:
-        await delete_web_download(web_id)
-        raise
+    return await _resolve_created(
+        entry,
+        "webdl",
+        ("webdownload_id", "web_id", "id"),
+        "ERROR: TorBox did not return webdownload_id",
+        "torbox_web_id",
+        delete_web_download,
+        is_cancelled=is_cancelled,
+        progress_callback=progress_callback,
+    )

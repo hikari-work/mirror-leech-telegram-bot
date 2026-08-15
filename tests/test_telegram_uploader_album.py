@@ -207,6 +207,10 @@ def _make_uploader(uploader_module, calls):
     uploader._thumb = None
     uploader._sent_msg = FakeMessage(registry=calls_by_id)
     uploader._files_links = True
+    # Album batching is enabled by the MEDIA_GROUP user setting, which is
+    # resolved at upload start in `_user_settings`; the tests exercise
+    # `_upload_file` directly, so set it here to mirror that resolution.
+    uploader._media_group = True
     return uploader, calls_by_id
 
 

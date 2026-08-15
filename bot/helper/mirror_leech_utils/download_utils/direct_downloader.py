@@ -5,7 +5,7 @@ from .... import (
     task_dict,
     task_dict_lock,
 )
-from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
+from ...ext_utils.task_manager import check_running_tasks
 from ...listeners.direct_listener import DirectListener
 from ...mirror_leech_utils.status_utils.direct_status import DirectStatus
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
@@ -23,11 +23,6 @@ async def add_direct_download(listener, path):
         listener.name = details["title"]
     path = f"{path}/{listener.name}"
 
-    msg, button = await stop_duplicate_check(listener)
-    if msg:
-        await listener.on_download_error(msg, button)
-        return
-
     gid = token_urlsafe(10)
     add_to_queue, event = await check_running_tasks(listener)
     if add_to_queue:
@@ -44,7 +39,9 @@ async def add_direct_download(listener, path):
     a2c_opt = {"follow-torrent": "false", "follow-metalink": "false"}
     if header := details.get("header"):
         a2c_opt["header"] = header
-    directListener = DirectListener(path, listener, a2c_opt)
+    directListener = DirectListener(
+        path, listener, a2c_opt, bunkr_lazy=details.get("bunkr_lazy", False)
+    )
 
     async with task_dict_lock:
         task_dict[listener.mid] = DirectStatus(listener, directListener, gid)

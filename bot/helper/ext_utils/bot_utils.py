@@ -1,4 +1,5 @@
 from httpx import AsyncClient
+from ast import literal_eval
 from asyncio.subprocess import PIPE
 from functools import partial, wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -15,9 +16,7 @@ from ..telegram_helper.button_build import ButtonMaker
 from .telegraph_helper import telegraph
 from .help_messages import (
     YT_HELP_DICT,
-    GDL_HELP_DICT,
-    MIRROR_HELP_DICT,
-    CLONE_HELP_DICT,
+    LEECH_HELP_DICT,
 )
 
 COMMAND_USAGE = {}
@@ -50,10 +49,8 @@ def _build_command_usage(help_dict, command_key):
 
 
 def create_help_buttons():
-    _build_command_usage(MIRROR_HELP_DICT, "mirror")
+    _build_command_usage(LEECH_HELP_DICT, "leech")
     _build_command_usage(YT_HELP_DICT, "yt")
-    _build_command_usage(GDL_HELP_DICT, "gdl")
-    _build_command_usage(CLONE_HELP_DICT, "clone")
 
 
 def bt_selection_buttons(id_):
@@ -174,8 +171,8 @@ def arg_parser(items, arg_base):
                             arg_base[part].add(value)
                         else:
                             try:
-                                arg_base[part].add(tuple(eval(value)))
-                            except:
+                                arg_base[part].add(tuple(literal_eval(value)))
+                            except (ValueError, SyntaxError):
                                 pass
                     else:
                         arg_base[part] = value
@@ -207,7 +204,7 @@ async def get_content_type(url):
         async with AsyncClient() as client:
             response = await client.get(url, allow_redirects=True, verify=False)
             return response.headers.get("Content-Type")
-    except:
+    except Exception:
         return None
 
 
@@ -224,11 +221,11 @@ async def cmd_exec(cmd, shell=False):
     stdout, stderr = await proc.communicate()
     try:
         stdout = stdout.decode().strip()
-    except:
+    except Exception:
         stdout = "Unable to decode the response!"
     try:
         stderr = stderr.decode().strip()
-    except:
+    except Exception:
         stderr = "Unable to decode the error!"
     return stdout, stderr, proc.returncode
 

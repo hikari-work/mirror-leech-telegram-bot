@@ -1,17 +1,9 @@
 mltbenv/*
 .env
 config.py
-token.pickle
-rclone.conf
 .netrc
 log.txt
-cfg.zip
-accounts/*
 thumbnails/*
-rclone/*
-tokens/*
-sabnzbd/*
-list_drives.txt
 cookies.txt
 downloads/*
 *.session

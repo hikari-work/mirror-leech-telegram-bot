@@ -1,0 +1,14 @@
+--- bot/helper/mirror_leech_utils/download_utils/link_resolver.py
++++ bot/helper/mirror_leech_utils/download_utils/link_resolver.py
+@@ -147,8 +147,11 @@ async def resolve_direct_link(listener, headers: list[str]) -> list[str]:
+     try:
+         result = await sync_to_async(direct_link_generator, listener.link)
+         if isinstance(result, tuple):
+             listener.link, headers = result
+         elif isinstance(result, str):
+             listener.link = result
+             LOGGER.info(f"Generated link: {listener.link}")
++        elif isinstance(result, dict):
++            listener.link = result
++            LOGGER.info(f"Generated structured link: {result}")
+     except DirectDownloadLinkException as e:

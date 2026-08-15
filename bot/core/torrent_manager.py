@@ -56,7 +56,7 @@ class TorrentManager:
         else:
             try:
                 await cls.aria2.removeDownloadResult(download.get("gid", ""))
-            except:
+            except Exception:
                 pass
 
     @classmethod
@@ -76,7 +76,7 @@ class TorrentManager:
         )
         try:
             await gather(*tasks)
-        except:
+        except Exception:
             pass
 
     @classmethod

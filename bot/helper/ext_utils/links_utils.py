@@ -18,14 +18,6 @@ def is_url(url: str):
     )
 
 
-def is_gdrive_link(url: str):
-    return (
-        "drive.google.com" in url
-        or "drive.usercontent.google.com" in url
-        or "docs.google.com" in url
-    )
-
-
 def is_telegram_link(url: str):
     return url.startswith(("https://t.me/", "tg://openmessage?user_id="))
 
@@ -35,23 +27,5 @@ def is_share_link(url: str):
         re_match(
             r"https?:\/\/.+\.gdtot\.\S+|https?:\/\/(filepress|filebee|appdrive|gdflix)\.\S+",
             url,
-        )
-    )
-
-
-def is_rclone_path(path: str):
-    return bool(
-        re_match(
-            r"^(mt:)?(?!(magnet:|sa:|tp:))(?![- ])[a-zA-Z0-9_\. -]+(?<! ):(?!.*\/\/).*$|^rcl$",
-            path,
-        )
-    )
-
-
-def is_gdrive_id(id_: str):
-    return bool(
-        re_match(
-            r"^(tp:|sa:|mt:)?(?:[a-zA-Z0-9-_]{33}|[a-zA-Z0-9_-]{19})$|^gdl$|^(tp:|mt:)?root$",
-            id_,
         )
     )

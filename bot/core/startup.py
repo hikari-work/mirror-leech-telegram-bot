@@ -1,27 +1,20 @@
-from aiofiles.os import path as aiopath, remove, makedirs
+from aiofiles.os import path as aiopath, makedirs
 from aiofiles import open as aiopen
 from aioshutil import rmtree
-from asyncio import create_subprocess_exec, create_subprocess_shell, sleep
-from importlib import import_module
+from asyncio import create_subprocess_shell
 from os.path import dirname
 
 from .. import (
     aria2_options,
     qbit_options,
-    nzb_options,
-    drives_ids,
-    drives_names,
-    index_urls,
     user_data,
     excluded_extensions,
     included_extensions,
     LOGGER,
     rss_dict,
-    sabnzbd_client,
     auth_chats,
     sudo_users,
 )
-from ..helper.ext_utils.blob_crypto import KEY_VAR
 from ..helper.ext_utils.db_handler import database
 from ..helper.ext_utils.user_sessions import load_user_sessions
 from .config_manager import Config
@@ -55,16 +48,96 @@ async def update_aria2_options():
         await TorrentManager.aria2.changeGlobalOption(aria2_options)
 
 
-async def update_nzb_options():
-    LOGGER.info("Get SABnzbd options from server")
-    while True:
-        try:
-            no = (await sabnzbd_client.get_config())["config"]["misc"]
-            nzb_options.update(no)
-        except:
-            await sleep(0.5)
-            continue
-        break
+# Settings left behind by the JDownloader, Usenet, gallery-dl and cloud-upload
+# code that this bot no longer carries. Config.load_dict already ignores keys it
+# does not know, so this only keeps the stored documents from growing stale.
+_LEGACY_CONFIG_KEYS = (
+    "JD_EMAIL",
+    "JD_PASS",
+    "USENET_SERVERS",
+    "GALLERY_DL_OPTIONS",
+    "GDRIVE_ID",
+    "INDEX_URL",
+    "IS_TEAM_DRIVE",
+    "STOP_DUPLICATE",
+    "USE_SERVICE_ACCOUNTS",
+    "DEFAULT_UPLOAD",
+    "UPLOAD_PATHS",
+    "RCLONE_PATH",
+    "RCLONE_FLAGS",
+    "RCLONE_SERVE_URL",
+    "RCLONE_SERVE_PORT",
+    "RCLONE_SERVE_USER",
+    "RCLONE_SERVE_PASS",
+    "BUZZHEAVIER_ACCOUNT_ID",
+    "BUZZHEAVIER_FOLDER_ID",
+    "GOFILE_API_KEY",
+    "HYDRA_IP",
+    "HYDRA_API_KEY",
+)
+
+_LEGACY_USER_KEYS = (
+    "RCLONE_CONFIG",
+    "RCLONE_PATH",
+    "RCLONE_FLAGS",
+    "TOKEN_PICKLE",
+    "GDRIVE_ID",
+    "INDEX_URL",
+    "STOP_DUPLICATE",
+    "USER_TOKENS",
+    "DEFAULT_UPLOAD",
+    "UPLOAD_PATHS",
+    "GALLERY_DL_OPTIONS",
+    "BUZZHEAVIER_ACCOUNT_ID",
+    "BUZZHEAVIER_FOLDER_ID",
+)
+
+_LEGACY_BLOBS = (
+    "sabnzbd/SABnzbd.ini",
+    "cfg.zip",
+    "accounts.zip",
+    "rclone.conf",
+    "token.pickle",
+    "list_drives.txt",
+)
+
+
+async def migrate_legacy_keys(bot_id):
+    """Drop settings and files owned by the removed subsystems.
+
+    $unset on an absent field and a delete of an absent blob are both no-ops, so
+    a restart repeats no work and logs nothing.
+    """
+    if database.db is None:
+        return
+
+    unset = {key: "" for key in _LEGACY_CONFIG_KEYS}
+    removed = 0
+    for collection in (database.db.settings.config, database.db.settings.deployConfig):
+        result = await collection.update_one({"_id": bot_id}, {"$unset": unset})
+        removed += result.modified_count
+
+    users = await database.db.users.update_many(
+        {}, {"$unset": {key: "" for key in _LEGACY_USER_KEYS}}
+    )
+
+    # Matched by name rather than by fetching each one, so a rotated
+    # DB_ENCRYPTION_KEY cannot leave an undecryptable blob behind.
+    stale = []
+    for name in await database.list_blobs(bot_id=bot_id):
+        if name in _LEGACY_BLOBS or name.rsplit("/", 1)[-1] in (
+            "RCLONE_CONFIG",
+            "TOKEN_PICKLE",
+        ):
+            stale.append(name)
+    for name in stale:
+        await database.delete_blob(name, bot_id=bot_id)
+
+    if removed or users.modified_count or stale:
+        LOGGER.info(
+            f"Removed legacy data from Database: {removed} config document(s), "
+            f"{users.modified_count} user record(s), {len(stale)} stored file(s)"
+        )
 
 
 async def load_settings():
@@ -72,9 +145,8 @@ async def load_settings():
         await load_user_sessions()
         return
 
-    for p in ["thumbnails", "tokens", "rclone"]:
-        if await aiopath.exists(p):
-            await rmtree(p, ignore_errors=True)
+    if await aiopath.exists("thumbnails"):
+        await rmtree("thumbnails", ignore_errors=True)
 
     await database.connect()
     if database.db is None:
@@ -83,34 +155,25 @@ async def load_settings():
 
     BOT_ID = Config.BOT_TOKEN.split(":", 1)[0]
 
-    try:
-        settings = import_module("config")
-        config_file = {
-            key: value.strip() if isinstance(value, str) else value
-            for key, value in vars(settings).items()
-            if not key.startswith("__") and key != KEY_VAR
-        }
-    except ModuleNotFoundError:
-        config_file = {}
+    # Before anything reads the stored config or writes blobs back to disk, so
+    # a dead file never lands on the filesystem again.
+    await migrate_legacy_keys(BOT_ID)
 
-    old_config = await database.db.settings.deployConfig.find_one(
+    config_dict = await database.db.settings.config.find_one(
         {"_id": BOT_ID}, {"_id": 0}
     )
-    if old_config is None and config_file:
-        await database.db.settings.deployConfig.replace_one(
-            {"_id": BOT_ID}, config_file, upsert=True
+    if config_dict:
+        Config.load_dict(config_dict)
+
+    all_defaults = Config.get_all()
+    missing = {
+        k: v for k, v in all_defaults.items() if k not in (config_dict or {})
+    }
+    if missing:
+        LOGGER.info(f"Adding {len(missing)} new config key(s) to Database: {', '.join(missing)}")
+        await database.db.settings.config.update_one(
+            {"_id": BOT_ID}, {"$set": missing}, upsert=True
         )
-    elif old_config and config_file and old_config != config_file:
-        LOGGER.info("Replacing existing deploy config in Database")
-        await database.db.settings.deployConfig.replace_one(
-            {"_id": BOT_ID}, config_file, upsert=True
-        )
-    else:
-        config_dict = await database.db.settings.config.find_one(
-            {"_id": BOT_ID}, {"_id": 0}
-        )
-        if config_dict:
-            Config.load_dict(config_dict)
 
     await restore_private_files(BOT_ID)
 
@@ -139,7 +202,7 @@ async def restore_private_files(bot_id):
     """Write every stored private file back to disk.
 
     Blobs are keyed by their real relative path, so a name doubles as the
-    destination and nested paths such as sabnzbd/SABnzbd.ini need no mapping.
+    destination and nested paths need no mapping.
     """
     for name in await database.list_blobs(bot_id=bot_id):
         if name.startswith("users/"):
@@ -150,10 +213,6 @@ async def restore_private_files(bot_id):
             await makedirs(folder, exist_ok=True)
         async with aiopen(name, "wb+") as f:
             await f.write(blob)
-        if name == "sabnzbd/SABnzbd.ini" and await aiopath.exists(
-            "sabnzbd/SABnzbd.ini.bak"
-        ):
-            await remove("sabnzbd/SABnzbd.ini.bak")
 
 
 async def restore_users(bot_id):
@@ -174,19 +233,14 @@ async def restore_users(bot_id):
     if not rows:
         return
 
-    for p in ["thumbnails", "tokens", "rclone"]:
-        if not await aiopath.exists(p):
-            await makedirs(p)
+    if not await aiopath.exists("thumbnails"):
+        await makedirs("thumbnails")
     for uid, row in rows.items():
-        for key, path_ in (
-            ("THUMBNAIL", f"thumbnails/{uid}.jpg"),
-            ("RCLONE_CONFIG", f"rclone/{uid}.conf"),
-            ("TOKEN_PICKLE", f"tokens/{uid}.pickle"),
-        ):
-            if blob := await database.get_blob(f"users/{uid}/{key}", bot_id=bot_id):
-                async with aiopen(path_, "wb+") as f:
-                    await f.write(blob)
-                row[key] = path_
+        path_ = f"thumbnails/{uid}.jpg"
+        if blob := await database.get_blob(f"users/{uid}/THUMBNAIL", bot_id=bot_id):
+            async with aiopen(path_, "wb+") as f:
+                await f.write(blob)
+            row["THUMBNAIL"] = path_
         user_data[uid] = row
     LOGGER.info("Users data has been imported from Database")
 
@@ -194,18 +248,23 @@ async def restore_users(bot_id):
 async def save_settings():
     if database.db is None:
         return
-    config_dict = Config.get_all()
-    await database.db.settings.config.replace_one(
-        {"_id": TgClient.ID}, config_dict, upsert=True
+    config_dict = await database.db.settings.config.find_one(
+        {"_id": TgClient.ID}, {"_id": 0}
     )
+    all_current = Config.get_all()
+    missing = {
+        k: v for k, v in all_current.items() if k not in (config_dict or {})
+    }
+    if missing:
+        await database.db.settings.config.update_one(
+            {"_id": TgClient.ID}, {"$set": missing}, upsert=True
+        )
     if await database.db.settings.aria2c.find_one({"_id": TgClient.ID}) is None:
         await database.db.settings.aria2c.update_one(
             {"_id": TgClient.ID}, {"$set": aria2_options}, upsert=True
         )
     if await database.db.settings.qbittorrent.find_one({"_id": TgClient.ID}) is None:
         await database.save_qbit_settings()
-    if await database.get_blob("sabnzbd/SABnzbd.ini") is None:
-        await database.update_nzb_config()
 
 
 async def update_variables():
@@ -246,23 +305,6 @@ async def update_variables():
             x = x.lstrip(".")
             included_extensions.append(x.strip().lower())
 
-    if Config.GDRIVE_ID:
-        drives_names.append("Main")
-        drives_ids.append(Config.GDRIVE_ID)
-        index_urls.append(Config.INDEX_URL)
-
-    if await aiopath.exists("list_drives.txt"):
-        async with aiopen("list_drives.txt", "r+") as f:
-            lines = await f.readlines()
-            for line in lines:
-                temp = line.split()
-                drives_ids.append(temp[1])
-                drives_names.append(temp[0].replace("_", " "))
-                if len(temp) > 2:
-                    index_urls.append(temp[2])
-                else:
-                    index_urls.append("")
-
 
 async def load_configurations():
 
@@ -272,7 +314,7 @@ async def load_configurations():
 
     await (
         await create_subprocess_shell(
-            "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox-nzb.sh && ./aria-nox-nzb.sh"
+            "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox.sh && ./aria-nox.sh"
         )
     ).wait()
 
@@ -280,24 +322,3 @@ async def load_configurations():
         await create_subprocess_shell(
             f"gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{Config.BASE_URL_PORT}"
         )
-
-    if await aiopath.exists("cfg.zip"):
-        if await aiopath.exists("/JDownloader/cfg"):
-            await rmtree("/JDownloader/cfg", ignore_errors=True)
-        await (
-            await create_subprocess_exec("7z", "x", "cfg.zip", "-o/JDownloader")
-        ).wait()
-
-    if await aiopath.exists("accounts.zip"):
-        if await aiopath.exists("accounts"):
-            await rmtree("accounts")
-        await (
-            await create_subprocess_exec(
-                "7z", "x", "-o.", "-aoa", "accounts.zip", "accounts/*.json"
-            )
-        ).wait()
-        await (await create_subprocess_exec("chmod", "-R", "777", "accounts")).wait()
-        await remove("accounts.zip")
-
-    if not await aiopath.exists("accounts"):
-        Config.USE_SERVICE_ACCOUNTS = False

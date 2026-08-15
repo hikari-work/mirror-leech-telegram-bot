@@ -68,11 +68,8 @@ if DATABASE_URL := config_file.get("DATABASE_URL", "").strip():
     try:
         conn = MongoClient(DATABASE_URL, server_api=ServerApi("1"))
         db = conn[DATABASE_NAME]
-        old_config = db.settings.deployConfig.find_one({"_id": BOT_ID}, {"_id": 0})
         config_dict = db.settings.config.find_one({"_id": BOT_ID})
-        if (
-            old_config is not None and old_config == config_file or old_config is None
-        ) and config_dict is not None:
+        if config_dict is not None:
             config_file["UPSTREAM_REPO"] = config_dict["UPSTREAM_REPO"]
             config_file["UPSTREAM_BRANCH"] = config_dict["UPSTREAM_BRANCH"]
         conn.close()

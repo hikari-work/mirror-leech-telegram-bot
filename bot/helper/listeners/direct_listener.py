@@ -1,4 +1,4 @@
-from asyncio import sleep, TimeoutError
+from asyncio import gather, sleep, TimeoutError
 from aiohttp.client_exceptions import ClientError
 
 from ... import LOGGER
@@ -6,7 +6,7 @@ from ...core.torrent_manager import TorrentManager, aria2_name
 
 
 class DirectListener:
-    def __init__(self, path, listener, a2c_opt):
+    def __init__(self, path, listener, a2c_opt, bunkr_lazy=False):
         self.listener = listener
         self._path = path
         self._a2c_opt = a2c_opt
@@ -14,6 +14,7 @@ class DirectListener:
         self._failed = 0
         self.download_task = None
         self.name = self.listener.name
+        self._bunkr_lazy = bunkr_lazy
 
     @property
     def processed_bytes(self):
@@ -33,6 +34,13 @@ class DirectListener:
 
     async def download(self, contents):
         self.is_downloading = True
+        if self._bunkr_lazy:
+            contents = await self._resolve_all_bunkr(contents)
+            if not contents:
+                await self.listener.on_download_error(
+                    "All Bunkr files failed to resolve!"
+                )
+                return
         for content in contents:
             if self.listener.is_cancelled:
                 break
@@ -77,6 +85,29 @@ class DirectListener:
             return
         await self.listener.on_download_complete()
         return
+
+    async def _resolve_all_bunkr(self, contents):
+        """Resolve all bunkr file URLs concurrently, return resolved contents."""
+        from ..mirror_leech_utils.download_utils.direct_link_generators.hosts.bunkr import (
+            bunkr_resolve_download,
+        )
+
+        async def _resolve_one(content):
+            dl_url, filename, file_size = await bunkr_resolve_download(content["url"])
+            if dl_url:
+                content["url"] = dl_url
+                if filename:
+                    content["filename"] = filename
+                return content
+            LOGGER.error(f"Bunkr: failed to resolve {content['filename']}")
+            return None
+
+        results = await gather(*[_resolve_one(c) for c in contents])
+        resolved = [r for r in results if r is not None]
+        failed = len(contents) - len(resolved)
+        if failed:
+            LOGGER.warning(f"Bunkr: {failed}/{len(contents)} files failed to resolve")
+        return resolved
 
     async def cancel_task(self):
         self.listener.is_cancelled = True

@@ -7,7 +7,7 @@ from yt_dlp import YoutubeDL, DownloadError
 
 from .... import task_dict_lock, task_dict
 from ...ext_utils.bot_utils import sync_to_async, async_to_sync
-from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
+from ...ext_utils.task_manager import check_running_tasks
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.yt_dlp_status import YtDlpStatus
@@ -117,7 +117,7 @@ class YoutubeDLHelper:
                 self._eta = d.get("eta", "-") or "-"
             try:
                 self._progress = (self._downloaded_bytes / self._listener.size) * 100
-            except:
+            except Exception:
                 pass
 
     async def _on_download_start(self, from_queue=False):
@@ -186,7 +186,7 @@ class YoutubeDLHelper:
             if self._listener.is_cancelled:
                 return
             async_to_sync(self._listener.on_download_complete)
-        except:
+        except Exception:
             pass
         return
 
@@ -227,7 +227,7 @@ class YoutubeDLHelper:
             else:
                 self._ext = f".{audio_format}"
 
-        if not self._listener.is_leech or self._listener.thumbnail_layout:
+        if self._listener.thumbnail_layout:
             self.opts["writethumbnail"] = False
 
         if options:
@@ -313,11 +313,6 @@ class YoutubeDLHelper:
                     "key": "EmbedThumbnail",
                 }
             )
-
-        msg, button = await stop_duplicate_check(self._listener)
-        if msg:
-            await self._listener.on_download_error(msg, button)
-            return
 
         add_to_queue, event = await check_running_tasks(self._listener)
         if add_to_queue:

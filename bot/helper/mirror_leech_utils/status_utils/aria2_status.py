@@ -37,7 +37,7 @@ class Aria2Status:
     def progress(self):
         try:
             return f"{round(int(self._download.get("completedLength", "0")) / int(self._download.get("totalLength", "0")) * 100, 2)}%"
-        except:
+        except Exception:
             return "0%"
 
     def processed_bytes(self):
@@ -63,7 +63,7 @@ class Aria2Status:
                 )
                 / int(self._download.get("downloadSpeed", "0"))
             )
-        except:
+        except Exception:
             return "-"
 
     async def status(self):
@@ -101,7 +101,7 @@ class Aria2Status:
                 / int(self._download.get("completedLength", "0")),
                 3,
             )
-        except:
+        except Exception:
             return 0
 
     def seeding_time(self):

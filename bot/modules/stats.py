@@ -20,9 +20,7 @@ from ..helper.telegram_helper.message_utils import send_message
 commands = {
     "aria2": (["aria2c", "--version"], r"aria2 version ([\d.]+)"),
     "qBittorrent": (["qbittorrent-nox", "--version"], r"qBittorrent v([\d.]+)"),
-    "SABnzbd+": (["sabnzbdplus", "--version"], r"sabnzbdplus-([\d.]+)"),
     "python": (["python3", "--version"], r"Python ([\d.]+)"),
-    "rclone": (["rclone", "--version"], r"rclone v([\d.]+)"),
     "yt-dlp": (["yt-dlp", "--version"], r"([\d.]+)"),
     "ffmpeg": (["ffmpeg", "-version"], r"ffmpeg version ([\d.]+(-\w+)?).*"),
     "7z": (["7z", "i"], r"7-Zip ([\d.]+)"),
@@ -66,8 +64,6 @@ async def bot_stats(_, message):
 <b>python:</b> {commands["python"]}
 <b>aria2:</b> {commands["aria2"]}
 <b>qBittorrent:</b> {commands["qBittorrent"]}
-<b>SABnzbd+:</b> {commands["SABnzbd+"]}
-<b>rclone:</b> {commands["rclone"]}
 <b>yt-dlp:</b> {commands["yt-dlp"]}
 <b>ffmpeg:</b> {commands["ffmpeg"]}
 <b>7z:</b> {commands["7z"]}

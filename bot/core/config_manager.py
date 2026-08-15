@@ -13,27 +13,17 @@ class Config:
     BASE_URL = ""
     BASE_URL_PORT = 80
     BOT_TOKEN = ""
-    BUZZHEAVIER_ACCOUNT_ID = ""
-    BUZZHEAVIER_FOLDER_ID = ""
-    GOFILE_API_KEY = ""
     CMD_SUFFIX = ""
     CLONE_DUMP_CHATS = ""
     DATABASE_URL = ""
     DATABASE_NAME = "mltb"
-    DEFAULT_UPLOAD = "rc"
     EQUAL_SPLITS = False
     EXCLUDED_EXTENSIONS = ""
     INCLUDED_EXTENSIONS = ""
     FFMPEG_CMDS = {}
     FILELION_API = ""
     FILES_LINKS = False
-    GALLERY_DL_OPTIONS = {}
-    GDRIVE_ID = ""
     INCOMPLETE_TASK_NOTIFIER = False
-    INDEX_URL = ""
-    IS_TEAM_DRIVE = False
-    JD_EMAIL = ""
-    JD_PASS = ""
     LEECH_DUMP_CHAT = ""
     LEECH_FILENAME_PREFIX = ""
     LEECH_SPLIT_SIZE = 2097152000
@@ -55,19 +45,11 @@ class Config:
     # How many times one file may rotate the egress IP before giving up.
     MEGA_MAX_RESTARTS = 3
     HYBRID_LEECH = False
-    HYDRA_IP = ""
-    HYDRA_API_KEY = ""
     NAME_SUBSTITUTE = r""
     OWNER_ID = 0
     QUEUE_ALL = 0
     QUEUE_DOWNLOAD = 0
     QUEUE_UPLOAD = 0
-    RCLONE_FLAGS = ""
-    RCLONE_PATH = ""
-    RCLONE_SERVE_URL = ""
-    RCLONE_SERVE_USER = ""
-    RCLONE_SERVE_PASS = ""
-    RCLONE_SERVE_PORT = 8080
     RSS_CHAT = ""
     RSS_DELAY = 600
     RSS_SIZE_LIMIT = 0
@@ -76,7 +58,6 @@ class Config:
     SEARCH_PLUGINS = []
     STATUS_LIMIT = 4
     STATUS_UPDATE_INTERVAL = 15
-    STOP_DUPLICATE = False
     STREAMWISH_API = ""
     SUDO_USERS = ""
     TELEGRAM_API = 0
@@ -84,13 +65,10 @@ class Config:
     TG_PROXY = {}
     THUMBNAIL_LAYOUT = ""
     TORRENT_TIMEOUT = 0
-    UPLOAD_PATHS = {}
     UPSTREAM_REPO = ""
     UPSTREAM_BRANCH = "master"
-    USENET_SERVERS = []
     USER_SESSION_STRING = ""
     USER_TRANSMISSION = False
-    USE_SERVICE_ACCOUNTS = False
     WEB_PINCODE = False
     YT_DLP_OPTIONS = {}
 
@@ -174,21 +152,12 @@ class Config:
         if isinstance(converted_value, str):
             converted_value = converted_value.strip()
 
-        if attr == "DEFAULT_UPLOAD" and converted_value not in {"gd", "bh", "gf"}:
-            return "rc"
-
         if attr in {
             "BASE_URL",
-            "RCLONE_SERVE_URL",
             "SEARCH_API_LINK",
             "MEGA_PROXY_URL",
         }:
             return converted_value.strip("/") if converted_value else ""
-
-        if attr == "USENET_SERVERS" and (
-            not converted_value or not converted_value[0].get("host")
-        ):
-            return None
 
         return converted_value
 
@@ -253,9 +222,6 @@ class Config:
                 continue
 
             processed_value = cls._process_config_value(key, value)
-
-            if key == "USENET_SERVERS" and processed_value is None:
-                processed_value = []
 
             if processed_value is not None:
                 setattr(cls, key, processed_value)

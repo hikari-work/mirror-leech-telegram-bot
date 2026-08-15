@@ -344,7 +344,7 @@ async def split_file(f_path, split_size, listener):
     elif code != 0:
         try:
             stderr = stderr.decode().strip()
-        except:
+        except Exception:
             stderr = "Unable to decode the error!"
         LOGGER.error(f"{stderr}. Split Document: {f_path}")
     return True
@@ -375,7 +375,7 @@ class SevenZ:
         ):
             try:
                 line = await wait_for(self._listener.subproc.stdout.readline(), 2)
-            except:
+            except OSError:
                 break
             line = line.decode().strip()
             if "%" in line:
@@ -396,7 +396,7 @@ class SevenZ:
         ):
             try:
                 char = await wait_for(self._listener.subproc.stdout.read(1), 60)
-            except:
+            except (TimeoutError, Exception):
                 break
             if not char:
                 break
@@ -407,7 +407,7 @@ class SevenZ:
                     self._processed_bytes = (
                         int(self._percentage.strip("%")) / 100
                     ) * self._listener.subsize
-                except:
+                except (ValueError, ZeroDivisionError):
                     self._processed_bytes = 0
                     self._percentage = "0%"
                 s = b""
@@ -448,7 +448,7 @@ class SevenZ:
         elif code != 0:
             try:
                 stderr = stderr.decode().strip()
-            except:
+            except (UnicodeDecodeError, AttributeError):
                 stderr = "Unable to decode the error!"
             LOGGER.error(f"{stderr}. Unable to extract archive!. Path: {f_path}")
         return code
@@ -472,7 +472,7 @@ class SevenZ:
             "-bse1",
             "-bb3",
         ]
-        if self._listener.is_leech and int(size) > self._listener.split_size:
+        if int(size) > self._listener.split_size:
             if not pswd:
                 del cmd[4]
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}.0*")
@@ -502,7 +502,7 @@ class SevenZ:
                 await remove(up_path)
             try:
                 stderr = stderr.decode().strip()
-            except:
+            except (UnicodeDecodeError, AttributeError):
                 stderr = "Unable to decode the error!"
             LOGGER.error(f"{stderr}. Unable to zip this path: {dl_path}")
             return dl_path

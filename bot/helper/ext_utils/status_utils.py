@@ -14,7 +14,6 @@ SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"]
 class MirrorStatus:
     STATUS_UPLOAD = "Upload"
     STATUS_DOWNLOAD = "Download"
-    STATUS_CLONE = "Clone"
     STATUS_QUEUEDL = "QueueDl"
     STATUS_QUEUEUP = "QueueUp"
     STATUS_PAUSED = "Pause"
@@ -37,7 +36,6 @@ STATUSES = {
     "AR": MirrorStatus.STATUS_ARCHIVE,
     "EX": MirrorStatus.STATUS_EXTRACT,
     "SD": MirrorStatus.STATUS_SEED,
-    "CL": MirrorStatus.STATUS_CLONE,
     "CM": MirrorStatus.STATUS_CONVERT,
     "SP": MirrorStatus.STATUS_SPLIT,
     "SV": MirrorStatus.STATUS_SAMVID,
@@ -128,7 +126,7 @@ def time_to_seconds(time_duration):
         else:
             return 0
         return hours * 3600 + minutes * 60 + seconds
-    except:
+    except Exception:
         return 0
 
 
@@ -217,7 +215,7 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             ):
                 try:
                     msg += f"\n<b>Seeders:</b> {task.seeders_num()} | <b>Leechers:</b> {task.leechers_num()}"
-                except:
+                except Exception:
                     pass
         elif tstatus == MirrorStatus.STATUS_SEED:
             msg += f"\n<b>Size: </b>{task.size()}"

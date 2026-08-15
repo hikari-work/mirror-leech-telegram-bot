@@ -1,10 +1,13 @@
 """Semprot.com thread scraper via api.piyann.me.
 
-Scrapes all external links from a semprot.com / senang.top XenForo thread.
-Uses gateway API endpoint: https://api.piyann.me/api/v1/scrape/semprot
+Endpoint: https://api.piyann.me/api/v1/scrape/semprot
+Params: q=<url>&pageList=<spec>&filter=<host>
+Response: {success, links, total_pages}
 """
 
 from urllib.parse import urlparse, urlunparse
+
+from aiohttp import ClientSession, ClientTimeout
 
 from ....core.config_manager import Config
 from ...ext_utils.exceptions import DirectDownloadLinkException
@@ -19,20 +22,45 @@ def _normalize_url(url: str) -> str:
     return url.replace("senang.top", "semprot.com")
 
 
-def scrape_thread(url: str):
-    """Scrape all pages of a semprot thread via gateway API. Returns (title, sorted links)."""
-    from requests import get as req_get
-
-    target_url = _normalize_url(url)
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    gateway_api = f"{gateway_base}/api/v1/scrape/semprot"
-    headers = {}
+def _gateway_headers():
+    headers = {"accept": "application/json"}
     if token := getattr(Config, "GATEWAY_TOKEN", ""):
         headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _gateway_url():
+    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
+    return f"{base}/api/v1/scrape/semprot"
+
+
+async def scrape_pages(url: str, page_list: str = "1", filter_host: str = ""):
+    """Scrape semprot thread pages in one async request.
+
+    Args:
+        url: Thread URL.
+        page_list: Page spec sent as ``pageList`` param
+            (e.g. ``"1"``, ``"1-10"``, ``"1,5,7"``).
+        filter_host: Optional host filter sent as ``filter`` param
+            (e.g. ``"vidara.to"``).  Server-side filtering.
+
+    Returns:
+        (title, links, total_pages)
+    """
+    target_url = _normalize_url(url)
+    params = {"q": target_url, "pageList": page_list}
+    if filter_host:
+        params["filter"] = filter_host
     try:
-        r = req_get(gateway_api, params={"q": target_url}, headers=headers, timeout=60)
-        r.raise_for_status()
-        data = r.json()
+        timeout = ClientTimeout(total=600)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.get(
+                _gateway_url(),
+                params=params,
+                headers=_gateway_headers(),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: semprot gateway request failed: {e}") from e
 
@@ -41,6 +69,6 @@ def scrape_thread(url: str):
         raise DirectDownloadLinkException(f"ERROR: semprot scrape failed: {error_msg}")
 
     links = data.get("links") or []
-    # Strip thread title or return simple thread url label if not provided by gateway
+    total_pages = data.get("total_pages") or 1
     title = target_url.rstrip("/").split("/")[-1]
-    return title, sorted(links)
+    return title, sorted(links), total_pages

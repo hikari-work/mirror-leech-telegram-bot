@@ -34,7 +34,7 @@ from ...ext_utils.mega_client import (
     list_folder,
     resolve_link,
 )
-from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
+from ...ext_utils.task_manager import check_running_tasks
 from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.mega_status import MegaStatus
 from ..status_utils.queue_status import QueueStatus
@@ -315,11 +315,6 @@ class MegaDownloadHelper:
         if self._listener.name.lower().endswith(".m4v"):
             self._listener.name = f"{self._listener.name[:-4]}.mp4"
         single = len(files) == 1 and not files[0].get("path")
-
-        msg, button = await stop_duplicate_check(self._listener)
-        if msg:
-            await self._listener.on_download_error(msg, button)
-            return
 
         add_to_queue, event = await check_running_tasks(self._listener)
         if add_to_queue:

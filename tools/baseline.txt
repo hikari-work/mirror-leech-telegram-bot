@@ -1,0 +1,55 @@
+# Baseline refactor — dibuat oleh: python tools/complexity_report.py
+# Commit: 4cd0ad4 · 2026-08-10
+# Bandingkan: python tools/complexity_report.py --diff tools/baseline.txt
+
+## File terbesar
+
+| LOC | File |
+|-----|------|
+| 2500 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py` |
+| 1216 | `bot/helper/common.py` |
+| 961 | `bot/modules/rss.py` |
+| 767 | `bot/helper/ext_utils/media_utils.py` |
+| 737 | `bot/helper/mirror_leech_utils/download_utils/alldebrid_resolver.py` |
+| 677 | `bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py` |
+| 643 | `bot/modules/users_settings.py` |
+| 565 | `bot/modules/bot_settings.py` |
+| 525 | `bot/modules/leech.py` |
+| 508 | `bot/helper/ext_utils/files_utils.py` |
+| 506 | `bot/helper/listeners/task_listener.py` |
+| 483 | `bot/modules/ytdlp.py` |
+| 431 | `bot/helper/mirror_leech_utils/download_utils/torbox_resolver.py` |
+| 401 | `bot/helper/mirror_leech_utils/download_utils/mega_download.py` |
+| 370 | `bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py` |
+
+## Fungsi terbesar
+
+| LOC | CX | Lokasi | Fungsi |
+|-----|----|--------|--------|
+| 439 | 108 | `bot/modules/leech.py:79` | `Leech.new_event()` |
+| 264 | 95 | `bot/helper/common.py:134` | `TaskConfig.before_start()` |
+| 258 | 24 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:801` | `terabox()` |
+| 246 | 1 | `bot/core/handlers.py:10` | `add_handlers()` |
+| 227 | 52 | `bot/modules/users_settings.py:48` | `get_user_settings()` |
+| 222 | 52 | `bot/helper/listeners/task_listener.py:87` | `TaskListener.on_download_complete()` |
+| 204 | 59 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:30` | `direct_link_generator()` |
+| 202 | 68 | `bot/helper/common.py:721` | `TaskConfig.proceed_ffmpeg()` |
+| 200 | 50 | `bot/modules/rss.py:585` | `rss_listener()` |
+| 197 | 39 | `bot/modules/ytdlp.py:283` | `YtDlp.new_event()` |
+| 186 | 64 | `bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py:476` | `TelegramUploader._upload_file()` |
+| 184 | 56 | `bot/modules/bot_settings.py:338` | `edit_bot_settings()` |
+| 164 | 8 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:1759` | `mediafireFolder()` |
+| 158 | 52 | `bot/modules/rss.py:787` | `rss_monitor()` |
+| 141 | 23 | `bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py:193` | `YoutubeDLHelper.add_download()` |
+
+## Metrik
+
+file_total      = 84
+file_gt_500_loc = 11
+func_total      = 683
+func_gt_100_loc = 29
+func_gt_50_loc  = 81
+cx_max          = 108
+func_cx_gt_10   = 110
+bare_except     = 86
+eval_calls      = 9

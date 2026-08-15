@@ -6,15 +6,15 @@ from pyrogram.handlers import CallbackQueryHandler
 from time import time
 from yt_dlp import YoutubeDL
 
-from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, DOWNLOAD_DIR
 from ..core.config_manager import Config
 from ..helper.ext_utils.bot_utils import (
     new_task,
     sync_to_async,
-    arg_parser,
     COMMAND_USAGE,
 )
 from ..helper.ext_utils.links_utils import is_url
+from ..helper.ext_utils.task_args import parse_ytdlp_args
 from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ..helper.listeners.task_listener import TaskListener
 from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
@@ -88,7 +88,7 @@ class YtSelection:
         )
         try:
             await wait_for(self.event.wait(), timeout=self._timeout)
-        except:
+        except Exception:
             await edit_message(self._reply_to, "Timed Out. Task has been cancelled!")
             self.qual = None
             self.listener.is_cancelled = True
@@ -262,9 +262,6 @@ class YtDlp(TaskListener):
         client,
         message,
         _=None,
-        is_leech=False,
-        __=None,
-        ___=None,
         same_dir=None,
         bulk=None,
         multi_tag=None,
@@ -282,125 +279,23 @@ class YtDlp(TaskListener):
         self.bulk = bulk
         super().__init__()
         self.is_ytdlp = True
-        self.is_leech = is_leech
 
     async def new_event(self):
         text = self.message.text.split("\n")
         input_list = text[0].split(" ")
         qual = ""
 
-        args = {
-            "-doc": False,
-            "-med": False,
-            "-s": False,
-            "-b": False,
-            "-z": False,
-            "-sv": False,
-            "-ss": False,
-            "-f": False,
-            "-fd": False,
-            "-fu": False,
-            "-hl": False,
-            "-bt": False,
-            "-ut": False,
-            "-i": 0,
-            "-sp": 0,
-            "link": "",
-            "-m": "",
-            "-opt": {},
-            "-n": "",
-            "-up": "",
-            "-rcf": "",
-            "-t": "",
-            "-ca": "",
-            "-cv": "",
-            "-ns": "",
-            "-tl": "",
-            "-ff": set(),
-        }
+        args = parse_ytdlp_args(input_list[1:])
 
-        arg_parser(input_list[1:], args)
+        self._apply_args(args)
 
-        try:
-            self.multi = int(args["-i"])
-        except:
-            self.multi = 0
+        opt = args.opt
 
-        try:
-            opt = eval(args["-opt"]) if args["-opt"] else {}
-        except Exception as e:
-            LOGGER.error(e)
-            opt = {}
-
-        self.ffmpeg_cmds = args["-ff"]
-        self.select = args["-s"]
-        self.name = args["-n"]
-        self.up_dest = args["-up"]
-        self.rc_flags = args["-rcf"]
-        self.link = args["link"]
-        self.compress = args["-z"]
-        self.thumb = args["-t"]
-        self.split_size = args["-sp"]
-        self.sample_video = args["-sv"]
-        self.screen_shots = args["-ss"]
-        self.force_run = args["-f"]
-        self.force_download = args["-fd"]
-        self.force_upload = args["-fu"]
-        self.convert_audio = args["-ca"]
-        self.convert_video = args["-cv"]
-        self.name_sub = args["-ns"]
-        self.hybrid_leech = args["-hl"]
-        self.thumbnail_layout = args["-tl"]
-        self.as_doc = args["-doc"]
-        self.as_med = args["-med"]
-        self.folder_name = f"/{args["-m"]}".rstrip("/") if len(args["-m"]) > 0 else ""
-        self.bot_trans = args["-bt"]
-        self.user_trans = args["-ut"]
-
-        is_bulk = args["-b"]
-
-        bulk_start = 0
-        bulk_end = 0
-        reply_to = None
-
-        if not isinstance(is_bulk, bool):
-            dargs = is_bulk.split(":")
-            bulk_start = dargs[0] or None
-            if len(dargs) == 2:
-                bulk_end = dargs[1] or None
-            is_bulk = True
-
-        if not is_bulk:
-            if self.multi > 0:
-                if self.folder_name:
-                    async with task_dict_lock:
-                        if self.folder_name in self.same_dir:
-                            self.same_dir[self.folder_name]["tasks"].add(self.mid)
-                            for fd_name in self.same_dir:
-                                if fd_name != self.folder_name:
-                                    self.same_dir[fd_name]["total"] -= 1
-                        elif self.same_dir:
-                            self.same_dir[self.folder_name] = {
-                                "total": self.multi,
-                                "tasks": {self.mid},
-                            }
-                            for fd_name in self.same_dir:
-                                if fd_name != self.folder_name:
-                                    self.same_dir[fd_name]["total"] -= 1
-                        else:
-                            self.same_dir = {
-                                self.folder_name: {
-                                    "total": self.multi,
-                                    "tasks": {self.mid},
-                                }
-                            }
-                elif self.same_dir:
-                    async with task_dict_lock:
-                        for fd_name in self.same_dir:
-                            self.same_dir[fd_name]["total"] -= 1
-        else:
-            await self.init_bulk(input_list, bulk_start, bulk_end, YtDlp)
+        if args.is_bulk:
+            await self.init_bulk(input_list, args.bulk_start, args.bulk_end, YtDlp)
             return
+
+        await self.register_same_dir()
 
         if len(self.bulk) != 0:
             del self.bulk[0]
@@ -421,37 +316,18 @@ class YtDlp(TaskListener):
             await send_message(
                 self.message, COMMAND_USAGE["yt"][0], COMMAND_USAGE["yt"][1]
             )
-            await self.remove_from_same_dir()
-            await self.register_batch_failure("Invalid or missing URL")
+            await self.fail_task("Invalid or missing URL", notify=False)
             return
 
-        if "mdisk.me" in self.link:
-            self.name, self.link = await _mdisk(self.link, self.name)
-        elif is_vidoy_link(self.link):
-            # yt-dlp has no Vidoy extractor, but it handles the CDN stream the
-            # API hands back - both the MP4 and the HLS ladder. The MP4 CDN 403s
-            # without a Referer, so its headers ride along in the options.
-            try:
-                self.name, self.link, headers = await sync_to_async(
-                    vidoy_resolve, self.link, self.name
-                )
-                opt = {
-                    **opt,
-                    "http_headers": {**opt.get("http_headers", {}), **headers},
-                }
-            except Exception as e:
-                await send_message(self.message, e)
-                await self.remove_from_same_dir()
-                await self.register_batch_failure(str(e))
-                return
+        if not await self._resolve_special_links(opt):
+            return
 
         try:
             await self.before_start()
         except Exception as e:
-            await send_message(self.message, e)
-            await self.remove_from_same_dir()
-            await self.register_batch_failure(str(e))
+            await self.fail_task(e)
             return
+
         options = {"usenetrc": True, "cookiefile": "cookies.txt"}
         if opt:
             for key, value in opt.items():
@@ -469,16 +345,15 @@ class YtDlp(TaskListener):
             result = await sync_to_async(extract_info, self.link, options)
         except Exception as e:
             msg = str(e).replace("<", " ").replace(">", " ")
-            await send_message(self.message, f"{self.tag} {msg}")
-            await self.remove_from_same_dir()
-            await self.register_batch_failure(msg)
+            await self.fail_task(f"{self.tag} {msg}")
             return
 
         if not qual:
             qual = await YtSelection(self).get_quality(result)
             if qual is None:
-                await self.remove_from_same_dir()
-                await self.register_batch_failure("Quality selection cancelled or failed")
+                await self.fail_task(
+                    "Quality selection cancelled or failed", notify=False
+                )
                 return
 
         LOGGER.info(f"Downloading with YT-DLP: {self.link}")
@@ -486,10 +361,53 @@ class YtDlp(TaskListener):
         ydl = YoutubeDLHelper(self)
         await ydl.add_download(path, qual, playlist, opt)
 
+    # ── arg application ─────────────────────────────────────────────
 
-async def ytdl(client, message):
-    bot_loop.create_task(YtDlp(client, message).new_event())
+    def _apply_args(self, args):
+        """Transfer parsed args onto *self*."""
+        self.ffmpeg_cmds = args.ffmpeg_cmds
+        self.select = args.select
+        self.name = args.name
+        self.link = args.link
+        self.compress = args.compress
+        self.thumb = args.thumb
+        self.split_size = args.split_size
+        self.sample_video = args.sample_video
+        self.screen_shots = args.screen_shots
+        self.force_run = args.force_run
+        self.force_download = args.force_download
+        self.force_upload = args.force_upload
+        self.convert_audio = args.convert_audio
+        self.convert_video = args.convert_video
+        self.name_sub = args.name_sub
+        self.hybrid_leech = args.hybrid_leech
+        self.thumbnail_layout = args.thumbnail_layout
+        self.as_doc = args.as_doc
+        self.as_med = args.as_med
+        self.folder_name = args.folder_name
+        self.bot_trans = args.bot_trans
+        self.user_trans = args.user_trans
+        self.multi = args.multi
+
+    # ── special link resolvers ──────────────────────────────────────
+
+    async def _resolve_special_links(self, opt):
+        """Handle mdisk / vidoy links.  Returns *False* on failure."""
+        if "mdisk.me" in self.link:
+            self.name, self.link = await _mdisk(self.link, self.name)
+        elif is_vidoy_link(self.link):
+            try:
+                self.name, self.link, headers = await sync_to_async(
+                    vidoy_resolve, self.link, self.name
+                )
+                opt.update(
+                    http_headers={**opt.get("http_headers", {}), **headers}
+                )
+            except Exception as e:
+                await self.fail_task(e)
+                return False
+        return True
 
 
 async def ytdl_leech(client, message):
-    bot_loop.create_task(YtDlp(client, message, is_leech=True).new_event())
+    bot_loop.create_task(YtDlp(client, message).new_event())

@@ -8,7 +8,7 @@ from .... import (
     task_dict_lock,
 )
 from ....core.telegram_manager import TgClient, get_user_client
-from ...ext_utils.task_manager import check_running_tasks, stop_duplicate_check
+from ...ext_utils.task_manager import check_running_tasks
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ...mirror_leech_utils.status_utils.telegram_status import TelegramStatus
 from ...telegram_helper.message_utils import send_status_message
@@ -144,11 +144,6 @@ class TelegramDownloadHelper:
                     path = path + self._listener.name
                 self._listener.size = media.file_size
                 gid = media.file_unique_id
-
-                msg, button = await stop_duplicate_check(self._listener)
-                if msg:
-                    await self._listener.on_download_error(msg, button)
-                    return
 
                 add_to_queue, event = await check_running_tasks(self._listener)
                 if add_to_queue:

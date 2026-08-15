@@ -1,57 +1,107 @@
-from aiofiles.os import path as aiopath, listdir, remove
-from asyncio import sleep, gather
+from asyncio import gather, sleep
+from dataclasses import dataclass
 from html import escape
-from requests import utils as rutils
+
+from aiofiles.os import listdir, remove
+from aiofiles.os import path as aiopath
 
 from ... import (
+    DOWNLOAD_DIR,
+    LOGGER,
     intervals,
+    non_queued_dl,
+    non_queued_up,
+    upload_chat_of,
+    queue_dict_lock,
+    queued_dl,
+    queued_up,
+    same_directory_lock,
     task_dict,
     task_dict_lock,
-    LOGGER,
-    non_queued_up,
-    non_queued_dl,
-    queued_up,
-    queued_dl,
-    queue_dict_lock,
-    same_directory_lock,
-    multi_batches,
-    DOWNLOAD_DIR,
 )
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
 from ..common import TaskConfig
-from ..ext_utils.bot_utils import sync_to_async
 from ..ext_utils.db_handler import database
 from ..ext_utils.files_utils import (
-    get_path_size,
     clean_download,
     clean_target,
-    join_files,
     create_recursive_symlink,
+    get_path_size,
+    join_files,
+    move_and_merge,
     remove_excluded_files,
     remove_non_included_files,
-    move_and_merge,
 )
-from ..ext_utils.links_utils import is_gdrive_id
 from ..ext_utils.status_utils import get_readable_file_size
-from ..ext_utils.task_manager import start_from_queued, check_running_tasks
-from ..mirror_leech_utils.gdrive_utils.upload import GoogleDriveUpload
-from ..mirror_leech_utils.rclone_utils.transfer import RcloneTransferHelper
-from ..mirror_leech_utils.upload_utils.buzzheavier_uploader import BuzzHeavierUploader
-from ..mirror_leech_utils.upload_utils.gofile_uploader import GoFileUploader
-from ..mirror_leech_utils.status_utils.gdrive_status import GoogleDriveStatus
+from ..ext_utils.task_manager import check_running_tasks, start_from_queued
 from ..mirror_leech_utils.status_utils.queue_status import QueueStatus
-from ..mirror_leech_utils.status_utils.rclone_status import RcloneStatus
 from ..mirror_leech_utils.status_utils.telegram_status import TelegramStatus
-from ..mirror_leech_utils.status_utils.buzzheavier_status import BuzzHeavierStatus
-from ..mirror_leech_utils.status_utils.gofile_status import GoFileStatus
 from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
-from ..telegram_helper.button_build import ButtonMaker
 from ..telegram_helper.message_utils import (
-    send_message,
-    delete_status,
     delete_message,
+    delete_status,
+    send_message,
     update_status_message,
+)
+
+NO_FILES_ERROR = (
+    "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, "
+    "then check if all files have those extensions or not."
+)
+
+
+@dataclass(frozen=True)
+class _Stage:
+    """One post-processing step applied to a finished download.
+
+    The seven steps look alike but each refreshes a different subset of the
+    listener state afterwards, so the differences live here as data rather
+    than as seven near-identical blocks.
+    """
+
+    guard: tuple[str, ...]
+    """Listener attributes; the step runs when any of them is truthy."""
+
+    step: str
+    """Name of the coroutine on the listener that does the work."""
+
+    pass_gid: bool = True
+    set_name: bool = True
+    refresh_size: bool = True
+    do_clear: bool = True
+
+    stat_before_cancel: bool = False
+    """Refresh ``is_file`` before the cancel check instead of after it."""
+
+    log: str = ""
+    """Logged with the path before the step runs; empty means no log line."""
+
+    refilter: bool = False
+    """Re-apply the extension filter once the step is done."""
+
+
+_STAGES = (
+    _Stage(("extract",), "proceed_extract", refilter=True),
+    _Stage(("ffmpeg_cmds",), "proceed_ffmpeg"),
+    _Stage(
+        ("name_sub",),
+        "substitute",
+        pass_gid=False,
+        refresh_size=False,
+        do_clear=False,
+        log="Start Name Substitution",
+    ),
+    _Stage(("screen_shots",), "generate_screenshots", pass_gid=False, do_clear=False),
+    _Stage(("convert_audio", "convert_video"), "convert_media"),
+    _Stage(("sample_video",), "generate_sample_video"),
+    _Stage(
+        ("compress",),
+        "proceed_compress",
+        set_name=False,
+        refresh_size=False,
+        stat_before_cancel=True,
+    ),
 )
 
 
@@ -66,7 +116,7 @@ class TaskListener(TaskConfig):
                     intvl.cancel()
             intervals["status"].clear()
             await gather(TorrentManager.aria2.purgeDownloadResult(), delete_status())
-        except:
+        except Exception:
             pass
 
     def clear(self):
@@ -100,69 +150,107 @@ class TaskListener(TaskConfig):
         await sleep(2)
         if self.is_cancelled:
             return
-        multi_links = False
-        if (
-            self.folder_name
-            and self.same_dir
-            and self.mid in self.same_dir[self.folder_name]["tasks"]
-        ):
-            async with same_directory_lock:
-                while True:
-                    async with task_dict_lock:
-                        if self.mid not in self.same_dir[self.folder_name]["tasks"]:
-                            return
-                        if (
-                            self.same_dir[self.folder_name]["total"] <= 1
-                            or len(self.same_dir[self.folder_name]["tasks"]) > 1
-                        ):
-                            if self.same_dir[self.folder_name]["total"] > 1:
-                                self.same_dir[self.folder_name]["tasks"].remove(
-                                    self.mid
-                                )
-                                self.same_dir[self.folder_name]["total"] -= 1
-                                spath = f"{self.dir}{self.folder_name}"
-                                des_id = list(self.same_dir[self.folder_name]["tasks"])[
-                                    0
-                                ]
-                                des_path = f"{DOWNLOAD_DIR}{des_id}{self.folder_name}"
-                                LOGGER.info(f"Moving files from {self.mid} to {des_id}")
-                                await move_and_merge(spath, des_path, self.mid)
-                                multi_links = True
-                            break
-                    await sleep(1)
+
+        multi_links = await self._await_same_dir_merge()
+        if multi_links is None:
+            return
+
         async with task_dict_lock:
-            if self.is_cancelled:
-                return
-            if self.mid not in task_dict:
+            if self.is_cancelled or self.mid not in task_dict:
                 return
             download = task_dict[self.mid]
             self.name = download.name()
             gid = download.gid()
         LOGGER.info(f"Download completed: {self.name}")
 
-        if not (self.is_torrent or self.is_qbit):
-            self.seed = False
-
         if multi_links:
-            self.seed = False
-            await self.on_upload_error(
-                f"{self.name} Downloaded!\n\nWaiting for other tasks to finish...",
-                silent=True,
-            )
-            batch = self._batch()
-            if batch:
-                batch["done"] += 1
-                await self.update_batch_progress()
-                if self.message != batch["anchor"]:
-                    try:
-                        await delete_message(self.message)
-                    except:
-                        pass
-                await self.finalize_batch()
+            await self._finish_merged_task()
             return
-        elif self.same_dir:
+        # a task that merged into a sibling, or shares a folder with one,
+        # stops seeding — same three outcomes as the old nested branches
+        if not (self.is_torrent or self.is_qbit) or self.same_dir:
             self.seed = False
 
+        dl_path = await self._resolve_download_path()
+        if dl_path is None:
+            return
+        up_dir, up_path = await self._prepare_upload_dir(dl_path)
+
+        await self._filter_extensions(self.up_dir or self.dir)
+        if not await aiopath.exists(up_path):
+            await self.on_upload_error(NO_FILES_ERROR)
+            return
+
+        await self._release_download_slot()
+        if self.join and not self.is_file:
+            await join_files(up_path)
+
+        up_path, cancelled = await self._run_post_processing(up_path, up_dir, gid)
+        if cancelled:
+            return
+
+        self.subproc = None
+        await self._start_upload(up_dir, gid)
+
+    async def _await_same_dir_merge(self):
+        """Wait until this task is the last one left in its same-dir group.
+
+        Returns True when this task's files were merged into a sibling task,
+        False when it carries on by itself, and None when it was dropped from
+        the group while waiting — in which case the caller must return.
+        """
+        if not (
+            self.folder_name
+            and self.same_dir
+            and self.mid in self.same_dir[self.folder_name]["tasks"]
+        ):
+            return False
+
+        async with same_directory_lock:
+            while True:
+                async with task_dict_lock:
+                    group = self.same_dir[self.folder_name]
+                    if self.mid not in group["tasks"]:
+                        return None
+                    if group["total"] <= 1 or len(group["tasks"]) > 1:
+                        if group["total"] <= 1:
+                            return False
+                        group["tasks"].remove(self.mid)
+                        group["total"] -= 1
+                        spath = f"{self.dir}{self.folder_name}"
+                        des_id = list(group["tasks"])[0]
+                        des_path = f"{DOWNLOAD_DIR}{des_id}{self.folder_name}"
+                        LOGGER.info(f"Moving files from {self.mid} to {des_id}")
+                        await move_and_merge(spath, des_path, self.mid)
+                        return True
+                # lock released before sleeping so siblings can make progress
+                await sleep(1)
+
+    async def _finish_merged_task(self):
+        """Report a task whose files were merged into a sibling, then stop."""
+        self.seed = False
+        await self.on_upload_error(
+            f"{self.name} Downloaded!\n\nWaiting for other tasks to finish...",
+            silent=True,
+        )
+        batch = self._batch()
+        if not batch:
+            return
+        batch["done"] += 1
+        await self.update_batch_progress()
+        if self.message != batch["anchor"]:
+            try:
+                await delete_message(self.message)
+            except Exception:
+                pass
+        await self.finalize_batch()
+
+    async def _resolve_download_path(self):
+        """Settle ``self.name`` on what actually landed on disk, then stat it.
+
+        Returns the download path, or None if the directory could not be read
+        and the caller must return.
+        """
         if self.folder_name:
             self.name = self.folder_name.strip("/").split("/", 1)[0]
 
@@ -174,127 +262,96 @@ class TaskListener(TaskConfig):
                     self.name = files[0]
             except Exception as e:
                 await self.on_upload_error(str(e))
-                return
+                return None
 
         dl_path = f"{self.dir}/{self.name}"
         self.size = await get_path_size(dl_path)
         self.is_file = await aiopath.isfile(dl_path)
+        return dl_path
 
-        if self.seed:
-            up_dir = self.up_dir = f"{self.dir}10000"
-            up_path = f"{self.up_dir}/{self.name}"
-            await create_recursive_symlink(self.dir, self.up_dir)
-            LOGGER.info(f"Shortcut created: {dl_path} -> {up_path}")
-        else:
-            up_dir = self.dir
-            up_path = dl_path
+    async def _prepare_upload_dir(self, dl_path):
+        """Pick the directory the upload reads from.
 
+        A seeding task uploads through a symlink tree so the torrent's own
+        files stay where the client left them.
+        """
+        if not self.seed:
+            return self.dir, dl_path
+        up_dir = self.up_dir = f"{self.dir}10000"
+        up_path = f"{up_dir}/{self.name}"
+        await create_recursive_symlink(self.dir, up_dir)
+        LOGGER.info(f"Shortcut created: {dl_path} -> {up_path}")
+        return up_dir, up_path
+
+    async def _filter_extensions(self, directory):
+        """Drop files the user excluded, or everything they did not include."""
         if not self.included_extensions:
-            await remove_excluded_files(
-                self.up_dir or self.dir, self.excluded_extensions
-            )
+            await remove_excluded_files(directory, self.excluded_extensions)
         else:
-            await remove_non_included_files(
-                self.up_dir or self.dir, self.included_extensions
-            )
+            await remove_non_included_files(directory, self.included_extensions)
 
-        if not await aiopath.exists(up_path):
-            e = "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, then check if all files have those extensions or not."
-            await self.on_upload_error(e)
+    async def _release_download_slot(self):
+        """Give the download slot back to the queue unless QUEUE_ALL holds it."""
+        if Config.QUEUE_ALL:
             return
+        async with queue_dict_lock:
+            if self.mid in non_queued_dl:
+                non_queued_dl.remove(self.mid)
+        await start_from_queued()
 
-        if not Config.QUEUE_ALL:
-            async with queue_dict_lock:
-                if self.mid in non_queued_dl:
-                    non_queued_dl.remove(self.mid)
-            await start_from_queued()
+    async def _run_stage(self, stage, up_path, up_dir, gid):
+        """Run one post-processing stage.
 
-        if self.join and not self.is_file:
-            await join_files(up_path)
+        Returns ``(up_path, cancelled)``; when cancelled is True the caller
+        must return without touching the rest of the pipeline.
+        """
+        if stage.log:
+            LOGGER.info(f"{stage.log} {up_path}")
 
-        if self.extract and not self.is_nzb:
-            up_path = await self.proceed_extract(up_path, gid)
-            if self.is_cancelled:
-                return
+        step = getattr(self, stage.step)
+        up_path = await (step(up_path, gid) if stage.pass_gid else step(up_path))
+
+        if stage.stat_before_cancel:
             self.is_file = await aiopath.isfile(up_path)
+        if self.is_cancelled:
+            return up_path, True
+        if not stage.stat_before_cancel:
+            self.is_file = await aiopath.isfile(up_path)
+
+        if stage.set_name:
             self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
+        if stage.refresh_size:
             self.size = await get_path_size(up_dir)
+        if stage.do_clear:
             self.clear()
-            if not self.included_extensions:
-                await remove_excluded_files(up_dir, self.excluded_extensions)
-            else:
-                await remove_non_included_files(up_dir, self.included_extensions)
+        if stage.refilter:
+            await self._filter_extensions(up_dir)
+        return up_path, False
 
-        if self.ffmpeg_cmds:
-            up_path = await self.proceed_ffmpeg(
-                up_path,
-                gid,
-            )
-            if self.is_cancelled:
-                return
-            self.is_file = await aiopath.isfile(up_path)
-            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
-            self.size = await get_path_size(up_dir)
-            self.clear()
+    async def _run_post_processing(self, up_path, up_dir, gid):
+        """Run every enabled stage, then split what is left.
 
-        if self.name_sub:
-            LOGGER.info(f"Start Name Substitution {up_path}")
-            up_path = await self.substitute(up_path)
-            if self.is_cancelled:
-                return
-            self.is_file = await aiopath.isfile(up_path)
-            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
-
-        if self.screen_shots:
-            up_path = await self.generate_screenshots(up_path)
-            if self.is_cancelled:
-                return
-            self.is_file = await aiopath.isfile(up_path)
-            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
-            self.size = await get_path_size(up_dir)
-
-        if self.convert_audio or self.convert_video:
-            up_path = await self.convert_media(
-                up_path,
-                gid,
-            )
-            if self.is_cancelled:
-                return
-            self.is_file = await aiopath.isfile(up_path)
-            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
-            self.size = await get_path_size(up_dir)
-            self.clear()
-
-        if self.sample_video:
-            up_path = await self.generate_sample_video(up_path, gid)
-            if self.is_cancelled:
-                return
-            self.is_file = await aiopath.isfile(up_path)
-            self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
-            self.size = await get_path_size(up_dir)
-            self.clear()
-
-        if self.compress:
-            up_path = await self.proceed_compress(
-                up_path,
-                gid,
-            )
-            self.is_file = await aiopath.isfile(up_path)
-            if self.is_cancelled:
-                return
-            self.clear()
+        Returns ``(up_path, cancelled)`` like :meth:`_run_stage`.
+        """
+        for stage in _STAGES:
+            if not any(getattr(self, attr) for attr in stage.guard):
+                continue
+            up_path, cancelled = await self._run_stage(stage, up_path, up_dir, gid)
+            if cancelled:
+                return up_path, True
 
         self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
         self.size = await get_path_size(up_dir)
 
-        if self.is_leech and not self.compress:
+        if not self.compress:
             await self.proceed_split(up_path, gid)
             if self.is_cancelled:
-                return
+                return up_path, True
             self.clear()
+        return up_path, False
 
-        self.subproc = None
-
+    async def _start_upload(self, up_dir, gid):
+        """Queue the upload if needed, then hand the files to Telegram."""
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
@@ -308,61 +365,17 @@ class TaskListener(TaskConfig):
 
         self.size = await get_path_size(up_dir)
 
-        if self.is_leech:
-            LOGGER.info(f"Leech Name: {self.name}")
-            tg = TelegramUploader(self, up_dir)
-            async with task_dict_lock:
-                task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
-            await gather(
-                update_status_message(self.message.chat.id),
-                tg.upload(),
-            )
-            del tg
-        elif self.is_buzzheavier:
-            LOGGER.info(f"BuzzHeavier Upload Name: {self.name}")
-            bh = BuzzHeavierUploader(self, up_path)
-            async with task_dict_lock:
-                task_dict[self.mid] = BuzzHeavierStatus(self, bh, gid, "up")
-            await gather(
-                update_status_message(self.message.chat.id),
-                bh.upload(),
-            )
-            del bh
-        elif self.is_gofile:
-            LOGGER.info(f"GoFile Upload Name: {self.name}")
-            gf = GoFileUploader(self, up_path)
-            async with task_dict_lock:
-                task_dict[self.mid] = GoFileStatus(self, gf, gid, "up")
-            await gather(
-                update_status_message(self.message.chat.id),
-                gf.upload(),
-            )
-            del gf
-        elif is_gdrive_id(self.up_dest):
-            LOGGER.info(f"Gdrive Upload Name: {self.name}")
-            drive = GoogleDriveUpload(self, up_path)
-            async with task_dict_lock:
-                task_dict[self.mid] = GoogleDriveStatus(self, drive, gid, "up")
-            await gather(
-                update_status_message(self.message.chat.id),
-                sync_to_async(drive.upload),
-            )
-            del drive
-        else:
-            LOGGER.info(f"Rclone Upload Name: {self.name}")
-            RCTransfer = RcloneTransferHelper(self)
-            async with task_dict_lock:
-                task_dict[self.mid] = RcloneStatus(self, RCTransfer, gid, "up")
-            await gather(
-                update_status_message(self.message.chat.id),
-                RCTransfer.upload(up_path),
-            )
-            del RCTransfer
-        return
+        LOGGER.info(f"Leech Name: {self.name}")
+        tg = TelegramUploader(self, up_dir)
+        async with task_dict_lock:
+            task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
+        await gather(
+            update_status_message(self.message.chat.id),
+            tg.upload(),
+        )
+        del tg
 
-    async def on_upload_complete(
-        self, link, files, folders, mime_type, rclone_path="", dir_id=""
-    ):
+    async def on_upload_complete(self, link, files, folders, mime_type):
         if (
             self.is_super_chat
             and Config.INCOMPLETE_TASK_NOTIFIER
@@ -378,91 +391,46 @@ class TaskListener(TaskConfig):
                 "name": self.name,
                 "size": self.size,
                 "folders": folders,
-                "corrupted": mime_type if self.is_leech else 0,
-                "files": files if self.is_leech else {},
+                "corrupted": mime_type,
+                "files": files,
                 "link": link,
-                "mime_type": mime_type if not self.is_leech else "",
+                "mime_type": "",
             })
             batch["done"] += 1
 
             if self.message != batch["anchor"]:
                 try:
                     await delete_message(self.message)
-                except:
+                except OSError:
                     pass
 
             await self.update_batch_progress()
             await self.finalize_batch()
         else:
             msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
-            if self.is_leech:
-                msg += f"\n<b>Total Files: </b>{folders}"
-                if mime_type != 0:
-                    msg += f"\n<b>Corrupted Files: </b>{mime_type}"
-                msg += f"\n<b>cc: </b>{self.tag}\n\n"
-                if not files:
-                    await send_message(self.message, msg)
-                else:
-                    fmsg = ""
-                    for index, (link, name) in enumerate(files.items(), start=1):
-                        fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
-                        if len(fmsg.encode() + msg.encode()) > 4000:
-                            await send_message(self.message, msg + fmsg)
-                            await sleep(1)
-                            fmsg = ""
-                    if fmsg != "":
-                        await send_message(self.message, msg + fmsg)
+            msg += f"\n<b>Total Files: </b>{folders}"
+            if mime_type != 0:
+                msg += f"\n<b>Corrupted Files: </b>{mime_type}"
+            msg += f"\n<b>cc: </b>{self.tag}\n\n"
+            if not files:
+                await send_message(self.message, msg)
             else:
-                msg += f"\n\n<b>Type: </b>{mime_type}"
-                if mime_type == "Folder":
-                    msg += f"\n<b>SubFolders: </b>{folders}"
-                    msg += f"\n<b>Files: </b>{files}"
-                if self.is_buzzheavier:
-                    buttons = ButtonMaker()
-                    buttons.url_button("☁️ Cloud Link", link)
-                    button = buttons.build_menu()
-                elif (
-                    link
-                    or rclone_path
-                    and Config.RCLONE_SERVE_URL
-                    and not self.private_link
-                ):
-                    buttons = ButtonMaker()
-                    if link:
-                        buttons.url_button("☁️ Cloud Link", link)
-                    else:
-                        msg += f"\n\nPath: <code>{rclone_path}</code>"
-                    if rclone_path and Config.RCLONE_SERVE_URL and not self.private_link:
-                        remote, rpath = rclone_path.split(":", 1)
-                        url_path = rutils.quote(f"{rpath}")
-                        share_url = f"{Config.RCLONE_SERVE_URL}/{remote}/{url_path}"
-                        if mime_type == "Folder":
-                            share_url += "/"
-                        buttons.url_button("🔗 Rclone Link", share_url)
-                    if not rclone_path and dir_id:
-                        INDEX_URL = ""
-                        if self.private_link:
-                            INDEX_URL = self.user_dict.get("INDEX_URL", "") or ""
-                        elif Config.INDEX_URL:
-                            INDEX_URL = Config.INDEX_URL
-                        if INDEX_URL:
-                            share_url = f"{INDEX_URL}findpath?id={dir_id}"
-                            buttons.url_button("⚡ Index Link", share_url)
-                            if mime_type.startswith(("image", "video", "audio")):
-                                share_urls = f"{INDEX_URL}findpath?id={dir_id}&view=true"
-                                buttons.url_button("🌐 View Link", share_urls)
-                    button = buttons.build_menu(2)
-                else:
-                    msg += f"\n\nPath: <code>{rclone_path}</code>"
-                    button = None
-                msg += f"\n\n<b>cc: </b>{self.tag}"
-                await send_message(self.message, msg, button)
+                fmsg = ""
+                for index, (link, name) in enumerate(files.items(), start=1):
+                    fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
+                    if len(fmsg.encode() + msg.encode()) > 4000:
+                        await send_message(self.message, msg + fmsg)
+                        await sleep(1)
+                        fmsg = ""
+                if fmsg != "":
+                    await send_message(self.message, msg + fmsg)
 
         if self.seed:
             await clean_target(self.up_dir)
             async with queue_dict_lock:
                 if self.mid in non_queued_up:
                     non_queued_up.remove(self.mid)
+                upload_chat_of.pop(self.mid, None)
             await start_from_queued()
             return
         await clean_download(self.dir)
@@ -478,6 +446,7 @@ class TaskListener(TaskConfig):
         async with queue_dict_lock:
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            upload_chat_of.pop(self.mid, None)
 
         await start_from_queued()
 
@@ -494,7 +463,7 @@ class TaskListener(TaskConfig):
                 )
 
                 await delete_magnet(magnet_id)
-            except:
+            except Exception:
                 pass
             self._alldebrid_magnet_id = 0
 
@@ -514,7 +483,7 @@ class TaskListener(TaskConfig):
                 if torbox_web_id:
                     await delete_web_download(torbox_web_id)
 
-            except:
+            except Exception:
                 pass
 
         self._torbox_torrent_id = 0
@@ -551,6 +520,7 @@ class TaskListener(TaskConfig):
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            upload_chat_of.pop(self.mid, None)
 
         await start_from_queued()
         await sleep(3)
@@ -597,6 +567,7 @@ class TaskListener(TaskConfig):
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
+            upload_chat_of.pop(self.mid, None)
 
         await start_from_queued()
         await sleep(3)

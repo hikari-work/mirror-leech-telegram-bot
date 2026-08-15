@@ -52,7 +52,7 @@ class _Box:
         else:
             LOGGER.warning(
                 f"{KEY_VAR} is not set, private files (cookies.txt, .netrc, "
-                "rclone.conf, token.pickle) are stored unencrypted!"
+                "config.py) are stored unencrypted!"
             )
 
     def encrypt(self, data: bytes) -> bytes:

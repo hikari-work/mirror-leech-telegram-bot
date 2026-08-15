@@ -9,8 +9,8 @@ services:
     devices:
       - /dev/net/tun
     environment:
-      # Encrypts private files (cookies, rclone.conf, token.pickle,
-      # accounts.zip) before they are stored in MongoDB GridFS. Set it in a
+      # Encrypts private files (cookies.txt, .netrc, config.py) before they
+      # are stored in MongoDB GridFS. Set it in a
       # .env file next to this compose file; never in config.py, whose
       # contents are themselves persisted to the database.
       #

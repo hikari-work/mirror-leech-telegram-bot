@@ -13,7 +13,7 @@ from .blob_crypto import KEY_VAR, blob_box
 
 # Keys whose value is a file on disk rather than a scalar. They live in GridFS
 # under users/<uid>/<key>, so the users collection only ever holds scalars.
-USER_DOC_KEYS = ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE")
+USER_DOC_KEYS = ("THUMBNAIL",)
 
 
 class DbManager:
@@ -163,13 +163,6 @@ class DbManager:
                 await self.update_deploy_config()
         else:
             await self.delete_blob(path)
-
-    async def update_nzb_config(self):
-        if self._return:
-            return
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb") as pf:
-            nzb_conf = await pf.read()
-        await self.save_blob("sabnzbd/SABnzbd.ini", nzb_conf)
 
     async def update_user_data(self, user_id):
         if self._return:

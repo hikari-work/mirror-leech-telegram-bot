@@ -81,7 +81,7 @@ def make_tree(res, tool, root_path=""):
                     file_id=i.index,
                     progress=round(i.progress * 100, 5),
                 )
-    elif tool == "aria2":
+    else:
         parent = TorNode("ARIA2")
         folder_id = 0
         for i in res:
@@ -110,7 +110,7 @@ def make_tree(res, tool, root_path=""):
                     progress = round(
                         (int(i["completedLength"]) / int(i["length"])) * 100, 5
                     )
-                except:
+                except (KeyError, ZeroDivisionError, ValueError):
                     progress = 0
                 TorNode(
                     folders[-1],
@@ -126,7 +126,7 @@ def make_tree(res, tool, root_path=""):
                     progress = round(
                         (int(i["completedLength"]) / int(i["length"])) * 100, 5
                     )
-                except:
+                except (KeyError, ZeroDivisionError, ValueError):
                     progress = 0
                 TorNode(
                     folders[-1],
@@ -137,22 +137,6 @@ def make_tree(res, tool, root_path=""):
                     file_id=i["index"],
                     progress=progress,
                 )
-    else:
-        parent = TorNode("SABNZBD+")
-        priority = 1
-        for i in res["files"]:
-            TorNode(
-                i["filename"],
-                is_file=True,
-                parent=parent,
-                size=float(i["mb"]) * 1048576,
-                priority=priority,
-                file_id=i["nzf_id"],
-                progress=round(
-                    ((float(i["mb"]) - float(i["mbleft"])) / float(i["mb"])) * 100,
-                    5,
-                ),
-            )
 
     result = create_list(parent)
     return {"files": result, "engine": tool}

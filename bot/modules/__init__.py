@@ -2,24 +2,11 @@ from .bot_settings import send_bot_settings, edit_bot_settings
 from .bypass import bypass_scrape_cmd
 from .cancel_task import cancel, cancel_multi, cancel_all_buttons, cancel_all_update
 from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo
-from .clone import clone_node
 from .exec import aioexecute, execute, clear
 from .file_selector import select, confirm_selection
 from .force_start import remove_from_queue
-from .gd_count import count_node
-from .gd_delete import delete_file
-from .gd_search import gdrive_search, select_type
 from .help import arg_usage, bot_help
-from .mirror_leech import (
-    mirror,
-    leech,
-    qb_leech,
-    qb_mirror,
-    jd_leech,
-    jd_mirror,
-    nzb_leech,
-    nzb_mirror,
-)
+from .leech import leech, qb_leech
 from .restart import (
     restart_bot,
     restart_notification,
@@ -27,15 +14,13 @@ from .restart import (
 )
 from .rss import get_rss_menu, rss_listener
 from .search import torrent_search, torrent_search_update, initiate_search_tools
-from .nzb_search import hydra_search
 from .services import start, ping, log
 from .shell import run_shell
 from .stats import bot_stats, get_packages_version
 from .status import task_status, status_pages
 from .user_login import user_login, user_logout
 from .users_settings import get_users_settings, edit_user_settings, send_user_settings
-from .ytdlp import ytdl, ytdl_leech
-from .gallery_dl import gallery_dl, gallery_dl_leech
+from .ytdlp import ytdl_leech
 
 __all__ = [
     "send_bot_settings",
@@ -48,28 +33,16 @@ __all__ = [
     "unauthorize",
     "add_sudo",
     "remove_sudo",
-    "clone_node",
     "bypass_scrape_cmd",
     "aioexecute",
     "execute",
-    "hydra_search",
     "clear",
     "select",
     "confirm_selection",
     "remove_from_queue",
-    "count_node",
-    "delete_file",
-    "gdrive_search",
-    "select_type",
     "arg_usage",
-    "mirror",
     "leech",
     "qb_leech",
-    "qb_mirror",
-    "jd_leech",
-    "jd_mirror",
-    "nzb_leech",
-    "nzb_mirror",
     "restart_bot",
     "restart_notification",
     "confirm_restart",
@@ -92,8 +65,5 @@ __all__ = [
     "get_users_settings",
     "edit_user_settings",
     "send_user_settings",
-    "ytdl",
     "ytdl_leech",
-    "gallery_dl",
-    "gallery_dl_leech",
 ]
