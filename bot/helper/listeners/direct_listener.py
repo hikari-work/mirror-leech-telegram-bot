@@ -1,4 +1,4 @@
-from asyncio import gather, sleep, TimeoutError
+from asyncio import create_task, gather, sleep, TimeoutError
 from aiohttp.client_exceptions import ClientError
 from os import path as ospath
 
@@ -101,10 +101,11 @@ class DirectListener:
         await self.listener.on_download_complete()
 
     async def _download_stream(self, contents):
-        """Stream mode: download one file -> upload -> delete -> next.
+        """Stream mode: download and upload run in parallel.
 
-        Bunkr URLs are resolved lazily (one at a time) to avoid stale
-        signed CDN links expiring while earlier files upload.
+        While file N uploads, file N+1 resolves and downloads concurrently.
+        Disk usage = max 2 files at a time.  Bunkr URLs are resolved lazily
+        (one at a time) to avoid stale signed CDN links.
         """
         from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
 
@@ -113,6 +114,8 @@ class DirectListener:
             return
 
         total = len(contents)
+        upload_task = None
+
         for idx, content in enumerate(contents):
             if self.listener.is_cancelled:
                 break
@@ -128,11 +131,17 @@ class DirectListener:
             if self.listener.is_cancelled:
                 break
 
-            LOGGER.info(f"Stream upload [{idx + 1}/{total}]: {ospath.basename(file_path)}")
-            await tg.upload_single(file_path)
+            if upload_task is not None:
+                await upload_task
 
             if self.listener.is_cancelled:
                 break
+
+            LOGGER.info(f"Stream upload [{idx + 1}/{total}]: {ospath.basename(file_path)}")
+            upload_task = create_task(tg.upload_single(file_path))
+
+        if upload_task is not None:
+            await upload_task
 
         self.download_task = None
         if self.listener.is_cancelled:
