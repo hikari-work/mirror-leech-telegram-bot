@@ -34,6 +34,7 @@ from ...ext_utils.mega_client import (
     list_folder,
     resolve_link,
 )
+from ...ext_utils.proxy_pool import get_proxy_pool, refresh_proxy_pool
 from ...ext_utils.task_manager import check_running_tasks
 from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.mega_status import MegaStatus
@@ -48,11 +49,6 @@ MIN_SPLIT = 8 * 1024 * 1024
 # CDN / Proxy statuses that mean rate limiting, quota exhaustion, or worker outage.
 QUOTA_STATUSES = (402, 403, 429, 502, 503, 504, 509)
 
-# Default fallback proxies 1 to 5 if MEGA_PROXY_URL is empty
-_DEFAULT_PROXIES = [
-    f"https://proxy-{n}.vianstefani754.workers.dev" for n in range(1, 6)
-]
-
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
@@ -65,17 +61,8 @@ class _CDNExpiredError(Exception):
 
 
 def _get_proxy_list():
-    """Parse Config.MEGA_PROXY_URL into a list of proxy base URLs."""
-    raw = getattr(Config, "MEGA_PROXY_URL", "")
-    if isinstance(raw, (list, tuple)):
-        proxies = [str(p).strip() for p in raw if str(p).strip()]
-    elif isinstance(raw, str) and raw.strip():
-        # Support space or comma separated proxies
-        items = raw.replace(",", " ").split()
-        proxies = [p.strip() for p in items if p.strip()]
-    else:
-        proxies = []
-    return proxies or _DEFAULT_PROXIES
+    """Return the current proxy pool (gateway-backed, cached; see proxy_pool)."""
+    return get_proxy_pool()
 
 
 def _proxied_url(cdn_url, proxy_index=0):
@@ -300,6 +287,13 @@ class MegaDownloadHelper:
 
     async def add_download(self, path):
         link = self._listener.link["mega"]
+
+        # Pull the live proxy pool from the gateway once per task and size the
+        # per-worker semaphores (and thus _run's file concurrency) to it.
+        await refresh_proxy_pool()
+        self._worker_sems = [
+            Semaphore(6) for _ in range(max(1, len(get_proxy_pool())))
+        ]
 
         try:
             async with self._session() as session:

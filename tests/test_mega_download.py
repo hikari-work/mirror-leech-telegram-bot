@@ -129,6 +129,22 @@ def mega_dl(monkeypatch, tmp_path):
     return module
 
 
+@pytest.fixture(autouse=True)
+def _clean_proxy_pool(mega_dl):
+    """The proxy pool lives in a module global shared across tests.
+
+    mega_dl re-imports mega_download each test but proxy_pool stays cached, so
+    point it at this test's stub Config and clear the cache both sides of the
+    test — otherwise a gateway fetch in one test leaks into another's fallback
+    assertions.
+    """
+    proxy_pool = sys.modules["bot.helper.ext_utils.proxy_pool"]
+    proxy_pool.Config = mega_dl.Config
+    proxy_pool.reset_proxy_pool()
+    yield
+    proxy_pool.reset_proxy_pool()
+
+
 class _Listener:
     """The parts of the real listener the downloader touches."""
 
@@ -489,6 +505,49 @@ def test_proxied_url_format(mega_dl):
 
     # Reset
     mega_dl.Config.MEGA_PROXY_URL = ""
+
+
+def test_proxy_pool_fetches_from_gateway(mega_dl, monkeypatch):
+    """The pool is fetched from the gateway (de-duplicated); a gateway failure
+    falls back to Config.MEGA_PROXY_URL, then to the hardcoded defaults."""
+    proxy_pool = sys.modules["bot.helper.ext_utils.proxy_pool"]
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "success": True,
+                "data": [
+                    "https://g1.workers.dev",
+                    "https://g2.workers.dev",
+                    "https://g1.workers.dev",  # duplicate -> dropped
+                ],
+            }
+
+    monkeypatch.setattr(proxy_pool, "_requests_get", lambda *a, **k: _Resp())
+    fetched = proxy_pool.refresh_proxy_pool_sync(force=True)
+    assert fetched == ["https://g1.workers.dev", "https://g2.workers.dev"]
+    # Hot path serves the cached pool without touching the network again.
+    assert proxy_pool.get_proxy_pool() == fetched
+
+    # Gateway down -> fall back to Config.MEGA_PROXY_URL.
+    def _boom(*a, **k):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(proxy_pool, "_requests_get", _boom)
+    proxy_pool.reset_proxy_pool()
+    proxy_pool.Config.MEGA_PROXY_URL = "https://cfg1.dev https://cfg2.dev"
+    assert proxy_pool.refresh_proxy_pool_sync(force=True) == [
+        "https://cfg1.dev",
+        "https://cfg2.dev",
+    ]
+
+    # No config either -> hardcoded defaults.
+    proxy_pool.reset_proxy_pool()
+    proxy_pool.Config.MEGA_PROXY_URL = ""
+    assert proxy_pool.refresh_proxy_pool_sync(force=True) == proxy_pool._DEFAULT_PROXIES
 
 
 async def test_cancellation_stops_writing(mega_dl, mc, tmp_path, monkeypatch):

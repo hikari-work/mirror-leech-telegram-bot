@@ -27,27 +27,15 @@ from ..registry import register
 from urllib.parse import quote
 
 def _get_proxy_list():
-    """Parse Config.MEGA_PROXY_URL into a list of proxy base URLs."""
-    raw = getattr(Config, "MEGA_PROXY_URL", "")
-    if not raw:
-        return [
-            "https://proxy-1.vianstefani754.workers.dev/?url=",
-            "https://proxy-2.vianstefani754.workers.dev/?url=",
-            "https://proxy-3.vianstefani754.workers.dev/?url=",
-            "https://proxy-4.vianstefani754.workers.dev/?url=",
-            "https://proxy-5.vianstefani754.workers.dev/?url=",
-        ]
-    
-    proxies = []
-    for item in raw.replace(",", " ").split():
-        item = item.strip()
-        if item:
-            if not item.startswith(("http://", "https://")):
-                item = f"https://{item}"
-            if not item.endswith(("=", "&", "/")):
-                item += "/?url="
-            proxies.append(item)
-    return proxies
+    """Return the current proxy pool (gateway-backed, cached; see proxy_pool).
+
+    Imported lazily so that merely importing the host registry does not require
+    the proxy_pool module (the direct-link test harness stubs ext_utils).
+    Entries are bare base URLs; _proxied_url() appends the ?url= form.
+    """
+    from bot.helper.ext_utils.proxy_pool import get_proxy_pool
+
+    return get_proxy_pool()
 
 
 def _proxied_url(cdn_url, proxy_index=0):
@@ -423,6 +411,11 @@ def terabox(url):
     if "/file/" in url:
         return url
 
+    # Refresh the gateway-backed proxy pool once before probing links (lazy
+    # import; see _get_proxy_list).
+    from bot.helper.ext_utils.proxy_pool import refresh_proxy_pool_sync
+
+    refresh_proxy_pool_sync()
     with Session() as session:
         contents, resolved, failed, header, title = _resolve_links(
             session, _sanitize_url(url)
