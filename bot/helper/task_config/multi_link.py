@@ -27,9 +27,11 @@ from .batch_tracker import new_batch
 BULK_SPAWN_DELAY = 0.5
 """Seconds between two bulk tasks being started.
 
-A courtesy stagger only, so a hundred links do not hit the resolvers in the same
-tick. What actually bounds how much runs at once is QUEUE_DOWNLOAD /
-QUEUE_UPLOAD through ``check_running_tasks``; set those for large bulks.
+A courtesy stagger only. Two things actually bound how much a bulk does at once:
+RESOLVE_CONCURRENCY gates the scrape / metadata stage every task runs before it
+reaches the queue (see ``ext_utils/resolve_gate.py``), and QUEUE_DOWNLOAD /
+QUEUE_UPLOAD gate the transfers through ``check_running_tasks``. Tune those for
+large bulks, not this.
 """
 
 _bulk_mid_seq = count(10**9)

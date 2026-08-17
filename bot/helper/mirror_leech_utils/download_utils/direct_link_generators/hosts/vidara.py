@@ -1,6 +1,7 @@
 """Vidara HLS resolver - resolve video pages to HLS master playlist and quality variants."""
 
 from os import path as ospath
+from random import uniform
 from time import sleep
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ from ..registry import register
 
 VIDARA_HOST = "vidara.to"
 VIDARA_ATTEMPTS = 3
+VIDARA_MAX_RETRY_DELAY = 30
 VIDARA_DOMAINS = (
     "vidara.to",
     "vidara.me",
@@ -26,6 +28,37 @@ VIDARA_DOMAINS = (
     "vidara.xyz",
     "vidara.so"
 )
+
+# "Come back later" statuses. A bulk used to give up on the first 429 and report
+# it as a dead link, which is how half a batch could fail while every link in it
+# was fine.
+VIDARA_RETRY_STATUSES = (408, 425, 429)
+VIDARA_RATE_LIMIT_HINTS = ("rate limit", "rate-limit", "too many request", "slow down")
+
+
+def vidara_retryable_status(status):
+    """A gateway hiccup or a rate limit; not a removed video."""
+    return status >= 500 or status in VIDARA_RETRY_STATUSES
+
+
+def vidara_rate_limited(reason):
+    """The gateway also reports a rate limit as HTTP 200 + success: false."""
+    text = str(reason).lower()
+    return any(hint in text for hint in VIDARA_RATE_LIMIT_HINTS)
+
+
+def vidara_retry_delay(attempt, retry_after=None):
+    """Seconds to wait before attempt+1, jittered.
+
+    The jitter is the point: a bulk resolves in lockstep, so a fixed sleep only
+    reschedules the same burst.
+    """
+    if retry_after:
+        try:
+            return min(float(retry_after), VIDARA_MAX_RETRY_DELAY) + uniform(0, 1.5)
+        except (TypeError, ValueError):
+            pass
+    return min(2**attempt, VIDARA_MAX_RETRY_DELAY) + uniform(0, 1.5)
 
 
 def is_vidara_link(url):
@@ -45,8 +78,9 @@ def vidara_sanitize_url(url):
 
 
 def vidara_scrape(session, target, probe=False):
-    """Return (response, reason, retryable). A gateway hiccup is worth another
-    attempt, a removed video is not."""
+    """Return (response, reason, retryable, retry_after). A gateway hiccup or a
+    rate limit is worth another attempt, a removed video is not; retry_after is
+    the gateway's own hint when it sent one."""
     gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
     vidara_api = f"{gateway_base}/api/v1/scrape/vidara"
     headers = {"accept": "application/json"}
@@ -63,7 +97,11 @@ def vidara_scrape(session, target, probe=False):
             timeout=60,
         )
     except Exception as e:
-        return None, e.__class__.__name__, True
+        return None, e.__class__.__name__, True, None
+
+    resp_headers = getattr(resp, "headers", None)
+    retry_after = resp_headers.get("Retry-After") if resp_headers else None
+    retryable = vidara_retryable_status(resp.status_code)
 
     try:
         response = resp.json()
@@ -71,18 +109,19 @@ def vidara_scrape(session, target, probe=False):
         return (
             None,
             f"HTTP {resp.status_code} (non-JSON response)",
-            resp.status_code >= 500,
+            retryable,
+            retry_after,
         )
 
     if not response.get("success"):
         reason = response.get("error") or f"HTTP {resp.status_code}"
-        return None, reason, resp.status_code >= 500
-    
+        return None, reason, retryable or vidara_rate_limited(reason), retry_after
+
     # Check for either master_url or master_playlist_url
     master_url = response.get("master_url") or response.get("master_playlist_url")
     if not master_url or not master_url.startswith("http"):
-        return None, "no HLS master playlist in response", False
-    return response, None, False
+        return None, "no HLS master playlist in response", False, None
+    return response, None, False, None
 
 
 def vidara_headers(download_info):
@@ -124,8 +163,11 @@ def vidara_resolve(url, name=""):
     with Session() as session:
         for attempt in range(1, VIDARA_ATTEMPTS + 1):
             retryable = False
+            retry_after = None
             for target in targets:
-                response, reason, retryable = vidara_scrape(session, target)
+                response, reason, retryable, retry_after = vidara_scrape(
+                    session, target
+                )
                 if response:
                     if not name:
                         name = vidara_stem(response)
@@ -137,11 +179,14 @@ def vidara_resolve(url, name=""):
                     )
                 LOGGER.info(f"Vidara: {target} rejected by the API ({reason})")
 
-            if not retryable:
+            if not retryable or attempt == VIDARA_ATTEMPTS:
                 break
-            LOGGER.info(f"Vidara: {reason}, retrying [{attempt}/{VIDARA_ATTEMPTS}]")
-            if attempt < VIDARA_ATTEMPTS:
-                sleep(3)
+            delay = vidara_retry_delay(attempt, retry_after)
+            LOGGER.info(
+                f"Vidara: {reason}, retrying in {delay:.1f}s "
+                f"[{attempt}/{VIDARA_ATTEMPTS}]"
+            )
+            sleep(delay)
 
     raise DirectDownloadLinkException(f"ERROR: {reason}")
 
@@ -215,8 +260,11 @@ def vidara(url):
         for attempt in range(1, max_attempts + 1):
             response = None
             retryable = False
+            retry_after = None
             for target in targets:
-                response, reason, retryable = vidara_scrape(session, target, probe=True)
+                response, reason, retryable, retry_after = vidara_scrape(
+                    session, target, probe=True
+                )
                 if response:
                     break
                 LOGGER.info(f"Vidara: {target} rejected by the API ({reason})")
@@ -237,6 +285,7 @@ def vidara(url):
                         }
                     reason = f"HLS playlist rejected ({probe_reason})"
                     retryable = True
+                    retry_after = None
                 else:
                     reason = "no master URL in API response"
                     retryable = False
@@ -244,9 +293,13 @@ def vidara(url):
             if not retryable:
                 raise DirectDownloadLinkException(f"ERROR: {reason}")
 
-            LOGGER.info(f"Vidara: {reason}, retrying [{attempt}/{max_attempts}]")
             if attempt < max_attempts:
-                sleep(3)
+                delay = vidara_retry_delay(attempt, retry_after)
+                LOGGER.info(
+                    f"Vidara: {reason}, retrying in {delay:.1f}s "
+                    f"[{attempt}/{max_attempts}]"
+                )
+                sleep(delay)
         else:
             raise DirectDownloadLinkException(
                 f"ERROR: Vidara could not be resolved ({reason}). The link may "

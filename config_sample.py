@@ -65,6 +65,11 @@ WEB_PINCODE = False
 QUEUE_ALL = 0
 QUEUE_DOWNLOAD = 0
 QUEUE_UPLOAD = 0
+# How many links may be resolved (scraped / metadata-fetched) at the same time.
+# The queue limits above only bound transfers and are checked after a link is
+# resolved, so this is the knob for bulk (-b) runs: 4 links at a time keeps the
+# gateway from rate-limiting the batch. 0 disables the gate.
+RESOLVE_CONCURRENCY = 4
 # RSS
 RSS_DELAY = 600
 RSS_CHAT = ""

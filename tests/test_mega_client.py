@@ -117,9 +117,10 @@ def test_reconstruct_url_encodes_hash(mc):
 # ---------------------------------------------------------------------------
 
 class _Resp:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self._payload = payload
         self.status = status
+        self.headers = headers or {}
 
     async def json(self, content_type=None):
         return self._payload
@@ -132,7 +133,12 @@ class _Resp:
 
 
 class _Session:
-    """Records GET calls and replays canned responses."""
+    """Records GET calls and replays canned responses.
+
+    A queued item is a body, ``(status, body)`` or ``(status, body, headers)``.
+    The last item is replayed once the queue runs dry, so a test that pins
+    "retries until the attempts are spent" does not have to queue up N copies.
+    """
 
     def __init__(self, *payloads):
         self._q = list(payloads)
@@ -142,10 +148,14 @@ class _Session:
         # url may be a yarl.URL or string
         query = dict(url.query) if hasattr(url, "query") else (params or {})
         self.calls.append({"url": str(url), "params": query})
-        status, payload = 200, self._q.pop(0)
+        payload = self._q.pop(0) if len(self._q) > 1 else self._q[0]
+        status, headers = 200, None
         if isinstance(payload, tuple):
-            status, payload = payload
-        return _Resp(payload, status)
+            if len(payload) == 3:
+                status, payload, headers = payload
+            else:
+                status, payload = payload
+        return _Resp(payload, status, headers)
 
 
 def _file_entry(handle="FH1", name="movie.mkv", path="", size=100,
@@ -277,6 +287,10 @@ async def test_gateway_raises_on_success_false(mc, monkeypatch):
     with pytest.raises(mc.MegaApiError, match="link expired"):
         await mc.resolve_link(session, "file", "H", "k")
 
+    # a dead link says the same thing on every attempt: asking again is only a
+    # slower way to fail
+    assert len(session.calls) == 1
+
 
 async def test_gateway_raises_on_http_error(mc, monkeypatch):
     monkeypatch.setattr(mc, "sleep", _no_sleep)
@@ -294,3 +308,93 @@ async def test_gateway_raises_on_http_error(mc, monkeypatch):
 
     with pytest.raises(mc.MegaApiError, match="HTTP 500"):
         await mc.resolve_link(_BadSession(), "file", "H", "k")
+
+
+# Rate limiting
+#
+# A bulk resolves many links at once, so the gateway answers some of them with
+# 429. Treating that as final is what reported perfectly good links as failures:
+# "come back later" has to mean later, not never.
+
+def _file_body(handle="FH1"):
+    return {
+        "success": True,
+        "kind": "file",
+        "name": "movie.mkv",
+        "handle": handle,
+        "file": _file_entry(handle=handle, cdn_url="https://cdn.mega.co.nz/dl/a"),
+        "files": [],
+        "folders": [],
+        "raw_node_count": 1,
+        "error": "",
+        "timestamp": 0,
+    }
+
+
+async def test_rate_limit_is_retried_then_succeeds(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    session = _Session((429, {}), _file_body())
+
+    resolved = await mc.resolve_link(session, "file", "H", "k")
+
+    assert resolved["name"] == "movie.mkv"
+    assert len(session.calls) == 2
+
+
+async def test_rate_limit_gives_up_after_all_attempts(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    session = _Session((429, {}))
+
+    with pytest.raises(mc.MegaApiError, match="rate limited"):
+        await mc.resolve_link(session, "file", "H", "k")
+
+    assert len(session.calls) == mc._API_ATTEMPTS
+
+
+async def test_server_error_is_retried(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    session = _Session((503, {}), (502, {}), _file_body())
+
+    resolved = await mc.resolve_link(session, "file", "H", "k")
+
+    assert resolved["name"] == "movie.mkv"
+    assert len(session.calls) == 3
+
+
+async def test_rate_limit_reported_as_success_false_is_retried(mc, monkeypatch):
+    """The gateway wraps some rate limits in a 200 + ``success: false``."""
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    body = {"success": False, "error": "Rate limit exceeded, slow down"}
+    session = _Session(body, _file_body())
+
+    resolved = await mc.resolve_link(session, "file", "H", "k")
+
+    assert resolved["name"] == "movie.mkv"
+    assert len(session.calls) == 2
+
+
+async def test_retry_after_header_sets_the_wait(mc, monkeypatch):
+    slept = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(mc, "sleep", _record)
+    session = _Session((429, {}, {"Retry-After": "5"}), _file_body())
+
+    await mc.resolve_link(session, "file", "H", "k")
+
+    # the gateway's own hint, plus the jitter that keeps a bulk from coming
+    # back in lockstep
+    assert len(slept) == 1
+    assert 5 <= slept[0] <= 6.5
+
+
+async def test_retry_delay_backs_off_and_stays_capped(mc):
+    assert 2 <= mc._retry_delay(1) <= 3.5
+    assert 4 <= mc._retry_delay(2) <= 5.5
+    assert mc._retry_delay(20) <= mc._MAX_RETRY_DELAY + 1.5
+    # a garbage Retry-After must not crash the retry it was meant to schedule
+    assert 2 <= mc._retry_delay(1, "soon") <= 3.5
+    assert len({round(mc._retry_delay(1), 6) for _ in range(20)}) > 1
+

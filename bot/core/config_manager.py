@@ -50,6 +50,11 @@ class Config:
     QUEUE_ALL = 0
     QUEUE_DOWNLOAD = 0
     QUEUE_UPLOAD = 0
+    # Links resolved (scraped / metadata-fetched) at the same time. The queue
+    # limits above only bound transfers, and they are checked *after* a link is
+    # resolved, so this is what keeps a bulk of a hundred links from hitting the
+    # gateway a hundred times at once. 0 disables the gate.
+    RESOLVE_CONCURRENCY = 4
     RSS_CHAT = ""
     RSS_DELAY = 600
     RSS_SIZE_LIMIT = 0

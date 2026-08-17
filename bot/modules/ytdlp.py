@@ -14,6 +14,7 @@ from ..helper.ext_utils.bot_utils import (
     COMMAND_USAGE,
 )
 from ..helper.ext_utils.links_utils import is_url
+from ..helper.ext_utils.resolve_gate import resolve_gate
 from ..helper.ext_utils.task_args import parse_ytdlp_args
 from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ..helper.listeners.task_listener import TaskListener
@@ -349,7 +350,10 @@ class YtDlp(TaskListener):
                 options[key] = value
         options["playlist_items"] = "0"
         try:
-            result = await sync_to_async(extract_info, self.link, options)
+            # same gate as the scrapers: this is a network probe that runs
+            # before the download queue, so a bulk must not fire all of them
+            async with resolve_gate():
+                result = await sync_to_async(extract_info, self.link, options)
         except Exception as e:
             msg = str(e).replace("<", " ").replace(">", " ")
             await self.fail_task(f"{self.tag} {msg}")

@@ -7,6 +7,7 @@ from yt_dlp import YoutubeDL, DownloadError
 
 from .... import task_dict_lock, task_dict
 from ...ext_utils.bot_utils import sync_to_async, async_to_sync
+from ...ext_utils.resolve_gate import resolve_gate
 from ...ext_utils.task_manager import check_running_tasks
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ...telegram_helper.message_utils import send_status_message
@@ -235,7 +236,11 @@ class YoutubeDLHelper:
 
         self.opts["format"] = qual
 
-        await sync_to_async(self._extract_meta_data)
+        # Probing the source (an HLS master playlist, a playlist page) is
+        # pre-queue network work, so a bulk goes through the same gate the
+        # scrapers use instead of probing a hundred links at once.
+        async with resolve_gate():
+            await sync_to_async(self._extract_meta_data)
         if self._listener.is_cancelled:
             return
 

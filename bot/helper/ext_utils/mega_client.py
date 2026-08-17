@@ -12,6 +12,8 @@ ECB/CBC, share-key recovery, and the raw Mega API are gone.
 
 from asyncio import sleep
 from base64 import b64decode, b64encode
+from logging import getLogger
+from random import uniform
 from urllib.parse import quote, urlencode
 from yarl import URL
 
@@ -19,8 +21,19 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from bot.core.config_manager import Config
 
+LOGGER = getLogger(__name__)
+
 BLOCK = 16
 _API_ATTEMPTS = 4
+_MAX_RETRY_DELAY = 30
+
+# Statuses that mean "come back later", not "this link is gone". Failing fast on
+# a rate limit is what turned a bulk into a pile of dead links: the gateway was
+# only asking us to slow down.
+_RETRY_STATUSES = (408, 425, 429, 500, 502, 503, 504)
+
+# The gateway also reports a rate limit as HTTP 200 with success: false.
+_RATE_LIMIT_HINTS = ("rate limit", "rate-limit", "too many request", "slow down")
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +101,70 @@ def _safe_name(name, fallback):
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
+def _retry_after(resp):
+    """The gateway's own Retry-After, when it sent one."""
+    headers = getattr(resp, "headers", None)
+    return headers.get("Retry-After") if headers else None
+
+
+def _retry_delay(attempt, retry_after=None):
+    """Seconds to wait before attempt+1, jittered.
+
+    The jitter matters more here than the base delay: a bulk resolves its links
+    in lockstep, so a fixed backoff just replays the same burst one beat later.
+    """
+    if retry_after:
+        try:
+            return min(float(retry_after), _MAX_RETRY_DELAY) + uniform(0, 1.5)
+        except (TypeError, ValueError):
+            pass
+    return min(2**attempt, _MAX_RETRY_DELAY) + uniform(0, 1.5)
+
+
+def _is_rate_limited(reason):
+    text = str(reason).lower()
+    return any(hint in text for hint in _RATE_LIMIT_HINTS)
+
+
+async def _gateway_attempt(session, req_url, headers, context, attempt):
+    """One request at the gateway.
+
+    Returns ``(body, reason, delay)``: a body on success, otherwise the reason
+    and how long to wait before trying again. Errors that will not change on a
+    retry -- a dead link, a bad handle -- raise instead.
+    """
+    try:
+        async with session.get(req_url, headers=headers) as resp:
+            if resp.status in _RETRY_STATUSES:
+                reason = (
+                    "gateway rate limited"
+                    if resp.status == 429
+                    else f"gateway returned HTTP {resp.status}"
+                )
+                return None, reason, _retry_delay(attempt, _retry_after(resp))
+            if resp.status != 200:
+                raise MegaApiError(f"gateway returned HTTP {resp.status}", context)
+            body = await resp.json(content_type=None)
+    except MegaApiError:
+        raise
+    except Exception as e:
+        reason = f"gateway unreachable ({e.__class__.__name__}: {e})"
+        return None, reason, _retry_delay(attempt)
+
+    if body.get("success"):
+        return body, None, None
+
+    reason = body.get("error") or "unknown gateway error"
+    if not _is_rate_limited(reason):
+        raise MegaApiError(reason, context)
+    return None, reason, _retry_delay(attempt)
+
+
 async def _gateway_get(session, path, params, context):
     """GET <GATEWAY><path>?<params>, retry on transient failures.
 
-    Returns the parsed JSON body on success; raises MegaApiError on gateway
-    error or after all attempts exhausted.
+    Returns the parsed JSON body on success; raises MegaApiError on a final
+    gateway error or once the attempts are spent.
     """
     gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
     base = f"{gateway_base}/api/v1/scrape/mega{path}"
@@ -101,36 +173,23 @@ async def _gateway_get(session, path, params, context):
     headers = {"User-Agent": _USER_AGENT}
     if token := getattr(Config, "GATEWAY_TOKEN", ""):
         headers["Authorization"] = f"Bearer {token}"
-    error = None
+    reason = "unknown gateway error"
 
     for attempt in range(1, _API_ATTEMPTS + 1):
-        try:
-            async with session.get(req_url, headers=headers) as resp:
-                if resp.status == 429:
-                    raise MegaApiError("gateway rate limited", context)
-                if resp.status != 200:
-                    raise MegaApiError(
-                        f"gateway returned HTTP {resp.status}", context
-                    )
-                body = await resp.json(content_type=None)
-        except MegaApiError:
-            raise
-        except Exception as e:
-            error = e
-            if attempt == _API_ATTEMPTS:
-                break
-            await sleep(2 * attempt)
-            continue
+        body, reason, delay = await _gateway_attempt(
+            session, req_url, headers, context, attempt
+        )
+        if body is not None:
+            return body
+        if attempt == _API_ATTEMPTS:
+            break
+        LOGGER.info(
+            f"Mega gateway: {reason} while {context}, retrying in "
+            f"{delay:.1f}s [{attempt}/{_API_ATTEMPTS}]"
+        )
+        await sleep(delay)
 
-        if not body.get("success"):
-            msg = body.get("error") or "unknown gateway error"
-            raise MegaApiError(msg, context)
-
-        return body
-
-    raise MegaApiError(
-        f"gateway unreachable while {context}: {error}", context
-    )
+    raise MegaApiError(f"{reason} after {_API_ATTEMPTS} attempts", context)
 
 
 # ---------------------------------------------------------------------------

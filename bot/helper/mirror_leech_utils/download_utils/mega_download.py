@@ -35,6 +35,7 @@ from ...ext_utils.mega_client import (
     resolve_link,
 )
 from ...ext_utils.proxy_pool import get_proxy_pool, refresh_proxy_pool
+from ...ext_utils.resolve_gate import resolve_gate
 from ...ext_utils.task_manager import check_running_tasks
 from ...telegram_helper.message_utils import send_status_message
 from ..status_utils.mega_status import MegaStatus
@@ -288,16 +289,23 @@ class MegaDownloadHelper:
     async def add_download(self, path):
         link = self._listener.link["mega"]
 
-        # Pull the live proxy pool from the gateway once per task and size the
-        # per-worker semaphores (and thus _run's file concurrency) to it.
-        await refresh_proxy_pool()
-        self._worker_sems = [
-            Semaphore(6) for _ in range(max(1, len(get_proxy_pool())))
-        ]
-
         try:
-            async with self._session() as session:
-                files, title, folder_handle = await self._gather_files(session, link)
+            # Metadata resolution is pre-queue work, so a bulk would otherwise
+            # ask the gateway to resolve every link at once and get rate limited
+            # for it. The gate covers the gateway calls only -- the queue wait
+            # and the transfer below must never hold a slot.
+            async with resolve_gate():
+                # Pull the live proxy pool from the gateway once per task and
+                # size the per-worker semaphores (and thus _run's file
+                # concurrency) to it.
+                await refresh_proxy_pool()
+                self._worker_sems = [
+                    Semaphore(6) for _ in range(max(1, len(get_proxy_pool())))
+                ]
+                async with self._session() as session:
+                    files, title, folder_handle = await self._gather_files(
+                        session, link
+                    )
         except (MegaApiError, ValueError, ConnectionError) as e:
             await self._listener.on_download_error(f"Mega: {e}")
             return

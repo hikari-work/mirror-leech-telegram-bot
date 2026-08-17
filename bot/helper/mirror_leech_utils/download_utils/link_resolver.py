@@ -21,6 +21,7 @@ from .... import LOGGER
 from ...ext_utils.bot_utils import get_content_type, sync_to_async
 from ...ext_utils.exceptions import DirectDownloadLinkException
 from ...ext_utils.links_utils import is_magnet
+from ...ext_utils.resolve_gate import resolve_gate
 
 
 async def resolve_torbox_torrent(listener) -> bool:
@@ -164,17 +165,25 @@ async def resolve_direct_link(listener, headers: list[str]) -> list[str]:
 
     Returns the (possibly updated) *headers* list.  On fatal error calls
     ``listener.fail_task`` and returns ``None``.
+
+    The scrape runs behind ``resolve_gate``: a bulk that resolves every link at
+    once is what earns the rate limits this used to report as dead links. Only
+    the network calls are inside the gate -- ``fail_task`` can sit out a
+    FloodWait, and a slot held through that stalls the rest of the batch.
     """
     from .direct_link_generator import direct_link_generator
 
-    content_type = await get_content_type(listener.link)
-    if content_type is not None and not re_match(
-        r"text/html|text/plain", content_type
-    ):
-        return headers
-
     try:
-        result = await sync_to_async(direct_link_generator, listener.link)
+        async with resolve_gate():
+            content_type = await get_content_type(listener.link)
+            if content_type is not None and not re_match(
+                r"text/html|text/plain", content_type
+            ):
+                return headers
+            result = await sync_to_async(direct_link_generator, listener.link)
+        # unpacking stays inside the try: a generator returning an unexpected
+        # shape has to fail this task, not escape into the bulk dispatcher where
+        # nothing records it and the batch waits for it forever
         if isinstance(result, tuple):
             listener.link, headers = result
         elif isinstance(result, str):
@@ -189,6 +198,7 @@ async def resolve_direct_link(listener, headers: list[str]) -> list[str]:
         if e.startswith("ERROR:"):
             await listener.fail_task(e)
             return None
+        return headers
     except Exception as e:
         await listener.fail_task(e)
         return None
@@ -217,12 +227,11 @@ async def resolve_pornhub(listener) -> bool:
 
     url_type, identifier = parsed
     try:
-        if url_type == "video":
-            resolved = await sync_to_async(resolve_single_video, identifier)
-        else:
-            resolved = await sync_to_async(resolve_listing, url_type, identifier)
-        listener.link = resolved
-        LOGGER.info(f"PornHub resolved: {url_type} {identifier}")
+        async with resolve_gate():
+            if url_type == "video":
+                resolved = await sync_to_async(resolve_single_video, identifier)
+            else:
+                resolved = await sync_to_async(resolve_listing, url_type, identifier)
     except DirectDownloadLinkException as exc:
         msg = str(exc)
         LOGGER.info(msg)
@@ -231,4 +240,7 @@ async def resolve_pornhub(listener) -> bool:
     except Exception as exc:
         await listener.fail_task(exc)
         return False
+
+    listener.link = resolved
+    LOGGER.info(f"PornHub resolved: {url_type} {identifier}")
     return True
