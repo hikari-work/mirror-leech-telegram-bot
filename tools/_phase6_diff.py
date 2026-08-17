@@ -235,11 +235,14 @@ class FakeTaskConfig:
     def _batch(self):
         return getattr(self, "_batch_obj", None)
 
-    async def update_batch_progress(self):
-        WORLD.record("update_batch_progress")
+    async def record_batch_result(self, result):
+        WORLD.record("record_batch_result", result)
 
-    async def finalize_batch(self):
-        WORLD.record("finalize_batch")
+    async def record_batch_done(self):
+        WORLD.record("record_batch_done")
+
+    async def register_batch_failure(self, error):
+        WORLD.record("register_batch_failure", error)
 
 
 TASK_DICT: dict = {}

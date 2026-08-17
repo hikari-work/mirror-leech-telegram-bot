@@ -75,7 +75,7 @@ async def task_status(_, message):
             if obj := intervals["status"].get(sid):
                 obj.cancel()
                 del intervals["status"][sid]
-        await send_status_message(message, user_id)
+        await send_status_message(message, user_id, force=True)
         await delete_message(message)
 
 

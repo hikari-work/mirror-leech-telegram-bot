@@ -266,6 +266,8 @@ class YtDlp(TaskListener):
         bulk=None,
         multi_tag=None,
         options="",
+        mid=0,
+        cmd_text="",
     ):
         if same_dir is None:
             same_dir = {}
@@ -277,11 +279,14 @@ class YtDlp(TaskListener):
         self.options = options
         self.same_dir = same_dir
         self.bulk = bulk
+        # read by TaskConfig.__init__ to override the message-derived identity
+        self._forced_mid = mid
+        self._cmd_text = cmd_text
         super().__init__()
         self.is_ytdlp = True
 
     async def new_event(self):
-        text = self.message.text.split("\n")
+        text = self.cmd_text.split("\n")
         input_list = text[0].split(" ")
         qual = ""
 
@@ -313,9 +318,11 @@ class YtDlp(TaskListener):
             self.link = reply_to.text.split("\n", 1)[0].strip()
 
         if not is_url(self.link):
-            await send_message(
-                self.message, COMMAND_USAGE["yt"][0], COMMAND_USAGE["yt"][1]
-            )
+            if not self._batch():
+                # inside a batch the usage text would repeat once per bad link
+                await send_message(
+                    self.message, COMMAND_USAGE["yt"][0], COMMAND_USAGE["yt"][1]
+                )
             await self.fail_task("Invalid or missing URL", notify=False)
             return
 

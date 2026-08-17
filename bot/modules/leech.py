@@ -2,14 +2,14 @@ from aiofiles.os import path as aiopath
 from base64 import b64encode
 from secrets import token_urlsafe
 
-from .. import LOGGER, bot_loop, multi_tags, multi_batches, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, multi_tags, DOWNLOAD_DIR
 from ..helper.ext_utils.bot_utils import COMMAND_USAGE
 from ..helper.ext_utils.links_utils import (
     is_url,
     is_magnet,
     is_telegram_link,
 )
-from ..helper.ext_utils.task_args import parse_leech_args
+from ..helper.ext_utils.task_args import parse_leech_args, strip_link_tokens
 from ..helper.listeners.task_listener import TaskListener
 from ..helper.mirror_leech_utils.download_utils.aria2_download import (
     add_aria2_download,
@@ -39,7 +39,6 @@ from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
     add_ytdlp_download,
 )
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
-from ..helper.telegram_helper.bot_commands import BotCommands
 
 
 class Leech(TaskListener):
@@ -52,6 +51,8 @@ class Leech(TaskListener):
         bulk=None,
         multi_tag=None,
         options="",
+        mid=0,
+        cmd_text="",
     ):
         if same_dir is None:
             same_dir = {}
@@ -63,11 +64,14 @@ class Leech(TaskListener):
         self.options = options
         self.same_dir = same_dir
         self.bulk = bulk
+        # read by TaskConfig.__init__ to override the message-derived identity
+        self._forced_mid = mid
+        self._cmd_text = cmd_text
         super().__init__()
         self.is_qbit = is_qbit
 
     async def new_event(self):
-        text = self.message.text.split("\n")
+        text = self.cmd_text.split("\n")
         input_list = text[0].split(" ")
 
         args = parse_leech_args(input_list[1:])
@@ -204,10 +208,10 @@ class Leech(TaskListener):
         return reply_to, file_, session
 
     async def _handle_bulk(self, reply_to, input_list):
-        """Handle list-type reply_to (bulk messages from telegram link)."""
-        self.bulk = reply_to
-        b_msg = input_list[:1]
-        self.options = " ".join(input_list[1:])
+        """Handle list-type reply_to (a telegram link range expanded to links)."""
+        # the range link itself must go: every child gets its own link in front
+        # of these options
+        self.options = " ".join(strip_link_tokens(input_list[1:]))
 
         if not self.multi_tag:
             self.multi_tag = token_urlsafe(3)
@@ -216,39 +220,12 @@ class Leech(TaskListener):
         if "-m" not in self.options:
             self.options += f" -m bulk-{self.multi_tag}"
 
-        b_msg.append(f"{self.bulk[0]} -i {len(self.bulk)} {self.options}")
-        msg = " ".join(b_msg)
-        if len(self.bulk) > 2:
-            msg += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
-        nextmsg = await send_message(self.message, msg)
-        if isinstance(nextmsg, str):
-            LOGGER.error(f"Can't send bulk message: {nextmsg}")
-            return
-
-        if self.multi_tag not in multi_batches:
-            multi_batches[self.multi_tag] = {
-                "anchor": nextmsg,
-                "total": len(self.bulk),
-                "done": 0,
-                "results": [],
-                "errors": [],
-                "cmd_msgs": [],
-                "name": self.multi_tag,
-            }
-
-        if self.message.from_user:
-            nextmsg.from_user = self.user
-        else:
-            nextmsg.sender_chat = self.user
-        await Leech(
-            self.client,
-            nextmsg,
-            self.is_qbit,
-            self.same_dir,
-            self.bulk,
-            self.multi_tag,
-            self.options,
-        ).new_event()
+        try:
+            await self.dispatch_bulk(input_list[0], reply_to, Leech)
+        except Exception as e:
+            multi_tags.discard(self.multi_tag)
+            LOGGER.error(f"Can't start bulk from telegram links: {e}")
+            await send_message(self.message, f"Can't start bulk: {e}")
 
     async def _validate_link(self, file_):
         """Return *False* (and show usage / fail) if there is no valid input."""
@@ -262,9 +239,12 @@ class Leech(TaskListener):
             and not is_magnet(self.link)
             and not await aiopath.exists(self.link)
         ):
-            await send_message(
-                self.message, COMMAND_USAGE["leech"][0], COMMAND_USAGE["leech"][1]
-            )
+            if not self._batch():
+                # one bad link out of a hundred must not paste the whole usage
+                # text into the chat; the batch summary names it instead
+                await send_message(
+                    self.message, COMMAND_USAGE["leech"][0], COMMAND_USAGE["leech"][1]
+                )
             await self.fail_task("Invalid or missing link", notify=False)
             return False
         return True

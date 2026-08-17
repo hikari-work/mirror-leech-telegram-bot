@@ -20,7 +20,16 @@ class TaskConfig(
     """
 
     def __init__(self):
-        self.mid = self.message.id
+        # A bulk child shares one telegram message with all its siblings, so it
+        # cannot take its identity from ``message.id``; the dispatcher hands it a
+        # synthetic mid instead. ``cmd_msg_id`` keeps the *real* message id for
+        # the places that need to reply to / fetch the command message.
+        self.mid = getattr(self, "_forced_mid", 0) or self.message.id
+        self.bulk_child = bool(getattr(self, "_forced_mid", 0))
+        self.cmd_msg_id = self.message.id
+        self.cmd_text = getattr(self, "_cmd_text", "") or (
+            self.message.text or self.message.caption or ""
+        )
         self.user = self.message.from_user or self.message.sender_chat
         self.user_id = self.user.id
         self.user_dict = user_data.get(self.user_id, {})

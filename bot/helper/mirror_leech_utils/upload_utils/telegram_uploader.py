@@ -147,7 +147,7 @@ class TelegramUploader:
             msg = (
                 self._listener.message.link
                 if self._listener.is_super_chat
-                else self._listener.message.text.lstrip("/")
+                else self._listener.cmd_text.lstrip("/")
             )
             try:
                 if self._user_session:
@@ -180,7 +180,7 @@ class TelegramUploader:
             self._sent_msg = await self._wait_flood(
                 TgClient.user.get_messages,
                 chat_id=self._listener.message.chat.id,
-                message_ids=self._listener.mid,
+                message_ids=self._listener.cmd_msg_id,
             )
             if self._sent_msg is None:
                 if self._listener.is_cancelled:

@@ -1,6 +1,7 @@
 from asyncio import gather, sleep
 from dataclasses import dataclass
 from html import escape
+from time import monotonic
 
 from aiofiles.os import listdir, remove
 from aiofiles.os import path as aiopath
@@ -49,6 +50,16 @@ NO_FILES_ERROR = (
     "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, "
     "then check if all files have those extensions or not."
 )
+
+SAME_DIR_WAIT_TIMEOUT = 900
+"""Seconds a same-dir task waits for its siblings to register.
+
+Only the legacy ``-i`` chain can make a task wait here: it registers one task
+every few seconds, so a task may finish downloading before its siblings exist.
+If the chain dies mid-way (a failed ``send_message``, a FloodWait long enough to
+be killed) the declared total never arrives, and without this ceiling the task
+would wait forever and every sibling behind it would strand its files on disk.
+"""
 
 
 @dataclass(frozen=True)
@@ -127,20 +138,26 @@ class TaskListener(TaskConfig):
         self.progress = True
 
     async def remove_from_same_dir(self):
+        stale = ""
         async with task_dict_lock:
-            if (
-                self.folder_name
-                and self.same_dir
-                and self.mid in self.same_dir[self.folder_name]["tasks"]
-            ):
-                self.same_dir[self.folder_name]["tasks"].remove(self.mid)
-                self.same_dir[self.folder_name]["total"] -= 1
+            group = self.same_dir.get(self.folder_name) if self.folder_name else None
+            if group and self.mid in group["tasks"]:
+                group["tasks"].remove(self.mid)
+                group["total"] -= 1
+                if group["total"] <= 0 and not group["tasks"]:
+                    # nobody left to upload what earlier siblings staged
+                    stale = group.get("stage", "")
+        if stale:
+            await clean_download(stale)
 
     async def on_download_start(self):
         if (
             self.is_super_chat
             and Config.INCOMPLETE_TASK_NOTIFIER
             and Config.DATABASE_URL
+            # bulk children all share the anchor's link, so one row per task
+            # would collide on insert and be wiped by the first task to finish
+            and not self.bulk_child
         ):
             await database.add_incomplete_task(
                 self.message.chat.id, self.message.link, self.tag
@@ -149,6 +166,9 @@ class TaskListener(TaskConfig):
     async def on_download_complete(self):
         await sleep(2)
         if self.is_cancelled:
+            # give the slot back, or the last sibling waits for a total that
+            # will never arrive
+            await self.remove_from_same_dir()
             return
 
         multi_links = await self._await_same_dir_merge()
@@ -156,11 +176,16 @@ class TaskListener(TaskConfig):
             return
 
         async with task_dict_lock:
-            if self.is_cancelled or self.mid not in task_dict:
-                return
-            download = task_dict[self.mid]
-            self.name = download.name()
-            gid = download.gid()
+            bail = self.is_cancelled or self.mid not in task_dict
+            if not bail:
+                download = task_dict[self.mid]
+                self.name = download.name()
+                gid = download.gid()
+        if bail:
+            # already out of the same-dir group by now; close the batch slot so
+            # the anchor does not sit at "x/y" forever
+            await self.register_batch_failure("Cancelled")
+            return
         LOGGER.info(f"Download completed: {self.name}")
 
         if multi_links:
@@ -193,41 +218,81 @@ class TaskListener(TaskConfig):
         await self._start_upload(up_dir, gid)
 
     async def _await_same_dir_merge(self):
-        """Wait until this task is the last one left in its same-dir group.
+        """Hand this task's files to its same-dir group, or adopt the whole group.
 
-        Returns True when this task's files were merged into a sibling task,
-        False when it carries on by itself, and None when it was dropped from
-        the group while waiting — in which case the caller must return.
+        Every member moves its folder into one staging directory owned by the
+        group -- never into a sibling's download directory. A sibling can fail,
+        be cancelled or have ``clean_download`` run over it at any moment, so
+        picking one as the merge target is what used to lose files; the staging
+        directory belongs to no task and cannot be swept away underneath us.
+
+        Returns True when the files were handed over and this task is done,
+        False when it carries on and uploads (its own folder, or the whole
+        staging directory when it is the last member), and None when it was
+        dropped from the group while waiting -- the caller must then return.
         """
         if not (
             self.folder_name
             and self.same_dir
-            and self.mid in self.same_dir[self.folder_name]["tasks"]
+            and self.mid in self.same_dir.get(self.folder_name, {}).get("tasks", ())
         ):
             return False
 
+        deadline = monotonic() + SAME_DIR_WAIT_TIMEOUT
+        while True:
+            async with task_dict_lock:
+                group = self.same_dir.get(self.folder_name)
+                if not group or self.mid not in group["tasks"]:
+                    return None
+                stage = group.setdefault(
+                    "stage", f"{DOWNLOAD_DIR}sd{min(group['tasks'])}"
+                )
+                # wait only while siblings are still expected to register
+                ready = group["total"] <= 1 or len(group["tasks"]) > 1
+                if not ready and monotonic() >= deadline:
+                    LOGGER.warning(
+                        f"Same dir group {self.folder_name} waited "
+                        f"{SAME_DIR_WAIT_TIMEOUT}s for {group['total'] - 1} sibling(s) "
+                        "that never registered; finishing with what arrived."
+                    )
+                    group["total"] = len(group["tasks"])
+                    ready = True
+                if ready:
+                    last = group["total"] <= 1
+                    group["tasks"].discard(self.mid)
+                    group["total"] -= 1
+                    break
+            # locks released before sleeping so siblings can make progress
+            await sleep(1)
+
+        spath = f"{self.dir}{self.folder_name}"
+        dpath = f"{stage}{self.folder_name}"
+        # the lock serialises the moves; asyncio locks are FIFO and nothing is
+        # awaited between the decision above and acquiring it, so merges run in
+        # decision order -- the last member therefore queues behind every
+        # earlier merge and cannot start uploading a half filled staging dir
         async with same_directory_lock:
-            while True:
-                async with task_dict_lock:
-                    group = self.same_dir[self.folder_name]
-                    if self.mid not in group["tasks"]:
-                        return None
-                    if group["total"] <= 1 or len(group["tasks"]) > 1:
-                        if group["total"] <= 1:
-                            return False
-                        group["tasks"].remove(self.mid)
-                        group["total"] -= 1
-                        spath = f"{self.dir}{self.folder_name}"
-                        des_id = list(group["tasks"])[0]
-                        des_path = f"{DOWNLOAD_DIR}{des_id}{self.folder_name}"
-                        LOGGER.info(f"Moving files from {self.mid} to {des_id}")
-                        await move_and_merge(spath, des_path, self.mid)
-                        return True
-                # lock released before sleeping so siblings can make progress
-                await sleep(1)
+            if last:
+                if not await aiopath.exists(dpath):
+                    # sole member of the group, nothing was staged for us
+                    return False
+                LOGGER.info(f"Collecting staged files of {self.folder_name} into {self.mid}")
+            try:
+                await move_and_merge(spath, dpath, self.mid)
+            except Exception as e:
+                LOGGER.error(f"Same dir merge failed for {self.mid}: {e}")
+                # upload what we have rather than leave it stranded on disk
+                return False
+        if not last:
+            LOGGER.info(f"Moved files of {self.mid} to {dpath}")
+            return True
+
+        own_dir, self.dir = self.dir, stage
+        await clean_download(own_dir)
+        return False
 
     async def _finish_merged_task(self):
-        """Report a task whose files were merged into a sibling, then stop."""
+        """Report a task that handed its files to its same-dir group, then stop."""
         self.seed = False
         await self.on_upload_error(
             f"{self.name} Downloaded!\n\nWaiting for other tasks to finish...",
@@ -236,14 +301,9 @@ class TaskListener(TaskConfig):
         batch = self._batch()
         if not batch:
             return
-        batch["done"] += 1
-        await self.update_batch_progress()
         if self.message != batch["anchor"]:
-            try:
-                await delete_message(self.message)
-            except Exception:
-                pass
-        await self.finalize_batch()
+            await delete_message(self.message)
+        await self.record_batch_done()
 
     async def _resolve_download_path(self):
         """Settle ``self.name`` on what actually landed on disk, then stat it.
@@ -387,7 +447,9 @@ class TaskListener(TaskConfig):
 
         batch = self._batch()
         if batch:
-            batch["results"].append({
+            if self.message != batch["anchor"]:
+                await delete_message(self.message)
+            await self.record_batch_result({
                 "name": self.name,
                 "size": self.size,
                 "folders": folders,
@@ -396,16 +458,6 @@ class TaskListener(TaskConfig):
                 "link": link,
                 "mime_type": "",
             })
-            batch["done"] += 1
-
-            if self.message != batch["anchor"]:
-                try:
-                    await delete_message(self.message)
-                except OSError:
-                    pass
-
-            await self.update_batch_progress()
-            await self.finalize_batch()
         else:
             msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
             msg += f"\n<b>Total Files: </b>{folders}"
@@ -488,14 +540,14 @@ class TaskListener(TaskConfig):
 
         self._torbox_torrent_id = 0
         self._torbox_web_id = 0
-        msg = f"{self.tag} Download: {escape(str(error))}"
-        await send_message(self.message, msg, button)
-
-        batch = self._batch()
-        if batch:
-            batch["errors"].append({"name": getattr(self, 'name', 'Unknown'), "error": str(error)})
-            await self.update_batch_progress()
-            await self.finalize_batch()
+        if self._batch():
+            # a bulk of dead links would answer with one message per link;
+            # the anchor carries the failures instead
+            await self.register_batch_failure(error)
+        else:
+            await send_message(
+                self.message, f"{self.tag} Download: {escape(str(error))}", button
+            )
 
         if count == 0:
             await self.clean()
@@ -537,12 +589,10 @@ class TaskListener(TaskConfig):
             count = len(task_dict)
 
         if not silent:
-            await send_message(self.message, f"{self.tag} {escape(str(error))}")
-            batch = self._batch()
-            if batch:
-                batch["errors"].append({"name": self.name, "error": str(error)})
-                await self.update_batch_progress()
-                await self.finalize_batch()
+            if self._batch():
+                await self.register_batch_failure(error)
+            else:
+                await send_message(self.message, f"{self.tag} {escape(str(error))}")
 
         if count == 0:
             await self.clean()

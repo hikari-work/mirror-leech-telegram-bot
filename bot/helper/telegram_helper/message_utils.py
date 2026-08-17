@@ -10,6 +10,13 @@ from ..ext_utils.bot_utils import SetInterval
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
 
+STATUS_RESEND_INTERVAL = 8
+"""Seconds before the status message may be re-sent to the bottom of the chat.
+
+Inside the window it is edited in place instead. ``/status`` passes
+``force=True`` because a user asking for it expects a fresh message.
+"""
+
 
 async def send_message(message, text, buttons=None, block=True):
     try:
@@ -224,35 +231,50 @@ async def update_status_message(sid, force=False):
             status_dict[sid]["time"] = time()
 
 
-async def send_status_message(msg, user_id=0):
+async def send_status_message(msg, user_id=0, force=False):
     if intervals["stopAll"]:
         return
     sid = user_id or msg.chat.id
     is_user = bool(user_id)
+    throttled = False
     async with task_dict_lock:
         if sid in status_dict:
-            page_no = status_dict[sid]["page_no"]
-            status = status_dict[sid]["status"]
-            page_step = status_dict[sid]["page_step"]
-            text, buttons = await get_readable_message(
-                sid, is_user, page_no, status, page_step
-            )
-            if text is None:
-                del status_dict[sid]
-                if obj := intervals["status"].get(sid):
-                    obj.cancel()
-                    del intervals["status"][sid]
-                return
-            old_message = status_dict[sid]["message"]
-            message = await send_message(msg, text, buttons, block=False)
-            if isinstance(message, str):
-                LOGGER.error(
-                    f"Status with id: {sid} haven't been sent. Error: {message}"
+            # every task asks for the status message when it starts, and a bulk
+            # starts a hundred of them within a few seconds. Re-sending here
+            # costs a send plus a delete each time, which is what earns the
+            # FloodWait that then stalls the batch, so outside the window the
+            # existing message is edited in place instead of being replaced.
+            if (
+                not force
+                and time() - status_dict[sid].get("sent_at", 0)
+                < STATUS_RESEND_INTERVAL
+            ):
+                throttled = True
+            else:
+                page_no = status_dict[sid]["page_no"]
+                status = status_dict[sid]["status"]
+                page_step = status_dict[sid]["page_step"]
+                text, buttons = await get_readable_message(
+                    sid, is_user, page_no, status, page_step
                 )
-                return
-            await delete_message(old_message)
-            message.text = text
-            status_dict[sid].update({"message": message, "time": time()})
+                if text is None:
+                    del status_dict[sid]
+                    if obj := intervals["status"].get(sid):
+                        obj.cancel()
+                        del intervals["status"][sid]
+                    return
+                old_message = status_dict[sid]["message"]
+                message = await send_message(msg, text, buttons, block=False)
+                if isinstance(message, str):
+                    LOGGER.error(
+                        f"Status with id: {sid} haven't been sent. Error: {message}"
+                    )
+                    return
+                await delete_message(old_message)
+                message.text = text
+                status_dict[sid].update(
+                    {"message": message, "time": time(), "sent_at": time()}
+                )
         else:
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
@@ -267,6 +289,7 @@ async def send_status_message(msg, user_id=0):
             status_dict[sid] = {
                 "message": message,
                 "time": time(),
+                "sent_at": time(),
                 "page_no": 1,
                 "page_step": 1,
                 "status": "All",
@@ -276,3 +299,6 @@ async def send_status_message(msg, user_id=0):
             intervals["status"][sid] = SetInterval(
                 Config.STATUS_UPDATE_INTERVAL, update_status_message, sid
             )
+    if throttled:
+        # locks are not reentrant, so the edit happens after the release
+        await update_status_message(sid)

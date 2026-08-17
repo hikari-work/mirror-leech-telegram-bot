@@ -346,3 +346,36 @@ def _copy_default(value: object) -> object:
     if isinstance(value, dict):
         return dict(value)
     return value
+
+
+def parse_folder_name(input_list: list[str], *, ytdlp: bool = False) -> str:
+    """Return the ``-m`` folder name the way the full parsers derive it.
+
+    The bulk dispatcher has to know the same-dir folder before it starts any
+    task, but ``-m`` values may span several tokens and are delimited by the
+    surrounding flags, so re-implementing the scan would drift from what the
+    children compute. Runs the real :func:`arg_parser` over the same defaults
+    instead, and keeps the ``f"/{m}".rstrip("/")`` normalisation in one place.
+    """
+    defaults = YTDLP_ARG_DEFAULTS if ytdlp else LEECH_ARG_DEFAULTS
+    raw: dict[str, object] = {k: _copy_default(v) for k, v in defaults.items()}
+    arg_parser(input_list, raw)
+    m = raw["-m"]
+    return f"/{m}".rstrip("/") if len(m) > 0 else ""
+
+
+def strip_link_tokens(input_list: list[str], *, ytdlp: bool = False) -> list[str]:
+    """Return *input_list* without the leading positional tokens.
+
+    :func:`arg_parser` folds everything before the first recognised flag into
+    ``link``, so those tokens are the address the user typed. A bulk dispatcher
+    replaces that address with one link per task, and if the original were left
+    in the option string every child would parse "<its link> <original>" as a
+    single address.
+    """
+    defaults = YTDLP_ARG_DEFAULTS if ytdlp else LEECH_ARG_DEFAULTS
+    for index, token in enumerate(input_list):
+        if token in defaults:
+            return input_list[index:]
+    return []
+
