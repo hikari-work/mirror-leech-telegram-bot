@@ -96,8 +96,9 @@ def test_normalize_url(semprot_module):
 async def test_scrape_pages_success(semprot_module):
     json_data = {
         "success": True,
+        "title": "Test Thread",
         "links": ["https://mega.nz/xyz", "https://pixeldrain.com/u/123"],
-        "total_pages": 5,
+        "pages_total": 5,
     }
     mock_cls, mock_session = _make_mock_session(json_data)
 
@@ -106,7 +107,7 @@ async def test_scrape_pages_success(semprot_module):
             "https://senang.top/threads/test-thread.123/", page_list="2"
         )
     assert links == ["https://mega.nz/xyz", "https://pixeldrain.com/u/123"]
-    assert title == "test-thread.123"
+    assert title == "Test Thread"
     assert total_pages == 5
     call_kwargs = mock_session.get.call_args
     assert call_kwargs[1]["params"] == {
@@ -120,7 +121,7 @@ async def test_scrape_pages_with_filter(semprot_module):
     json_data = {
         "success": True,
         "links": ["https://vidara.to/abc"],
-        "total_pages": 10,
+        "pages_total": 10,
     }
     mock_cls, mock_session = _make_mock_session(json_data)
 
@@ -130,6 +131,7 @@ async def test_scrape_pages_with_filter(semprot_module):
         )
     assert links == ["https://vidara.to/abc"]
     assert total_pages == 10
+    assert title == "foo.1"  # no "title" in response → falls back to URL slug
     call_kwargs = mock_session.get.call_args
     assert call_kwargs[1]["params"]["filter"] == "vidara.to"
     assert call_kwargs[1]["params"]["pageList"] == "1-5"

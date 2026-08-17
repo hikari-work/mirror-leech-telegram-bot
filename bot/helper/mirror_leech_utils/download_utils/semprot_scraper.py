@@ -2,7 +2,7 @@
 
 Endpoint: https://api.piyann.me/api/v1/scrape/semprot
 Params: q=<url>&pageList=<spec>&filter=<host>
-Response: {success, links, total_pages}
+Response: {success, title, links, pages_total, pages_fetched, error}
 """
 
 from urllib.parse import urlparse, urlunparse
@@ -69,6 +69,6 @@ async def scrape_pages(url: str, page_list: str = "1", filter_host: str = ""):
         raise DirectDownloadLinkException(f"ERROR: semprot scrape failed: {error_msg}")
 
     links = data.get("links") or []
-    total_pages = data.get("total_pages") or 1
-    title = target_url.rstrip("/").split("/")[-1]
+    total_pages = data.get("pages_total") or 1
+    title = data.get("title") or target_url.rstrip("/").split("/")[-1]
     return title, sorted(links), total_pages

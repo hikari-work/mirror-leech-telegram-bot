@@ -1,6 +1,5 @@
 from asyncio import wait_for, TimeoutError as AsyncTimeoutError
-from re import sub as re_sub, search as re_search
-from urllib.parse import urlparse
+from re import sub as re_sub
 
 from aiofiles import open as aiopen
 from aiofiles.os import remove, path as aiopath
@@ -24,12 +23,6 @@ _PAGE_TIMEOUT = 120
 def _slug(title):
     s = re_sub(r"[^a-zA-Z0-9_-]+", "", title.replace(" ", "_"))[:60]
     return s or "bypass"
-
-
-def _extract_page_from_url(url):
-    """Extract page number from URL path like /page-2205. Returns int or 1."""
-    m = re_search(r"/page-(\d+)", urlparse(url).path)
-    return int(m.group(1)) if m else 1
 
 
 def _format_page_list(text, total_pages):
@@ -98,7 +91,7 @@ async def bypass_scrape_cmd(client, message):
 
     user_id = message.from_user.id if message.from_user else 0
 
-    probe_page = str(_extract_page_from_url(link))
+    probe_page = "1"  # only need pages_total; page 1 is cheapest and always valid
     status = await send_message(message, "Fetching thread info...")
     try:
         title, _, total_pages = await bypass_scrape(link, probe_page, keyword)
