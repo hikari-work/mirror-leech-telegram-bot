@@ -3,8 +3,6 @@ from collections import Counter
 from copy import deepcopy
 from re import findall
 
-from pyrogram.enums import ChatAction
-
 from ... import (
     LOGGER,
     excluded_extensions,
@@ -15,10 +13,35 @@ from ...core.telegram_manager import TgClient
 from ..ext_utils.bot_utils import get_size_bytes
 from ..ext_utils.links_utils import is_telegram_link
 from ..ext_utils.media_utils import create_thumb
+from ..telegram_helper.dest_chat import (
+    ChatLookupError,
+    can_reach_dest,
+    get_dest_chat,
+    get_dest_member,
+)
 from ..telegram_helper.message_utils import get_tg_link_message
 
 
 class SettingsResolverMixin:
+    def _dest_unverified(self, what, error) -> None:
+        """Handle a destination check that could not be completed.
+
+        Telegram was never answered successfully, so nothing new is known about
+        the chat -- "Chat not found!" or "not admin" would be a guess, and during
+        a bulk it is the wrong guess for every link in the batch. Hybrid leech
+        can simply stay off, the upload still goes through the user session; a
+        bot-only upload has to stop and say that the *check* failed.
+        """
+        if self.user_transmission:
+            LOGGER.warning(
+                f"Hybrid leech off for this task, can't check {what}: {error}"
+            )
+            self.hybrid_leech = False
+            return
+        raise ValueError(
+            f"Can't check {what} right now: {error}. Try again in a moment."
+        )
+
     async def before_start(self) -> None:
         self.name_sub = (
             self.name_sub
@@ -115,8 +138,14 @@ class SettingsResolverMixin:
 
             if self.user_transmission:
                 try:
-                    chat = await TgClient.user.get_chat(self.up_dest)
-                except Exception:
+                    chat = await get_dest_chat(TgClient.user, self.up_dest)
+                except ChatLookupError as e:
+                    # a rate limit is not an answer about the chat, but the user
+                    # session has nothing to fall back on here, so the task goes
+                    # on through the bot rather than failing
+                    LOGGER.warning(
+                        f"Can't check the destination chat for the user session: {e}"
+                    )
                     chat = None
                 if chat is None:
                     LOGGER.warning(
@@ -133,16 +162,27 @@ class SettingsResolverMixin:
                     self.user_transmission = False
                     self.hybrid_leech = False
                 elif chat.is_admin:
-                    member = await chat.get_member(TgClient.user.me.id)
-                    if (
-                        not member.privileges.can_manage_chat
-                        or not member.privileges.can_delete_messages
-                    ):
+                    try:
+                        member = await get_dest_member(
+                            TgClient.user, chat.id, TgClient.user.me.id
+                        )
+                    except ChatLookupError as e:
+                        LOGGER.warning(
+                            "Can't check the privileges of the user session in "
+                            f"the destination chat: {e}"
+                        )
                         self.user_transmission = False
                         self.hybrid_leech = False
-                        LOGGER.warning(
-                            "Enable manage chat and delete messages to account of the user session from administration settings!"
-                        )
+                    else:
+                        if (
+                            not member.privileges.can_manage_chat
+                            or not member.privileges.can_delete_messages
+                        ):
+                            self.user_transmission = False
+                            self.hybrid_leech = False
+                            LOGGER.warning(
+                                "Enable manage chat and delete messages to account of the user session from administration settings!"
+                            )
                 else:
                     LOGGER.warning(
                         "Promote the account of the user session to admin in the chat to get the benefit of user transmission!"
@@ -151,10 +191,14 @@ class SettingsResolverMixin:
                     self.hybrid_leech = False
 
             if not self.user_transmission or self.hybrid_leech:
+                chat = None
                 try:
-                    chat = await self.client.get_chat(self.up_dest)
-                except Exception:
-                    chat = None
+                    chat = await get_dest_chat(self.client, self.up_dest)
+                except ChatLookupError as e:
+                    # "could not ask" must not come out as "not there": that is
+                    # what turned one FloodWait during a bulk into a batch of
+                    # links reported dead while every one of them was fine
+                    self._dest_unverified("the destination chat", e)
                 if chat is None:
                     if self.user_transmission:
                         self.hybrid_leech = False
@@ -172,8 +216,14 @@ class SettingsResolverMixin:
                                 "Bot is not admin in the destination chat!"
                             )
                         else:
-                            member = await chat.get_member(self.client.me.id)
-                            if (
+                            member = None
+                            try:
+                                member = await get_dest_member(
+                                    self.client, chat.id, self.client.me.id
+                                )
+                            except ChatLookupError as e:
+                                self._dest_unverified("the bot's privileges", e)
+                            if member is not None and (
                                 not member.privileges.can_manage_chat
                                 or not member.privileges.can_delete_messages
                             ):
@@ -184,11 +234,17 @@ class SettingsResolverMixin:
                                 else:
                                     self.hybrid_leech = False
                     else:
+                        # unverified means unverified: an unanswered probe leaves
+                        # this True so the task is not told to start a bot it has
+                        # already started
+                        reachable = True
                         try:
-                            await self.client.send_chat_action(
-                                self.up_dest, ChatAction.TYPING
+                            reachable = await can_reach_dest(
+                                self.client, self.up_dest
                             )
-                        except Exception:
+                        except ChatLookupError as e:
+                            self._dest_unverified("the destination chat", e)
+                        if not reachable:
                             raise ValueError("Start the bot and try again!")
         elif (
             self.user_transmission or self.hybrid_leech
