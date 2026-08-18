@@ -106,7 +106,6 @@ max-complexity = 10
 "bot/helper/mirror_leech_utils/download_utils/qbit_download.py"           = ["C901", "E501", "E722", "I001", "UP041"]
 "bot/helper/mirror_leech_utils/download_utils/semprot_scraper.py"         = ["E501"]
 "bot/helper/mirror_leech_utils/download_utils/telegram_download.py"       = ["C901", "E501", "I001"]
-"bot/helper/mirror_leech_utils/download_utils/url_shortener_bypass.py"    = ["E501", "I001"]
 "bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py"         = ["C901", "E501", "E722", "I001"]
 "bot/helper/mirror_leech_utils/status_utils/aria2_status.py"              = ["E501", "E722", "I001"]
 "bot/helper/mirror_leech_utils/status_utils/direct_status.py"             = ["E722"]
