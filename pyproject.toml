@@ -101,7 +101,6 @@ max-complexity = 10
 "bot/helper/listeners/direct_listener.py"                                 = ["C901", "E501", "I001", "UP041"]
 "bot/helper/listeners/qbit_listener.py"                                   = ["C901", "E501", "E722", "I001", "UP041"]
 "bot/helper/mirror_leech_utils/download_utils/aria2_download.py"          = ["C901", "E501", "I001", "UP041"]
-"bot/helper/mirror_leech_utils/download_utils/bypass_dispatcher.py"       = ["E501", "E741"]
 "bot/helper/mirror_leech_utils/download_utils/mega_download.py"           = ["C901", "E501"]
 "bot/helper/mirror_leech_utils/download_utils/qbit_download.py"           = ["C901", "E501", "E722", "I001", "UP041"]
 "bot/helper/mirror_leech_utils/download_utils/semprot_scraper.py"         = ["E501"]

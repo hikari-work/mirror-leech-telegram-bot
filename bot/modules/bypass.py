@@ -1,5 +1,7 @@
-from asyncio import wait_for, TimeoutError as AsyncTimeoutError
+from asyncio import wait_for
+from html import escape
 from re import sub as re_sub
+from urllib.parse import urlparse
 
 from aiofiles import open as aiopen
 from aiofiles.os import remove, path as aiopath
@@ -7,9 +9,16 @@ from pyrogram.filters import create
 from pyrogram.handlers import MessageHandler
 
 from .. import bot_loop
-from ..helper.ext_utils.bot_utils import new_task
+from ..helper.ext_utils.bot_utils import new_task, sync_to_async
 from ..helper.ext_utils.exceptions import DirectDownloadLinkException
-from ..helper.mirror_leech_utils.download_utils.bypass_dispatcher import bypass_scrape
+from ..helper.mirror_leech_utils.download_utils.bypass_dispatcher import (
+    bypass_scrape,
+    is_scrape_target,
+)
+from ..helper.mirror_leech_utils.download_utils.url_shortener_bypass import (
+    bypass_shortener,
+    is_url_shortener,
+)
 from ..helper.telegram_helper.message_utils import (
     delete_message,
     edit_message,
@@ -61,7 +70,7 @@ async def _ask_reply(client, message, user_id):
     )
     try:
         reply = await wait_for(future, _PAGE_TIMEOUT)
-    except AsyncTimeoutError:
+    except TimeoutError:
         reply = None
     finally:
         client.remove_handler(*handler)
@@ -71,6 +80,44 @@ async def _ask_reply(client, message, user_id):
     text = reply.text.strip()
     await delete_message(reply)
     return text
+
+
+async def _resolve_shortlink(status, link):
+    """Resolve ``link`` when it is a shortlink; otherwise hand it back untouched.
+
+    Returns (link, done). ``done`` means the user has already been answered and
+    there is nothing left to scrape: either the bypass failed, or it succeeded
+    and no thread scraper handles the target, in which case the target URL is
+    the whole answer.
+    """
+    if not is_url_shortener(urlparse(link).hostname or ""):
+        return link, False
+
+    try:
+        target = await sync_to_async(bypass_shortener, link)
+    except DirectDownloadLinkException as e:
+        await edit_message(status, str(e))
+        return link, True
+
+    if not is_scrape_target(target):
+        await edit_message(status, f"<b>Bypassed</b>\n<code>{escape(target)}</code>")
+        return target, True
+    return target, False
+
+
+async def _deliver_links(message, status, title, all_links, page_list, keyword):
+    """Send the scraped links as a .txt and drop the status message."""
+    path = f"{_slug(title)}_links.txt"
+    async with aiopen(path, "w") as f:
+        await f.write("\n".join(all_links))
+
+    caption = f"<b>{title}</b>\nPages: {page_list} | Links: {len(all_links)}"
+    if keyword:
+        caption += f" | Filter: <code>{keyword}</code>"
+    await send_file(message, path, caption=caption)
+    await delete_message(status)
+    if await aiopath.exists(path):
+        await remove(path)
 
 
 @new_task
@@ -84,15 +131,24 @@ async def bypass_scrape_cmd(client, message):
     if not link:
         await send_message(
             message,
-            "Send a thread URL with the command or reply to a message with the URL.\n"
-            "<code>/bypass &lt;url&gt; [filter]</code>",
+            "Send a shortlink or thread URL with the command, or reply to a message "
+            "with the URL.\n"
+            "<code>/bypass &lt;url&gt; [filter]</code>\n\n"
+            "A shortlink is answered with its target URL; a thread URL asks which "
+            "pages to scrape. <code>filter</code> only applies to threads.",
         )
         return
 
     user_id = message.from_user.id if message.from_user else 0
 
+    status = await send_message(message, "Bypassing link...")
+
+    link, done = await _resolve_shortlink(status, link)
+    if done:
+        return
+
     probe_page = "1"  # only need pages_total; page 1 is cheapest and always valid
-    status = await send_message(message, "Fetching thread info...")
+    await edit_message(status, "Fetching thread info...")
     try:
         title, _, total_pages = await bypass_scrape(link, probe_page, keyword)
     except DirectDownloadLinkException as e:
@@ -104,7 +160,8 @@ async def bypass_scrape_cmd(client, message):
         f"<b>{title}</b>\n"
         f"Total pages: {total_pages}\n\n"
         "Kirim halaman yang ingin di-scrape:\n"
-        "<code>0</code> = semua, <code>1-10</code> = range, <code>1,5,7</code> = pilihan",
+        "<code>0</code> = semua, <code>1-10</code> = range, "
+        "<code>1,5,7</code> = pilihan",
     )
 
     page_text = await _ask_reply(client, message, user_id)
@@ -128,19 +185,4 @@ async def bypass_scrape_cmd(client, message):
         await edit_message(status, "Tidak ada link ditemukan.")
         return
 
-    page_label = page_list
-
-    path = f"{_slug(title)}_links.txt"
-    async with aiopen(path, "w") as f:
-        await f.write("\n".join(all_links))
-
-    caption = (
-        f"<b>{title}</b>\n"
-        f"Pages: {page_label} | Links: {len(all_links)}"
-    )
-    if keyword:
-        caption += f" | Filter: <code>{keyword}</code>"
-    await send_file(message, path, caption=caption)
-    await delete_message(status)
-    if await aiopath.exists(path):
-        await remove(path)
+    await _deliver_links(message, status, title, all_links, page_list, keyword)
