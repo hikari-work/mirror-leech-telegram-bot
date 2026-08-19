@@ -1,4 +1,4 @@
-"""Tests for the Linkvertise shortener bypass (gateway-backed)."""
+"""Tests for the gateway-backed shortener bypasses (ouo, Linkvertise)."""
 
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ def test_is_url_shortener_covers_linkvertise_mirrors(shortener):
         assert shortener.is_url_shortener(host), host
 
 
-def test_is_url_shortener_still_covers_ouo(shortener):
+def test_is_url_shortener_covers_ouo(shortener):
     assert shortener.is_url_shortener("ouo.io")
     assert shortener.is_url_shortener("ouo.press")
     assert shortener.is_url_shortener("www.ouo.io")
@@ -211,7 +211,7 @@ def test_linkvertise_network_error_retries_then_gives_up(shortener):
     ):
         shortener.bypass_shortener("https://linkvertise.com/12345/slug")
 
-    assert session.get.call_count == shortener._LINKVERTISE_ATTEMPTS
+    assert session.get.call_count == shortener._GATEWAY_ATTEMPTS
     assert "ConnectionError" in str(excinfo.value)
 
 
@@ -224,6 +224,69 @@ def test_linkvertise_non_json_response(shortener):
         shortener.bypass_shortener("https://linkvertise.com/12345/slug")
 
     assert "non-JSON" in str(excinfo.value)
+
+
+def test_ouo_success_returns_target(shortener):
+    mock_cls, session, calls = _mock_session(
+        (200, {"success": True, "url": "https://drive.google.com/file/d/abc/view"})
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://ouo.io/abc123")
+
+    assert result == "https://drive.google.com/file/d/abc/view"
+    url, kwargs = calls[0]
+    assert url == "https://api.piyann.me/api/v1/bypass/ouo"
+    assert kwargs["params"] == {"url": "https://ouo.io/abc123"}
+    assert session.get.call_count == 1
+
+
+def test_ouo_press_link_is_sent_unchanged(shortener):
+    # The gateway takes ouo.press itself, so there is no host to rewrite here.
+    mock_cls, _session, calls = _mock_session(
+        (200, {"success": True, "url": "https://example.com/target"})
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        shortener.bypass_shortener("https://ouo.press/xyz789")
+
+    _url, kwargs = calls[0]
+    assert kwargs["params"] == {"url": "https://ouo.press/xyz789"}
+
+
+def test_ouo_failure_is_named_and_clipped(shortener):
+    # ouo errors quote the fetched page back; the chat gets a one-line summary.
+    mock_cls, session, _calls = _mock_session(
+        (
+            500,
+            {
+                "success": False,
+                "error": "ouo: _token not found on initial page (status=200, "
+                "body=<!DOCTYPE html>\n<html>\n" + "<div>pad</div>" * 100,
+            },
+        )
+    )
+    with (
+        patch.object(shortener, "Session", mock_cls),
+        pytest.raises(Exception) as excinfo,
+    ):
+        shortener.bypass_shortener("https://ouo.io/gone")
+
+    message = str(excinfo.value)
+    assert message.startswith("ERROR: ouo bypass failed: ouo: _token not found")
+    assert "\n" not in message
+    assert len(message) < shortener._MAX_REASON + 60
+    assert session.get.call_count == 1
+
+
+def test_ouo_rate_limit_is_retried(shortener):
+    mock_cls, session, _calls = _mock_session(
+        (429, {"success": False, "error": "rate limit exceeded"}),
+        (200, {"success": True, "url": "https://example.com/target"}),
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://ouo.io/abc123")
+
+    assert result == "https://example.com/target"
+    assert session.get.call_count == 2
 
 
 def test_bypass_shortener_unknown_domain(shortener):
