@@ -30,6 +30,11 @@ class _InputMedia:
         self.caption = caption
 
 
+class _ReplyParameters:
+    def __init__(self, message_id=None, **kwargs):
+        self.message_id = message_id
+
+
 class _Err(Exception):
     pass
 
@@ -80,6 +85,7 @@ def uploader_module(monkeypatch):
             InputMediaVideo=type("InputMediaVideo", (_InputMedia,), {}),
             InputMediaDocument=type("InputMediaDocument", (_InputMedia,), {}),
             InputMediaPhoto=type("InputMediaPhoto", (_InputMedia,), {}),
+            ReplyParameters=_ReplyParameters,
         ),
         "bot": _stub("bot", intervals={"stopAll": False}),
         "bot.core": _pkg("bot.core"),
@@ -139,6 +145,7 @@ class FakeMessage:
         self.chat = SimpleNamespace(id=-1001, type=SimpleNamespace(name="CHANNEL"))
         self.caption = caption
         self.reply_to_message_id = reply_to_message_id
+        self.message_thread_id = None
         self.link = f"https://t.me/c/1001/{self.id}"
         self.media_group_id = None
         self._registry = registry
@@ -151,27 +158,30 @@ class FakeMessage:
         )
         self.audio = SimpleNamespace(file_id=f"audio{self.id}") if kind == "audio" else None
 
-    def _reply(self, kind, caption):
-        return FakeMessage(
-            kind, caption=caption, reply_to_message_id=self.id, registry=self._registry
-        )
-
-    async def reply_photo(self, caption=None, **_kwargs):
-        return self._reply("photo", caption)
-
-    async def reply_video(self, caption=None, **_kwargs):
-        return self._reply("video", caption)
-
-    async def reply_document(self, caption=None, **_kwargs):
-        return self._reply("document", caption)
-
-    async def reply_audio(self, caption=None, **_kwargs):
-        return self._reply("audio", caption)
-
 
 def _make_uploader(uploader_module, calls):
     """Build an uploader wired to a fake client that records its calls."""
     calls_by_id = {}
+
+    def _sent(kind, caption, reply_parameters):
+        return FakeMessage(
+            kind,
+            caption=caption,
+            reply_to_message_id=reply_parameters.message_id,
+            registry=calls_by_id,
+        )
+
+    async def send_photo(chat_id, reply_parameters=None, caption=None, **_kwargs):
+        return _sent("photo", caption, reply_parameters)
+
+    async def send_video(chat_id, reply_parameters=None, caption=None, **_kwargs):
+        return _sent("video", caption, reply_parameters)
+
+    async def send_document(chat_id, reply_parameters=None, caption=None, **_kwargs):
+        return _sent("document", caption, reply_parameters)
+
+    async def send_audio(chat_id, reply_parameters=None, caption=None, **_kwargs):
+        return _sent("audio", caption, reply_parameters)
 
     async def send_media_group(chat_id, media, **kwargs):
         calls.append(("send_media_group", list(media)))
@@ -184,7 +194,12 @@ def _make_uploader(uploader_module, calls):
         return calls_by_id[message_ids]
 
     client = SimpleNamespace(
-        send_media_group=send_media_group, get_messages=get_messages
+        send_photo=send_photo,
+        send_video=send_video,
+        send_document=send_document,
+        send_audio=send_audio,
+        send_media_group=send_media_group,
+        get_messages=get_messages,
     )
     listener = SimpleNamespace(
         thumb="none",

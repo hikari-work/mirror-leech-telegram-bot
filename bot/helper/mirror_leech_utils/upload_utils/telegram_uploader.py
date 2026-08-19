@@ -22,6 +22,7 @@ from pyrogram.types import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    ReplyParameters,
 )
 from tenacity import (
     RetryError,
@@ -72,6 +73,11 @@ class _Attempt:
 
 
 class TelegramUploader:
+    # How wide the gap between two files is allowed to grow, and how many
+    # flood-free files it takes to start closing it again.
+    _MAX_PACE = 4.0
+    _CALM_FILES = 5
+
     def __init__(self, listener, path):
         self._last_uploaded = 0
         self._processed_bytes = 0
@@ -94,16 +100,60 @@ class TelegramUploader:
         self._error = ""
         self._base_msg = None
         self._files_links = False
+        self._pace = 0.0
+        self._calm = 0
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
-            if self._user_session:
-                TgClient.user.stop_transmission()
-            else:
-                self._listener.client.stop_transmission()
+            self._send_client.stop_transmission()
         chunk_size = current - self._last_uploaded
         self._last_uploaded = current
         self._processed_bytes += chunk_size
+
+    @property
+    def _send_client(self):
+        """The client that carries this file's bytes.
+
+        A plain task stays on one client the whole way; hybrid leech flips per
+        file on size, so this is read at every send rather than cached.
+        """
+        return TgClient.user if self._user_session else self._listener.client
+
+    def _reply_args(self):
+        """Where the next message goes: same chat and topic, under the anchor.
+
+        This is what ``Message.reply_*`` used to fill in from the message it was
+        bound to. Spelling it out means any client can send the reply, so the
+        anchor no longer has to be re-fetched through the client that happens to
+        need it next.
+        """
+        anchor = self._sent_msg
+        return {
+            "chat_id": anchor.chat.id,
+            "reply_parameters": ReplyParameters(message_id=anchor.id),
+            "message_thread_id": anchor.message_thread_id,
+        }
+
+    def _note_flood(self):
+        """Telegram complained, so widen the gap we leave between files."""
+        self._pace = min(self._MAX_PACE, self._pace * 2 or 0.5)
+        self._calm = 0
+
+    async def _pace_next_file(self):
+        """Wait between two files, but only as long as telegram asked for.
+
+        A flat second per file used to be paid unconditionally: invisible next
+        to one big upload, and pure overhead across a few hundred small ones. So
+        start with no gap and let a FloodWait be what introduces one, then let
+        it decay once telegram stops complaining.
+        """
+        if not self._pace:
+            return
+        await sleep(self._pace)
+        self._calm += 1
+        if self._calm >= self._CALM_FILES:
+            self._calm = 0
+            self._pace = self._pace / 2 if self._pace > 0.5 else 0.0
 
     async def _wait_flood(self, func, *args, **kwargs):
         """Run a telegram call, waiting out any flood limit instead of failing.
@@ -121,6 +171,7 @@ class TelegramUploader:
             except (FloodWait, FloodPremiumWait) as f:
                 name = getattr(func, "__name__", str(func))
                 LOGGER.warning(f"Rate limited on {name}: waiting {f.value}s. {f}")
+                self._note_flood()
                 await sleep(f.value * 1.3)
 
     async def _user_settings(self):
@@ -249,7 +300,8 @@ class TelegramUploader:
         for i in range(0, len(inputs), 10):
             batch = inputs[i : i + 10]
             sent = await self._wait_flood(
-                self._sent_msg.reply_media_group,
+                self._group_client.send_media_group,
+                **self._reply_args(),
                 media=batch,
                 disable_notification=True,
             )
@@ -336,16 +388,6 @@ class TelegramUploader:
                 self._msgs_dict[m.link] = m.caption
         await self._copy_group_to_clone_dumps(msgs_list[-1].chat.id, msgs_list[-1].id)
         self._sent_msg = msgs_list[-1]
-        if self._listener.hybrid_leech and self._user_session:
-            # the album was sent by the bot client, rebind so the next reply
-            # keeps using the session the current file needs
-            rebound = await self._wait_flood(
-                TgClient.user.get_messages,
-                chat_id=self._sent_msg.chat.id,
-                message_ids=self._sent_msg.id,
-            )
-            if rebound is not None:
-                self._sent_msg = rebound
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
@@ -424,19 +466,9 @@ class TelegramUploader:
                                     if len(msgs) > 1:
                                         await self._send_media_group(subkey, key, msgs)
                     if self._listener.hybrid_leech and self._listener.user_transmission:
+                        # only picks the client for this file; the anchor is
+                        # addressed by id, so nothing has to be re-fetched
                         self._user_session = f_size > 2097152000
-                        if self._user_session:
-                            self._sent_msg = await self._wait_flood(
-                                TgClient.user.get_messages,
-                                chat_id=self._sent_msg.chat.id,
-                                message_ids=self._sent_msg.id,
-                            )
-                        else:
-                            self._sent_msg = await self._wait_flood(
-                                self._listener.client.get_messages,
-                                chat_id=self._sent_msg.chat.id,
-                                message_ids=self._sent_msg.id,
-                            )
                     self._last_msg_in_group = False
                     self._last_uploaded = 0
                     await self._upload_file(cap_mono, file_, f_path)
@@ -448,7 +480,7 @@ class TelegramUploader:
                         and not self._is_private
                     ):
                         self._msgs_dict[self._sent_msg.link] = file_
-                    await sleep(1)
+                    await self._pace_next_file()
                 except Exception as err:
                     if isinstance(err, RetryError):
                         LOGGER.info(
@@ -548,7 +580,8 @@ class TelegramUploader:
         if attempt.thumb == "none":
             attempt.thumb = None
         await self._send_album()
-        self._sent_msg = await self._sent_msg.reply_document(
+        self._sent_msg = await self._send_client.send_document(
+            **self._reply_args(),
             document=self._up_path,
             thumb=attempt.thumb,
             caption=cap_mono,
@@ -578,7 +611,8 @@ class TelegramUploader:
             return False
         if attempt.thumb == "none":
             attempt.thumb = None
-        self._sent_msg = await self._sent_msg.reply_video(
+        self._sent_msg = await self._send_client.send_video(
+            **self._reply_args(),
             video=self._up_path,
             caption=cap_mono,
             duration=duration,
@@ -598,7 +632,8 @@ class TelegramUploader:
         if attempt.thumb == "none":
             attempt.thumb = None
         await self._send_album()
-        self._sent_msg = await self._sent_msg.reply_audio(
+        self._sent_msg = await self._send_client.send_audio(
+            **self._reply_args(),
             audio=self._up_path,
             caption=cap_mono,
             duration=duration,
@@ -613,7 +648,8 @@ class TelegramUploader:
     async def _send_as_photo(self, cap_mono, attempt):
         if self._listener.is_cancelled:
             return False
-        self._sent_msg = await self._sent_msg.reply_photo(
+        self._sent_msg = await self._send_client.send_photo(
+            **self._reply_args(),
             photo=self._up_path,
             caption=cap_mono,
             disable_notification=True,
@@ -711,6 +747,7 @@ class TelegramUploader:
                     )
                 except (FloodWait, FloodPremiumWait) as f:
                     LOGGER.warning(str(f))
+                    self._note_flood()
                     await sleep(f.value * 1.3)
                     raise
         except (FloodWait, FloodPremiumWait):
@@ -792,18 +829,6 @@ class TelegramUploader:
                                 )
             if self._listener.hybrid_leech and self._listener.user_transmission:
                 self._user_session = f_size > 2097152000
-                if self._user_session:
-                    self._sent_msg = await self._wait_flood(
-                        TgClient.user.get_messages,
-                        chat_id=self._sent_msg.chat.id,
-                        message_ids=self._sent_msg.id,
-                    )
-                else:
-                    self._sent_msg = await self._wait_flood(
-                        self._listener.client.get_messages,
-                        chat_id=self._sent_msg.chat.id,
-                        message_ids=self._sent_msg.id,
-                    )
             self._last_msg_in_group = False
             self._last_uploaded = 0
             await self._upload_file(cap_mono, file_, f_path)
@@ -815,7 +840,7 @@ class TelegramUploader:
                 and not self._is_private
             ):
                 self._msgs_dict[self._sent_msg.link] = file_
-            await sleep(1)
+            await self._pace_next_file()
         except Exception as err:
             if isinstance(err, RetryError):
                 LOGGER.info(

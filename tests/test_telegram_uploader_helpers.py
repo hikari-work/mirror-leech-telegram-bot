@@ -35,6 +35,11 @@ class _InputMedia:
         self.caption = caption
 
 
+class _ReplyParameters:
+    def __init__(self, message_id=None, **kwargs):
+        self.message_id = message_id
+
+
 class _Err(Exception):
     pass
 
@@ -85,6 +90,7 @@ def uploader_module(monkeypatch):
             InputMediaVideo=type("InputMediaVideo", (_InputMedia,), {}),
             InputMediaDocument=type("InputMediaDocument", (_InputMedia,), {}),
             InputMediaPhoto=type("InputMediaPhoto", (_InputMedia,), {}),
+            ReplyParameters=_ReplyParameters,
         ),
         "bot": _stub("bot", intervals={"stopAll": False}),
         "bot.core": _pkg("bot.core"),
@@ -140,6 +146,7 @@ class FakeMessage:
         self.id = FakeMessage._next_id
         self.chat = SimpleNamespace(id=-1001, type=SimpleNamespace(name="CHANNEL"))
         self.caption = caption
+        self.message_thread_id = None
         self.link = f"https://t.me/c/1001/{self.id}"
         self.photo = (
             SimpleNamespace(file_id=f"photo{self.id}") if kind == "photo" else None
@@ -422,3 +429,107 @@ async def test_cancelled_task_tracks_nothing(uploader_module):
 
     assert uploader._album_msgs == []
     assert attempt.key is None
+
+
+# --- inter-file pacing -----------------------------------------------------
+
+
+def _record_sleeps(uploader_module, monkeypatch):
+    slept = []
+    monkeypatch.setattr(
+        uploader_module, "sleep", AsyncMock(side_effect=lambda d: slept.append(d))
+    )
+    return slept
+
+
+@pytest.mark.asyncio
+async def test_files_follow_each_other_with_no_gap_by_default(
+    uploader_module, monkeypatch
+):
+    uploader = _make_uploader(uploader_module)
+    slept = _record_sleeps(uploader_module, monkeypatch)
+
+    for _ in range(3):
+        await uploader._pace_next_file()
+
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_each_flood_widens_the_gap(uploader_module, monkeypatch):
+    uploader = _make_uploader(uploader_module)
+    slept = _record_sleeps(uploader_module, monkeypatch)
+
+    uploader._note_flood()
+    await uploader._pace_next_file()
+    uploader._note_flood()
+    await uploader._pace_next_file()
+
+    assert slept == [0.5, 1.0]
+
+
+def test_the_gap_never_grows_past_the_cap(uploader_module):
+    uploader = _make_uploader(uploader_module)
+    for _ in range(20):
+        uploader._note_flood()
+    assert uploader._pace == uploader._MAX_PACE
+
+
+@pytest.mark.asyncio
+async def test_the_gap_decays_once_the_floods_stop(uploader_module, monkeypatch):
+    uploader = _make_uploader(uploader_module)
+    slept = _record_sleeps(uploader_module, monkeypatch)
+    uploader._note_flood()
+
+    for _ in range(uploader._CALM_FILES):
+        await uploader._pace_next_file()
+    assert uploader._pace == 0
+    assert slept == [0.5] * uploader._CALM_FILES
+
+    await uploader._pace_next_file()
+    assert len(slept) == uploader._CALM_FILES, "gap should be gone, not slept again"
+
+
+@pytest.mark.asyncio
+async def test_a_flood_on_any_call_widens_the_gap(uploader_module, monkeypatch):
+    uploader = _make_uploader(uploader_module)
+    _record_sleeps(uploader_module, monkeypatch)
+    flood = uploader_module.FloodWait()
+    flood.value = 2
+    attempts = []
+
+    async def flaky():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise flood
+        return "ok"
+
+    assert await uploader._wait_flood(flaky) == "ok"
+    assert uploader._pace == 0.5
+
+
+# --- reply target and client routing ---------------------------------------
+
+
+def test_send_client_follows_the_hybrid_size_switch(uploader_module):
+    """Hybrid leech flips client per file, which is why the anchor is addressed
+    by id instead of being re-fetched through whichever client needs it next."""
+    uploader = _make_uploader(uploader_module)
+    tg_client = sys.modules["bot.core.telegram_manager"].TgClient
+
+    uploader._user_session = False
+    assert uploader._send_client is uploader._listener.client
+    uploader._user_session = True
+    assert uploader._send_client is tg_client.user
+
+
+def test_reply_args_target_the_anchor_chat_and_topic(uploader_module):
+    uploader = _make_uploader(uploader_module)
+    uploader._sent_msg.message_thread_id = 77
+
+    args = uploader._reply_args()
+
+    assert args["chat_id"] == uploader._sent_msg.chat.id
+    assert args["message_thread_id"] == 77
+    assert args["reply_parameters"].message_id == uploader._sent_msg.id
+

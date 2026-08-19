@@ -1,11 +1,12 @@
 from PIL import Image
-from aiofiles.os import remove, path as aiopath, makedirs
+from aiofiles.os import remove, path as aiopath, makedirs, stat as aiostat
 from asyncio import (
     create_subprocess_exec,
     gather,
     wait_for,
 )
 from asyncio.subprocess import PIPE
+from collections import OrderedDict
 from json import loads as json_loads
 from os import path as ospath
 from re import search as re_search, escape
@@ -36,20 +37,49 @@ def ffconcat_escape(path):
     return path.replace("'", r"'\''")
 
 
+# Two questions get asked about nearly every file: get_document_type() wants
+# its streams, get_media_info() wants its format. Each used to spawn its own
+# ffprobe, back to back on the same file, for every single upload. Ask for both
+# at once and keep the answer, keyed on size and mtime so a file that ffmpeg
+# rewrote gets probed again.
+_PROBE_CACHE = OrderedDict()
+_PROBE_CACHE_LIMIT = 32
+
+
+async def _ffprobe(path):
+    """Return ``(stdout, stderr, returncode)`` of one format+streams probe."""
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        path,
+    ]
+    try:
+        stat = await aiostat(path)
+    except OSError:
+        # nothing to key a cache entry on, and ffprobe is about to fail anyway
+        return await cmd_exec(cmd)
+    key = (stat.st_size, stat.st_mtime_ns)
+    cached = _PROBE_CACHE.get(path)
+    if cached is not None and cached[0] == key:
+        _PROBE_CACHE.move_to_end(path)
+        return cached[1]
+    result = await cmd_exec(cmd)
+    _PROBE_CACHE[path] = (key, result)
+    _PROBE_CACHE.move_to_end(path)
+    while len(_PROBE_CACHE) > _PROBE_CACHE_LIMIT:
+        _PROBE_CACHE.popitem(last=False)
+    return result
+
+
 async def get_media_info(path):
     try:
-        result = await cmd_exec(
-            [
-                "ffprobe",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-print_format",
-                "json",
-                "-show_format",
-                path,
-            ]
-        )
+        result = await _ffprobe(path)
     except Exception as e:
         LOGGER.error(f"Get Media Info: {e}. Mostly File not found! - File: {path}")
         return 0, None, None
@@ -78,18 +108,7 @@ async def get_document_type(path):
     if mime_type.startswith("image"):
         return False, False, True
     try:
-        result = await cmd_exec(
-            [
-                "ffprobe",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-print_format",
-                "json",
-                "-show_streams",
-                path,
-            ]
-        )
+        result = await _ffprobe(path)
         if result[1] and mime_type.startswith("video"):
             is_video = True
     except Exception as e:
