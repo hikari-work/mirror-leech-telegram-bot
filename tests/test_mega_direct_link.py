@@ -134,14 +134,37 @@ def test_parses_file_link(mega_module):
     assert parsed == {"mega": {"kind": "file", "handle": "XyZ98765", "key": FILE_KEY}}
 
 
-def test_drops_in_share_target_suffix(mega_module):
-    """A link pointing inside a share carries "/file/<h>" in the fragment,
-    after the key; the whole share is listed either way."""
+def test_keeps_in_share_file_target(mega_module):
+    """A link pointing inside a share carries "/file/<h>" in the fragment after
+    the key; only the root has a share key, so the inner handle is kept as a
+    target to filter the root listing with."""
     parsed = mega_module.mega(
         f"https://mega.nz/folder/AbCd1234#{FOLDER_KEY}/file/InNeR999"
     )
     assert parsed["mega"]["key"] == FOLDER_KEY
     assert parsed["mega"]["handle"] == "AbCd1234"
+    assert parsed["mega"]["target"] == "InNeR999"
+    assert parsed["mega"]["target_kind"] == "file"
+
+
+def test_keeps_in_share_folder_target(mega_module):
+    """The reported case: a subfolder link must not fan out to the whole share."""
+    parsed = mega_module.mega(
+        f"https://mega.nz/folder/AbCd1234#{FOLDER_KEY}/folder/SuB12345"
+    )
+    assert parsed["mega"]["key"] == FOLDER_KEY
+    assert parsed["mega"]["handle"] == "AbCd1234"
+    assert parsed["mega"]["target"] == "SuB12345"
+    assert parsed["mega"]["target_kind"] == "folder"
+
+
+def test_deepest_in_share_target_wins(mega_module):
+    """Mega nests the selectors; the last one is the node actually opened."""
+    parsed = mega_module.mega(
+        f"https://mega.nz/folder/AbCd1234#{FOLDER_KEY}/folder/SuB12345/file/InNeR999"
+    )
+    assert parsed["mega"]["target"] == "InNeR999"
+    assert parsed["mega"]["target_kind"] == "file"
 
 
 def test_parses_legacy_folder_link(mega_module):

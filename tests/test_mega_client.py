@@ -252,6 +252,116 @@ async def test_list_folder_raises_when_no_files(mc, monkeypatch):
         await mc.list_folder(session, "F1", "k")
 
 
+# list_folder — in-share target filtering
+#
+# Shape of the share used below: ROOT holds VIDS and IMAGES side by side, and
+# VIDS holds a nested SEASON1. Only ROOT has a share key, so a link to VIDS is
+# served as the whole tree plus a target handle.
+
+def _share_body():
+    return {
+        "success": True,
+        "name": "MyShare",
+        "folders": [
+            {"h": "ROOT", "t": 1, "name": "MyShare", "parent": "OUT",
+             "is_folder": True},
+            {"h": "VIDS", "t": 1, "name": "VIDS", "parent": "ROOT",
+             "is_folder": True},
+            {"h": "S1", "t": 1, "name": "SEASON1", "parent": "VIDS",
+             "is_folder": True},
+            {"h": "IMGS", "t": 1, "name": "IMAGES", "parent": "ROOT",
+             "is_folder": True},
+        ],
+        "files": [
+            {"h": "V1", "t": 0, "s": 100, "name": "v1.mp4", "parent": "VIDS",
+             "path": "VIDS", "key_b64": "A" * 43, "is_folder": False},
+            {"h": "V2", "t": 0, "s": 200, "name": "v2.mp4", "parent": "S1",
+             "path": "VIDS/SEASON1", "key_b64": "B" * 43, "is_folder": False},
+            {"h": "I1", "t": 0, "s": 300, "name": "i1.jpg", "parent": "IMGS",
+             "path": "IMAGES", "key_b64": "C" * 43, "is_folder": False},
+            {"h": "R1", "t": 0, "s": 400, "name": "readme.txt",
+             "parent": "ROOT", "path": "", "key_b64": "D" * 43,
+             "is_folder": False},
+        ],
+        "raw_node_count": 8, "error": "", "timestamp": 0,
+    }
+
+
+async def test_list_folder_without_target_returns_whole_share(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    result = await mc.list_folder(_Session(_share_body()), "ROOT", "k")
+
+    assert result["name"] == "MyShare"
+    assert {f["handle"] for f in result["files"]} == {"V1", "V2", "I1", "R1"}
+
+
+async def test_list_folder_target_keeps_only_that_subtree(mc, monkeypatch):
+    """The reported bug: a /folder/<h> link resolved the whole share."""
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    result = await mc.list_folder(
+        _Session(_share_body()), "ROOT", "k", "VIDS", "folder"
+    )
+
+    # IMAGES and the root-level file are siblings, not descendants — excluded.
+    assert {f["handle"] for f in result["files"]} == {"V1", "V2"}
+    # Name and paths are re-rooted at the subfolder, so the task is named after
+    # it and nothing lands under a stray "VIDS/" directory.
+    assert result["name"] == "VIDS"
+    by_handle = {f["handle"]: f for f in result["files"]}
+    assert by_handle["V1"]["path"] == ""
+    assert by_handle["V2"]["path"] == "SEASON1"
+
+
+async def test_list_folder_target_can_be_a_nested_folder(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    result = await mc.list_folder(
+        _Session(_share_body()), "ROOT", "k", "S1", "folder"
+    )
+
+    assert [f["handle"] for f in result["files"]] == ["V2"]
+    assert result["files"][0]["path"] == ""
+    assert result["name"] == "SEASON1"
+
+
+async def test_list_folder_target_file_returns_single_file(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    result = await mc.list_folder(
+        _Session(_share_body()), "ROOT", "k", "V2", "file"
+    )
+
+    assert [f["handle"] for f in result["files"]] == ["V2"]
+    # Empty path marks it as a single file, so it is not nested under a folder.
+    assert result["files"][0]["path"] == ""
+    assert result["name"] == "v2.mp4"
+
+
+async def test_list_folder_raises_when_target_is_empty(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    with pytest.raises(ValueError, match="subfolder IMGS"):
+        await mc.list_folder(
+            _Session({**_share_body(), "files": []}), "ROOT", "k", "IMGS",
+            "folder",
+        )
+
+
+async def test_list_folder_raises_when_target_file_is_absent(mc, monkeypatch):
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    with pytest.raises(ValueError, match="not in this Mega folder"):
+        await mc.list_folder(_Session(_share_body()), "ROOT", "k", "NOPE", "file")
+
+
+async def test_list_folder_target_survives_missing_folder_array(mc, monkeypatch):
+    """Older gateway builds mixed folders into "files" behind is_folder."""
+    monkeypatch.setattr(mc, "sleep", _no_sleep)
+    body = _share_body()
+    body["files"] = [*body["folders"], *body["files"]]
+    body["folders"] = []
+    result = await mc.list_folder(_Session(body), "ROOT", "k", "VIDS", "folder")
+
+    assert {f["handle"] for f in result["files"]} == {"V1", "V2"}
+    assert result["name"] == "VIDS"
+
+
 # file_cdn
 
 async def test_file_cdn_returns_url_and_size(mc, monkeypatch):

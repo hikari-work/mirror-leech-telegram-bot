@@ -94,6 +94,26 @@ def _safe_name(name, fallback):
     return cleaned or fallback
 
 
+def _path_within(folders, parent, target):
+    """``parent``'s path relative to ``target``, or None if not under it.
+
+    The gateway's own "path" field is relative to the share root, so it cannot
+    answer "is this node inside subfolder X?" - walking the parent chain can,
+    and it rebuilds the path re-rooted at the subfolder while it is at it.
+    """
+    segments = []
+    node = parent
+    for _ in range(len(folders) + 1):  # bounded: a parent cycle would hang
+        if node == target:
+            return "/".join(reversed(segments))
+        folder = folders.get(node)
+        if not folder:
+            return None  # chain left the share without passing through target
+        segments.append(_safe_name(folder.get("name"), node))
+        node = folder.get("parent") or ""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Gateway HTTP helper
 # ---------------------------------------------------------------------------
@@ -269,8 +289,13 @@ async def resolve_link(session, kind, handle, key):
     }
 
 
-async def list_folder(session, handle, key):
+async def list_folder(session, handle, key, target="", target_kind=""):
     """List a folder share via the gateway's /list endpoint.
+
+    ``target`` narrows the result to one node inside the share - the subfolder
+    or file a "#<key>/folder/<h>" link was pointing at. Mega only issues a
+    handle+key pair for the share root, so the gateway can only ever list the
+    whole tree; the narrowing is a filter over that listing, done here.
 
     Returns ``{"name": str, "files": [{handle,name,path,size,key_b64}, ...]}``.
     """
@@ -278,22 +303,63 @@ async def list_folder(session, handle, key):
         session, "/list", {"folder": handle, "key": key}, "listing the folder"
     )
 
+    nodes = body.get("files") or []
+
+    # Folder nodes arrive in their own array, but older gateway builds mixed
+    # them into "files" behind an is_folder flag - accept both.
+    folders = {
+        node["h"]: node
+        for node in [*(body.get("folders") or []), *nodes]
+        if node.get("h") and node.get("is_folder")
+    }
+
+    if target and target_kind == "file":
+        files = [
+            {
+                "handle": node["h"],
+                "name": _safe_name(node.get("name"), node["h"]),
+                "path": "",
+                "size": int(node.get("s") or 0),
+                "key_b64": node.get("key_b64") or "",
+            }
+            for node in nodes
+            if not node.get("is_folder") and node.get("h") == target
+        ]
+        if not files:
+            raise ValueError(f"file {target} is not in this Mega folder")
+        return {"name": files[0]["name"], "files": files}
+
     files = []
-    for node in body.get("files") or []:
+    for node in nodes:
         if node.get("is_folder"):
             continue
+        if target:
+            path = _path_within(folders, node.get("parent") or "", target)
+            if path is None:
+                continue  # outside the requested subfolder
+        else:
+            path = node.get("path") or ""
         files.append({
             "handle": node["h"],
             "name": _safe_name(node.get("name"), node["h"]),
-            "path": node.get("path") or "",
+            "path": path,
             "size": int(node.get("s") or 0),
             "key_b64": node.get("key_b64") or "",
         })
 
     if not files:
+        if target:
+            raise ValueError(
+                f"no downloadable files found in subfolder {target} "
+                "of this Mega folder"
+            )
         raise ValueError("no downloadable files found in this Mega folder")
 
-    return {"name": _safe_name(body.get("name"), handle), "files": files}
+    name = body.get("name")
+    if target and target in folders:
+        name = folders[target].get("name")
+
+    return {"name": _safe_name(name, target or handle), "files": files}
 
 
 async def file_cdn(session, folder_handle, file_handle):

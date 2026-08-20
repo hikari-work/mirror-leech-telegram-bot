@@ -282,8 +282,16 @@ class MegaDownloadHelper:
             resolved = await resolve_link(session, kind, handle, key)
             return resolved["files"], resolved["name"], None
 
-        # folder: use /list for the full listing (resolve gives partial data)
-        listing = await list_folder(session, handle, key)
+        # folder: use /list for the full listing (resolve gives partial data).
+        # `target` narrows it to the subfolder/file the link pointed at; the
+        # root handle still drives /download, since only it has a share key.
+        listing = await list_folder(
+            session,
+            handle,
+            key,
+            link.get("target", ""),
+            link.get("target_kind", ""),
+        )
         return listing["files"], listing["name"], handle
 
     async def add_download(self, path):
