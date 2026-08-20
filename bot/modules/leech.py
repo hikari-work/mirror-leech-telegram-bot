@@ -35,6 +35,9 @@ from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torr
 from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
+from ..helper.mirror_leech_utils.download_utils.vidara_download import (
+    add_vidara_download,
+)
 from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
     add_ytdlp_download,
 )
@@ -309,6 +312,8 @@ class Leech(TaskListener):
                 await add_mega_download(self, path)
             elif self.link.get("pornhub"):
                 await add_pornhub_download(self, path)
+            elif self.link.get("vidara"):
+                await add_vidara_download(self, path)
             else:
                 await add_direct_download(self, path)
         elif self.is_qbit:

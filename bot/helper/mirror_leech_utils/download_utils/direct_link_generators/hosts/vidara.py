@@ -18,6 +18,10 @@ from ..registry import register
 VIDARA_HOST = "vidara.to"
 VIDARA_ATTEMPTS = 3
 VIDARA_MAX_RETRY_DELAY = 30
+# A folder page can nest folders. Both caps exist so one link cannot walk the
+# whole host: whatever they drop is logged rather than passed off as the folder.
+VIDARA_FOLDER_MAX_DEPTH = 3
+VIDARA_FOLDER_MAX_VIDEOS = 500
 VIDARA_DOMAINS = (
     "vidara.to",
     "vidara.me",
@@ -77,15 +81,41 @@ def vidara_sanitize_url(url):
     return parsed._replace(netloc=VIDARA_HOST).geturl()
 
 
+def vidara_folder_code(url):
+    """The code from a ``/f/<code>`` folder page, or "" when the URL is not one.
+
+    Vidara serves videos at /e/ and /v/ and folders at /f/, and the stream API
+    only takes the first two -- which is why a folder link came back as "no file
+    code found" instead of the nine videos the page lists."""
+    if not isinstance(url, str):
+        return ""
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(parts) >= 2 and parts[0].lower() == "f":
+        return parts[1]
+    return ""
+
+
+def is_vidara_folder_link(url):
+    """A Vidara folder page, as opposed to a single video."""
+    return bool(is_vidara_link(url) and vidara_folder_code(url))
+
+
+def vidara_gateway(endpoint=""):
+    """(url, headers) for a Vidara endpoint on the gateway."""
+    base = (
+        getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me"
+    ).rstrip("/")
+    headers = {"accept": "application/json"}
+    if token := getattr(Config, "GATEWAY_TOKEN", ""):
+        headers["Authorization"] = f"Bearer {token}"
+    return f"{base}/api/v1/scrape/vidara{endpoint}", headers
+
+
 def vidara_scrape(session, target, probe=False):
     """Return (response, reason, retryable, retry_after). A gateway hiccup or a
     rate limit is worth another attempt, a removed video is not; retry_after is
     the gateway's own hint when it sent one."""
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    vidara_api = f"{gateway_base}/api/v1/scrape/vidara"
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
+    vidara_api, headers = vidara_gateway()
     params = {"q": target}
     if probe:
         params["probe"] = "true"
@@ -153,6 +183,209 @@ def vidara_stem(response):
     return title
 
 
+def vidara_safe_name(name, fallback):
+    """One path component, never a path: a title decides a file name, not where
+    the file lands."""
+    name = (name or "").strip().replace("\\", "/")
+    name = ospath.basename(name).strip().strip(".")
+    return name or fallback
+
+
+def vidara_folder_scrape(session, target):
+    """Return (response, reason, retryable, retry_after) for one folder page.
+
+    ``resolve`` is left off deliberately. The gateway can resolve every video in
+    the listing for us, but the streams it mints are IP-bound and expiring, and
+    the ones at the end of a long folder would be stale by the time the download
+    reached them -- so the listing is fetched here and each video is resolved
+    when its turn comes.
+    """
+    folder_api, headers = vidara_gateway("/folder")
+    try:
+        resp = session.get(
+            folder_api,
+            params={"q": target, "resolve": "false"},
+            headers=headers,
+            timeout=90,
+        )
+    except Exception as e:
+        return None, e.__class__.__name__, True, None
+
+    resp_headers = getattr(resp, "headers", None)
+    retry_after = resp_headers.get("Retry-After") if resp_headers else None
+    retryable = vidara_retryable_status(resp.status_code)
+
+    try:
+        response = resp.json()
+    except Exception:
+        return (
+            None,
+            f"HTTP {resp.status_code} (non-JSON response)",
+            retryable,
+            retry_after,
+        )
+
+    if not response.get("success"):
+        reason = response.get("error") or f"HTTP {resp.status_code}"
+        return None, reason, retryable or vidara_rate_limited(reason), retry_after
+    return response, None, False, None
+
+
+def vidara_folder_fetch(session, url):
+    """One folder listing, retried on the answers worth retrying.
+
+    Same classification the single-video path uses: a 429 a bulk provoked is
+    another attempt, a folder that no longer exists is not.
+    """
+    reason = "unknown error"
+    for attempt in range(1, VIDARA_ATTEMPTS + 1):
+        response, reason, retryable, retry_after = vidara_folder_scrape(session, url)
+        if response:
+            return response
+        LOGGER.info(f"Vidara: folder {url} rejected by the API ({reason})")
+        if not retryable or attempt == VIDARA_ATTEMPTS:
+            break
+        delay = vidara_retry_delay(attempt, retry_after)
+        LOGGER.info(
+            f"Vidara: {reason}, retrying folder in {delay:.1f}s "
+            f"[{attempt}/{VIDARA_ATTEMPTS}]"
+        )
+        sleep(delay)
+    raise DirectDownloadLinkException(f"ERROR: {reason}")
+
+
+def vidara_folder_videos(response, subpath, taken):
+    """The videos of one listing, as download entries.
+
+    ``name`` is the stem: yt-dlp appends the container it muxed the HLS into, so
+    a title handed over whole would land as "clip.mp4.mp4". Two videos in a
+    folder can carry the same title, so a repeat takes its file code as a
+    suffix -- otherwise the second one overwrites the first.
+    """
+    entries = []
+    for video in response.get("videos") or []:
+        if not isinstance(video, dict):
+            continue
+        code = (video.get("file_code") or "").strip()
+        page_url = (video.get("page_url") or video.get("embed_url") or "").strip()
+        if not (code or page_url):
+            LOGGER.info("Vidara: skipping a folder entry with no file code")
+            continue
+        stem = ospath.splitext(
+            vidara_safe_name(
+                video.get("filename") or video.get("title"), code or "vidara"
+            )
+        )[0]
+        if (subpath, stem.lower()) in taken:
+            stem = f"{stem} {code}" if code else f"{stem} {len(taken)}"
+        taken.add((subpath, stem.lower()))
+        entries.append(
+            {
+                "name": stem,
+                "url": page_url or code,
+                "code": code,
+                "subpath": subpath,
+                "duration": video.get("duration_seconds") or 0,
+            }
+        )
+    return entries
+
+
+def vidara_folder_children(response, subpath, depth, visited):
+    """The subfolders of one listing, as ``(url, subpath, depth)`` to walk next.
+
+    ``visited`` holds the codes already queued, so a folder that links back to
+    one of its ancestors cannot send the walk round in circles.
+    """
+    children = []
+    for sub in response.get("subfolders") or []:
+        if not isinstance(sub, dict):
+            continue
+        code = (sub.get("code") or "").strip()
+        sub_url = (sub.get("url") or "").strip() or code
+        if not sub_url or (code and code.lower() in visited):
+            continue
+        if code:
+            visited.add(code.lower())
+        name = vidara_safe_name(sub.get("name"), code or "folder")
+        children.append(
+            (sub_url, f"{subpath}/{name}" if subpath else name, depth + 1)
+        )
+    return children
+
+
+def vidara_folder_list(url):
+    """List every video in a Vidara folder page, its subfolders included.
+
+    Returns the descriptor ``vidara_download`` consumes -- the listing only, one
+    entry per video, each still a page URL rather than a stream.
+    """
+    root = vidara_sanitize_url(url)
+    title = ""
+    folder_url = root
+    videos = []
+    taken = set()
+    visited = {vidara_folder_code(root).lower()}
+    dropped = 0
+    skipped_folders = 0
+
+    with Session() as session:
+        pending = [(root, "", 0)]
+        while pending:
+            page, subpath, depth = pending.pop(0)
+            try:
+                response = vidara_folder_fetch(session, page)
+            except DirectDownloadLinkException:
+                # the folder the user asked for has to fail the task; a
+                # subfolder inside it only costs its own videos
+                if depth == 0:
+                    raise
+                LOGGER.error(f"Vidara: skipping subfolder {page}")
+                skipped_folders += 1
+                continue
+
+            if depth == 0:
+                title = vidara_safe_name(
+                    response.get("name"),
+                    vidara_folder_code(root) or "vidara",
+                )
+                folder_url = response.get("folder_url") or root
+
+            entries = vidara_folder_videos(response, subpath, taken)
+            room = max(0, VIDARA_FOLDER_MAX_VIDEOS - len(videos))
+            dropped += max(0, len(entries) - room)
+            videos.extend(entries[:room])
+
+            children = vidara_folder_children(response, subpath, depth, visited)
+            room_left = len(videos) < VIDARA_FOLDER_MAX_VIDEOS
+            if depth < VIDARA_FOLDER_MAX_DEPTH and room_left:
+                pending.extend(children)
+            else:
+                skipped_folders += len(children)
+
+    if not videos:
+        raise DirectDownloadLinkException(
+            f"ERROR: no videos in this Vidara folder ({folder_url})"
+        )
+    if dropped or skipped_folders:
+        # a cap that trims a folder silently reads as "that was all of it"
+        LOGGER.info(
+            f"Vidara: folder {title} lists {len(videos)} videos; left out "
+            f"{dropped} video(s) and {skipped_folders} subfolder(s) "
+            f"(caps: depth {VIDARA_FOLDER_MAX_DEPTH}, "
+            f"{VIDARA_FOLDER_MAX_VIDEOS} videos per link)"
+        )
+    else:
+        LOGGER.info(f"Vidara: folder {title} lists {len(videos)} videos")
+
+    return {
+        "vidara": True,
+        "title": title,
+        "folder_url": folder_url,
+        "videos": videos,
+    }
+
+
 def vidara_resolve(url, name=""):
     """Resolve a Vidara page to its HLS master playlist for yt-dlp.
     Returns (name, link, headers) for HLS streaming."""
@@ -194,7 +427,12 @@ def vidara_resolve(url, name=""):
 @register(predicate=is_vidara_link, order=37)
 def vidara(url):
     """Main Vidara handler that returns HLS stream information for yt-dlp."""
-    
+
+    # a /f/ page is a listing, not a video: the stream API only takes a file
+    # code, so a folder link has to be expanded before anything can be resolved
+    if vidara_folder_code(url):
+        return vidara_folder_list(url)
+
     max_attempts = VIDARA_ATTEMPTS
 
     def __build_header(download_info):
