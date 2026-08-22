@@ -161,7 +161,7 @@ class TelegramUploader:
         Telegram answers with FloodWait on almost any call once the account is
         rate limited, including the very first message of an upload. Those are
         transient, so wait the requested time and try again rather than killing
-        the task. Returns None if the task gets cancelled while waiting.
+        the task. Returns None if the task gets canceled while waiting.
         """
         while True:
             if self._listener.is_cancelled:
@@ -220,7 +220,7 @@ class TelegramUploader:
                     if self._sent_msg is not None:
                         self._is_private = self._sent_msg.chat.type.name == "PRIVATE"
                 if self._sent_msg is None:
-                    # only reachable when the task was cancelled mid wait
+                    # only reachable when the task was canceled mid wait
                     return False
             except Exception as e:
                 await self._listener.on_upload_error(str(e))
@@ -438,7 +438,7 @@ class TelegramUploader:
         Cancellation is reported through ``self._listener.is_cancelled`` instead
         of a return value: every caller has to consult it anyway to decide
         whether to abandon the rest of the batch. A file that is skipped -- zero
-        size, cancelled, or cancelled after an error -- is left on disk, which is
+        size, canceled, or canceled after an error -- is left on disk, which is
         what both callers did before this was one method.
         """
         try:
