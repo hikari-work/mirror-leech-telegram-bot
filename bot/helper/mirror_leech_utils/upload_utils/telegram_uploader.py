@@ -45,6 +45,7 @@ from ...ext_utils.media_utils import (
     get_video_thumbnail,
 )
 from ...telegram_helper.message_utils import delete_message
+from .flood_pacer import FLOOD_SLACK, FloodPacer
 
 LOGGER = getLogger(__name__)
 
@@ -73,11 +74,6 @@ class _Attempt:
 
 
 class TelegramUploader:
-    # How wide the gap between two files is allowed to grow, and how many
-    # flood-free files it takes to start closing it again.
-    _MAX_PACE = 4.0
-    _CALM_FILES = 5
-
     def __init__(self, listener, path):
         self._last_uploaded = 0
         self._processed_bytes = 0
@@ -100,8 +96,7 @@ class TelegramUploader:
         self._error = ""
         self._base_msg = None
         self._files_links = False
-        self._pace = 0.0
-        self._calm = 0
+        self._pacer = FloodPacer(lambda: self._listener.is_cancelled)
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -134,46 +129,6 @@ class TelegramUploader:
             "message_thread_id": anchor.message_thread_id,
         }
 
-    def _note_flood(self):
-        """Telegram complained, so widen the gap we leave between files."""
-        self._pace = min(self._MAX_PACE, self._pace * 2 or 0.5)
-        self._calm = 0
-
-    async def _pace_next_file(self):
-        """Wait between two files, but only as long as telegram asked for.
-
-        A flat second per file used to be paid unconditionally: invisible next
-        to one big upload, and pure overhead across a few hundred small ones. So
-        start with no gap and let a FloodWait be what introduces one, then let
-        it decay once telegram stops complaining.
-        """
-        if not self._pace:
-            return
-        await sleep(self._pace)
-        self._calm += 1
-        if self._calm >= self._CALM_FILES:
-            self._calm = 0
-            self._pace = self._pace / 2 if self._pace > 0.5 else 0.0
-
-    async def _wait_flood(self, func, *args, **kwargs):
-        """Run a telegram call, waiting out any flood limit instead of failing.
-
-        Telegram answers with FloodWait on almost any call once the account is
-        rate limited, including the very first message of an upload. Those are
-        transient, so wait the requested time and try again rather than killing
-        the task. Returns None if the task gets canceled while waiting.
-        """
-        while True:
-            if self._listener.is_cancelled:
-                return None
-            try:
-                return await func(*args, **kwargs)
-            except (FloodWait, FloodPremiumWait) as f:
-                name = getattr(func, "__name__", str(func))
-                LOGGER.warning(f"Rate limited on {name}: waiting {f.value}s. {f}")
-                self._note_flood()
-                await sleep(f.value * 1.3)
-
     async def _user_settings(self):
         self._media_group = self._listener.user_dict.get("MEDIA_GROUP", False) or (
             Config.MEDIA_GROUP
@@ -202,7 +157,7 @@ class TelegramUploader:
             )
             try:
                 if self._user_session:
-                    self._sent_msg = await self._wait_flood(
+                    self._sent_msg = await self._pacer.guard(
                         TgClient.user.send_message,
                         chat_id=self._listener.up_dest,
                         text=msg,
@@ -210,7 +165,7 @@ class TelegramUploader:
                         disable_notification=True,
                     )
                 else:
-                    self._sent_msg = await self._wait_flood(
+                    self._sent_msg = await self._pacer.guard(
                         self._listener.client.send_message,
                         chat_id=self._listener.up_dest,
                         text=msg,
@@ -228,7 +183,7 @@ class TelegramUploader:
             finally:
                 self._base_msg = self._sent_msg
         elif self._user_session:
-            self._sent_msg = await self._wait_flood(
+            self._sent_msg = await self._pacer.guard(
                 TgClient.user.get_messages,
                 chat_id=self._listener.message.chat.id,
                 message_ids=self._listener.cmd_msg_id,
@@ -236,7 +191,7 @@ class TelegramUploader:
             if self._sent_msg is None:
                 if self._listener.is_cancelled:
                     return False
-                self._sent_msg = await self._wait_flood(
+                self._sent_msg = await self._pacer.guard(
                     TgClient.user.send_message,
                     chat_id=self._listener.message.chat.id,
                     text="Deleted Cmd Message! Don't delete the cmd message again!",
@@ -299,7 +254,7 @@ class TelegramUploader:
         ]
         for i in range(0, len(inputs), 10):
             batch = inputs[i : i + 10]
-            sent = await self._wait_flood(
+            sent = await self._pacer.guard(
                 self._group_client.send_media_group,
                 **self._reply_args(),
                 media=batch,
@@ -316,7 +271,7 @@ class TelegramUploader:
         return TgClient.user
 
     async def _get_message(self, chat_id, message_id):
-        return await self._wait_flood(
+        return await self._pacer.guard(
             self._group_client.get_messages,
             chat_id=chat_id,
             message_ids=message_id,
@@ -330,7 +285,7 @@ class TelegramUploader:
         """
         for ch, ch_data in list(self._listener.clone_dump_chats.items()):
             try:
-                res = await self._wait_flood(
+                res = await self._pacer.guard(
                     TgClient.bot.copy_media_group,
                     chat_id=ch,
                     from_chat_id=from_chat_id,
@@ -378,7 +333,7 @@ class TelegramUploader:
         callers land here. Returns the sent list, or None when the send did not
         go through -- the caller must not treat a None as a delivered group.
         """
-        msgs_list = await self._wait_flood(
+        msgs_list = await self._pacer.guard(
             self._group_client.send_media_group,
             chat_id=msgs[0].chat.id,
             media=media,
@@ -476,7 +431,7 @@ class TelegramUploader:
                 and not self._is_private
             ):
                 self._msgs_dict[self._sent_msg.link] = file_
-            await self._pace_next_file()
+            await self._pacer.pace()
         except Exception as err:
             if isinstance(err, RetryError):
                 LOGGER.info(f"Total Attempts: {err.last_attempt.attempt_number}")
@@ -754,16 +709,18 @@ class TelegramUploader:
         attempt = _Attempt(self._thumb)
         try:
             async with self._temp_thumb(attempt):
-                # The flood wait is handled in here so the thumbnail outlives
-                # the sleep, as it did when cleanup was written out inline.
+                # The flood wait is handled in here, rather than through
+                # `_pacer.guard`, so the thumbnail outlives the sleep as it did
+                # when cleanup was written out inline. Only the widened gap is
+                # shared with the calls that do retry in place.
                 try:
                     sent = await self._send_one(
                         cap_mono, file, o_path, force_document, attempt
                     )
                 except (FloodWait, FloodPremiumWait) as f:
                     LOGGER.warning(str(f))
-                    self._note_flood()
-                    await sleep(f.value * 1.3)
+                    self._pacer.note_flood()
+                    await sleep(f.value * FLOOD_SLACK)
                     raise
         except (FloodWait, FloodPremiumWait):
             return await self._upload_file(cap_mono, file, o_path)

@@ -128,10 +128,15 @@ def uploader_module(monkeypatch):
         monkeypatch.setitem(sys.modules, name, mod)
 
     target = "bot.helper.mirror_leech_utils.upload_utils.telegram_uploader"
-    sys.modules.pop(target, None)
+    pacer = "bot.helper.mirror_leech_utils.upload_utils.flood_pacer"
+    # The pacer is popped too: it binds the stubbed FloodWait classes at import
+    # time, so a copy left behind would hand the next test file the wrong ones.
+    for name in (target, pacer):
+        sys.modules.pop(name, None)
     module = importlib.import_module(target)
     yield module
-    sys.modules.pop(target, None)
+    for name in (target, pacer):
+        sys.modules.pop(name, None)
 
 
 class FakeMessage:

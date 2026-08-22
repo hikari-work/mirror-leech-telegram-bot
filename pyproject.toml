@@ -55,10 +55,12 @@ max-complexity = 10
 "bot/helper/mirror_leech_utils/download_utils/alldebrid_resolver.py"      = ["E722"]
 
 # --- Fase 5 — telegram_uploader._upload_file ---
-# `_upload_file` sudah dipecah; E501 dan I001 dicabut. Sisa C901 ada di
-# `upload()` (CX 42) yang jadi target Fase 6, dan satu E722 di properti
-# `speed` yang masuk scope Fase 10.
-"bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py"         = ["C901", "E722"]
+# `_upload_file` sudah dipecah; E501 dan I001 dicabut. E722 juga sudah dicabut:
+# bare `except:` di properti `speed` sudah hilang (Fase 10), jadi entri itu basi.
+# Sisa C901 tinggal satu, `_upload_one` (CX 12), yang jadi target Fase 11c —
+# `upload()` yang dulu CX 42 sudah tidak melanggar lagi. `flood_pacer.py`
+# (Fase 11a) sengaja tidak didaftarkan: file itu bersih.
+"bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py"         = ["C901"]
 
 # --- Fase 6 — task_listener.on_download_complete ---
 # `on_download_complete` sudah dipecah; F401 dan I001 dicabut. Sisa C901 ada di

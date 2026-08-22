@@ -132,10 +132,15 @@ def uploader_module(monkeypatch):
         monkeypatch.setitem(sys.modules, name, mod)
 
     target = "bot.helper.mirror_leech_utils.upload_utils.telegram_uploader"
-    sys.modules.pop(target, None)
+    pacer = "bot.helper.mirror_leech_utils.upload_utils.flood_pacer"
+    # The pacer is popped too: it binds the stubbed FloodWait classes at import
+    # time, so a copy left behind would hand the next test file the wrong ones.
+    for name in (target, pacer):
+        sys.modules.pop(name, None)
     module = importlib.import_module(target)
     yield module
-    sys.modules.pop(target, None)
+    for name in (target, pacer):
+        sys.modules.pop(name, None)
 
 
 class FakeMessage:
@@ -429,83 +434,6 @@ async def test_cancelled_task_tracks_nothing(uploader_module):
 
     assert uploader._album_msgs == []
     assert attempt.key is None
-
-
-# --- inter-file pacing -----------------------------------------------------
-
-
-def _record_sleeps(uploader_module, monkeypatch):
-    slept = []
-    monkeypatch.setattr(
-        uploader_module, "sleep", AsyncMock(side_effect=lambda d: slept.append(d))
-    )
-    return slept
-
-
-@pytest.mark.asyncio
-async def test_files_follow_each_other_with_no_gap_by_default(
-    uploader_module, monkeypatch
-):
-    uploader = _make_uploader(uploader_module)
-    slept = _record_sleeps(uploader_module, monkeypatch)
-
-    for _ in range(3):
-        await uploader._pace_next_file()
-
-    assert slept == []
-
-
-@pytest.mark.asyncio
-async def test_each_flood_widens_the_gap(uploader_module, monkeypatch):
-    uploader = _make_uploader(uploader_module)
-    slept = _record_sleeps(uploader_module, monkeypatch)
-
-    uploader._note_flood()
-    await uploader._pace_next_file()
-    uploader._note_flood()
-    await uploader._pace_next_file()
-
-    assert slept == [0.5, 1.0]
-
-
-def test_the_gap_never_grows_past_the_cap(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    for _ in range(20):
-        uploader._note_flood()
-    assert uploader._pace == uploader._MAX_PACE
-
-
-@pytest.mark.asyncio
-async def test_the_gap_decays_once_the_floods_stop(uploader_module, monkeypatch):
-    uploader = _make_uploader(uploader_module)
-    slept = _record_sleeps(uploader_module, monkeypatch)
-    uploader._note_flood()
-
-    for _ in range(uploader._CALM_FILES):
-        await uploader._pace_next_file()
-    assert uploader._pace == 0
-    assert slept == [0.5] * uploader._CALM_FILES
-
-    await uploader._pace_next_file()
-    assert len(slept) == uploader._CALM_FILES, "gap should be gone, not slept again"
-
-
-@pytest.mark.asyncio
-async def test_a_flood_on_any_call_widens_the_gap(uploader_module, monkeypatch):
-    uploader = _make_uploader(uploader_module)
-    _record_sleeps(uploader_module, monkeypatch)
-    flood = uploader_module.FloodWait()
-    flood.value = 2
-    attempts = []
-
-    async def flaky():
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise flood
-        return "ok"
-
-    assert await uploader._wait_flood(flaky) == "ok"
-    assert uploader._pace == 0.5
 
 
 # --- reply target and client routing ---------------------------------------

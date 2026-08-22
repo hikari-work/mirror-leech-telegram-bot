@@ -946,6 +946,126 @@ Test: `tests/test_rss_package.py` — 24 test untuk `item_blocked`, `item_url`,
 
 ---
 
+## 3b. Fase 11 — pecah god class (pass level-class)
+
+Fase 0–10 semuanya menyerang **level fungsi**. Fase 2 diberi judul "pecah god
+class `TaskConfig`", tapi yang dilakukan adalah memecah satu file jadi empat
+mixin di atas `self` yang sama: method-nya pindah file, objek runtime-nya tidak
+berubah. Fase 11 mengubah pembagian **file** jadi pembagian **objek**.
+
+Rencana lengkap beserta metrik awal, urutan 11a–11g, dan daftar temuan yang
+sengaja tidak dikerjakan: lihat `~/.claude/plans/swirling-snuggling-moore.md`.
+
+Dua keputusan yang mengikat seluruh Fase 11:
+
+- **Struktural + rapikan API.** Perilaku dipertahankan; signature/nama method
+  internal bebas diubah agar batas antar objek masuk akal, termasuk menyesuaikan
+  test yang ada.
+- **Satu commit per ekstraksi**, tiap commit lulus `pytest -q` + tidak menambah
+  temuan ruff.
+
+---
+
+### Fase 11a — `FloodPacer` keluar dari `TelegramUploader` ✅
+
+**Status:** selesai
+
+**Target:** cabut klaster pacing yang tidak berbagi state dengan apa pun di
+`TelegramUploader`.
+
+Dua atribut — `_pace` (jeda yang sekarang disisakan antar file) dan `_calm`
+(berapa file berlalu tanpa keluhan) — hidup di antara 21 atribut lain milik
+sebuah upload yang sedang jalan, padahal **tidak ada** method lain di class itu
+yang membacanya. Grep memastikan itu sebelum apa pun disentuh.
+
+| | HEAD | sesudah |
+|---|---|---|
+| `telegram_uploader.py` | 822 LOC | 779 LOC |
+| `TelegramUploader` | 39 method, 23 atribut | 36 method, 22 atribut |
+| `flood_pacer.py` | — | 82 LOC, 4 method, 3 atribut |
+
+Tiga method pindah utuh ke `upload_utils/flood_pacer.py`:
+
+| Sebelum | Sesudah |
+|---------|---------|
+| `_note_flood()` | `FloodPacer.note_flood()` |
+| `_pace_next_file()` | `FloodPacer.pace()` |
+| `_wait_flood(func, *a, **kw)` | `FloodPacer.guard(func, *a, **kw)` |
+
+**Listener tidak dibawa masuk.** Satu-satunya alasan `_wait_flood` menyentuh
+listener adalah membaca `is_cancelled`, jadi constructor-nya menerima
+`is_cancelled: Callable[[], bool]` dan uploader menyuntikkan
+`lambda: self._listener.is_cancelled`. Lambda-nya dibaca setiap percobaan, jadi
+task yang dibatalkan di tengah sleep tetap berhenti di retry berikutnya.
+Akibatnya pacer bisa dites tanpa membangun satu upload pun.
+
+**Duplikasi yang dihapus, bukan dipindah:** pengali `1.3` ditulis dua kali
+(sekali di `_wait_flood`, sekali di blok flood `_upload_file`) — sekarang satu
+konstanta bernama `FLOOD_SLACK`, mengikuti preseden `BOT_MAX_SPLIT_SIZE` di
+Fase 2b.
+
+**Yang sengaja TIDAK diseragamkan.** Flood ditangani di dua tempat dengan
+strategi berbeda, dan itu memang disengaja:
+
+- 8 pemanggil (semua coroutine *client*) retry di dalam loop lewat `guard()`.
+- 4 sender per-file **tidak** lewat `guard()`. FloodWait-nya ditangkap di
+  `_upload_file`, yang me-`raise` ulang supaya method itu masuk lagi dari awal
+  dan thumbnail-nya hidup lebih lama dari sleep-nya.
+
+Keduanya hanya berbagi `note_flood()` dan `FLOOD_SLACK`. Alasannya sekarang
+tertulis di docstring `guard()` *dan* di komentar `_upload_file`, karena
+pemisahan ini gampang terlihat seperti kelalaian.
+
+**Deviasi yang disengaja:** logger untuk peringatan rate limit berubah dari
+`...telegram_uploader` jadi `...flood_pacer` — konsekuensi langsung dari
+pindahnya kode, tidak bisa dihindari. Isi pesannya tidak berubah.
+
+**Verifikasi:**
+
+- `tools/_phase11a_diff.py` — harness diferensial: modul dari `git show HEAD:`
+  vs working tree di bawah stub yang sama. **46 skenario, 46 identical, 0
+  divergent**, stabil 3× run. Yang dibandingkan: urutan durasi sleep, urutan
+  panggilan client + argumennya, output LOGGER, nilai `_pace`/`_calm`, dan
+  return/exception tiap operasi. Karena state-nya pindah objek, kedua versi
+  dibaca lewat `_snapshot_pace()` — yang dibandingkan **nilainya**, bukan path
+  atributnya.
+- Harness itu tidak bisa menjangkau `_upload_one` (ia mem-`walk` direktori dan
+  mengirim file), padahal di situlah satu-satunya panggilan `pace()` berada.
+  Jadi ditambahkan **pengecekan call site level AST**: tiap panggilan pacing
+  dipetakan ke method pemanggilnya, dan HEAD vs working tree harus identik —
+  10 panggilan di 7 method, tidak ada yang pindah. Tiga method yang memang
+  pindah keluar didaftarkan eksplisit di `_MOVED_OUT`.
+- `tools/_phase11a_mutants.py` — **27 mutasi, 27 tertangkap.** Nol yang lolos.
+  Dua yang awalnya lolos bukan lubang harness dan bukan no-op, melainkan bug di
+  alat ujinya sendiri:
+  1. Stub `FloodPremiumWait` dibuat **subclass** `FloodWait`, padahal di
+     pyrogram keduanya **sibling** di bawah `Flood`. Akibatnya mutasi
+     "premium floods are not caught" jadi tidak bisa dideteksi. Stub diperbaiki
+     jadi sibling + ditambah 3 skenario yang benar-benar melempar
+     `FloodPremiumWait`.
+  2. Satu mutasi ternyata memang no-op (menyisipkan `except ValueError: raise`
+     di depan handler flood), diganti dengan yang betulan mengubah perilaku
+     (`while True` → `for _ in range(1)`).
+- `tests/test_flood_pacer.py` — 10 test langsung atas `FloodPacer`, nol
+  uploader dibangun. Lima di antaranya pindahan dari
+  `test_telegram_uploader_helpers.py` yang dulu memanggil method privat
+  uploader; seam `monkeypatch.setattr(module, "sleep", ...)` ikut pindah.
+- **770 passed, 0 failed** (765 → 770; 5 pindah, 10 baru).
+- Baris `per-file-ignores` untuk `telegram_uploader.py` **dikecilkan**
+  `["C901", "E722"]` → `["C901"]`: E722 sudah basi (bare `except:` di properti
+  `speed` hilang sejak Fase 10), dan `upload()` yang dulu CX 42 sudah tidak
+  melanggar — sisa C901 tinggal `_upload_one` (CX 12), target Fase 11c.
+  `flood_pacer.py` sengaja tidak didaftarkan: file itu bersih.
+
+**Catatan untuk fase berikutnya.** `upload_utils/` **tidak punya
+`__init__.py`** (namespace dir). Kedua file test uploader mengganti objek
+package itu dengan `_pkg(..., <dir asli>)` supaya modul sibling baru resolve —
+dan `flood_pacer` harus di-`pop` dari `sys.modules` di teardown keduanya, karena
+ia mem-*bind* class `FloodWait` yang di-stub pada saat import. Salinan yang
+tertinggal akan menyerahkan exception class yang salah ke file test berikutnya.
+
+---
+
 ## 4. Urutan Eksekusi yang Disarankan
 
 ```
