@@ -204,8 +204,58 @@ Buat package `bot/helper/task_config/`:
 
 **Verifikasi:** 94 passed, 0 failed. `ruff check .` → 0 temuan. `common.py` turun 1261 → 89 LOC. ✅
 
-**Catatan:** `before_start()` belum dipecah jadi sub-functions karena itu mengubah
-signature internal — bisa dilakukan sebagai sub-fase terpisah kalau diinginkan.
+**Catatan:** `before_start()` dipecah menyusul di Fase 2b.
+
+---
+
+### Fase 2b — `before_start()` jadi orkestrator ✅
+
+**Status:** selesai
+
+**Target:** `before_start()` 289 LOC / CX 97 → orkestrator ≤ 20 LOC.
+
+Empat belas keputusan yang tidak berhubungan tadinya berbagi satu scope. Dipecah
+jadi langkah bernama, dinamai menurut *maksud*-nya, bukan mekanismenya:
+
+| Langkah | Isi |
+|---------|-----|
+| `_resolve_name_substitutions` | aturan rename `old/new \| old/new` |
+| `_resolve_extension_filters` | ekstensi yang dibuang / disimpan |
+| `_resolve_ffmpeg_commands` | + `_ffmpeg_presets`, `_fill_preset` |
+| `_resolve_upload_destination` | + `_apply_transmission_defaults`, `_normalize_up_dest`, `_apply_transmission_prefix` |
+| verifikasi tujuan | `_verify_dest_for_user_session`, `_verify_user_session_privileges`, `_verify_dest_for_bot`, `_verify_bot_privileges`, `_verify_bot_can_reach_dest` |
+| `_resolve_split_sizes` | parse ukuran + plafon per sesi |
+| `_resolve_upload_format` | dokumen vs media |
+| `_resolve_thumbnail_layout` / `_resolve_thumbnail` | layout + thumb dari link telegram |
+| `_resolve_clone_dump_chats` | + `_as_dump_target`, `_as_dump_entries` |
+
+Duplikasi yang dihapus, bukan hanya dipindah:
+
+- Fallback tiga tingkat (task → user → bot) diulang 6×, sekarang `_setting_for()`
+  / `_is_enabled()`. Aturannya jadi eksplisit: **key yang *ada* di `user_dict`
+  berarti user punya pendapat — walau kosong — jadi default bot tidak berlaku.**
+- Pasangan `user_transmission = False; hybrid_leech = False` muncul 8×, sekarang
+  `_downgrade_to_bot_session()`.
+- Coercion `chat|thread` / digit / `pm` diulang di `up_dest` dan
+  `clone_dump_chats`, sekarang `_as_chat_id()`.
+- `["SUPERGROUP", "CHANNEL", "GROUP", "FORUM"]` ditulis 2× → `GROUP_CHAT_TYPES`;
+  magic number `2097152000` → `BOT_MAX_SPLIT_SIZE`.
+
+**Parameter:** tidak ada parameter object yang perlu dibuat. Mixin-nya *sudah*
+jadi parameter object — semua langkah baca/tulis `self`, jadi hasil ekstraksi
+nol parameter. `_dest_unverified()` tetap di mixin karena `test_dest_chat.py`
+mengetesnya lewat `SettingsResolverMixin` langsung.
+
+**Verifikasi:**
+
+- `tools/_phase2b_diff.py` — harness diferensial: `before_start()` versi git vs
+  working tree, 136 skenario, membandingkan state akhir + tipe/pesan exception +
+  urutan `LOGGER.warning`. **136 identical, 0 divergent.**
+- `tests/test_settings_resolver.py` — 53 test baru untuk seam hasil ekstraksi.
+- 765 passed, 0 failed (712 → 765).
+- Baris `per-file-ignores` untuk `settings_resolver.py` **dicabut** — C901/E501/E722
+  di file itu nol.
+- `cx_max` 97 → 68; fungsi terbesar di file 30 LOC, median 12 LOC.
 
 ---
 
