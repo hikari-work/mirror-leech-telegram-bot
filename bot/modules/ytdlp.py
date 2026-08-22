@@ -17,7 +17,7 @@ from ..helper.ext_utils.links_utils import is_url
 from ..helper.ext_utils.resolve_gate import resolve_gate
 from ..helper.ext_utils.task_args import parse_ytdlp_args
 from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
-from ..helper.listeners.task_listener import TaskListener
+from ..helper.listeners.command_task import CommandTask
 from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
     is_vidoy_link,
     vidoy_resolve,
@@ -257,33 +257,10 @@ async def _mdisk(link, name):
     return name, link
 
 
-class YtDlp(TaskListener):
-    def __init__(
-        self,
-        client,
-        message,
-        _=None,
-        same_dir=None,
-        bulk=None,
-        multi_tag=None,
-        options="",
-        mid=0,
-        cmd_text="",
-    ):
-        if same_dir is None:
-            same_dir = {}
-        if bulk is None:
-            bulk = []
-        self.message = message
-        self.client = client
-        self.multi_tag = multi_tag
-        self.options = options
-        self.same_dir = same_dir
-        self.bulk = bulk
-        # read by TaskConfig.__init__ to override the message-derived identity
-        self._forced_mid = mid
-        self._cmd_text = cmd_text
-        super().__init__()
+class YtDlp(CommandTask):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # after super(), which defaults it to False
         self.is_ytdlp = True
 
     async def new_event(self):
@@ -371,34 +348,6 @@ class YtDlp(TaskListener):
         playlist = "entries" in result
         ydl = YoutubeDLHelper(self)
         await ydl.add_download(path, qual, playlist, opt)
-
-    # ── arg application ─────────────────────────────────────────────
-
-    def _apply_args(self, args):
-        """Transfer parsed args onto *self*."""
-        self.ffmpeg_cmds = args.ffmpeg_cmds
-        self.select = args.select
-        self.name = args.name
-        self.link = args.link
-        self.compress = args.compress
-        self.thumb = args.thumb
-        self.split_size = args.split_size
-        self.sample_video = args.sample_video
-        self.screen_shots = args.screen_shots
-        self.force_run = args.force_run
-        self.force_download = args.force_download
-        self.force_upload = args.force_upload
-        self.convert_audio = args.convert_audio
-        self.convert_video = args.convert_video
-        self.name_sub = args.name_sub
-        self.hybrid_leech = args.hybrid_leech
-        self.thumbnail_layout = args.thumbnail_layout
-        self.as_doc = args.as_doc
-        self.as_med = args.as_med
-        self.folder_name = args.folder_name
-        self.bot_trans = args.bot_trans
-        self.user_trans = args.user_trans
-        self.multi = args.multi
 
     # ── special link resolvers ──────────────────────────────────────
 

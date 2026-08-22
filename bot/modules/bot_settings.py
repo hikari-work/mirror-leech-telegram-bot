@@ -2,19 +2,15 @@ from asyncio import (
     create_subprocess_exec,
     create_subprocess_shell,
     gather,
-    sleep,
 )
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from io import BytesIO
 from os import getcwd
-from time import time
 
 from aiofiles.os import path as aiopath
 from aiofiles.os import remove, rename
-from pyrogram.filters import create
-from pyrogram.handlers import MessageHandler
 
 from .. import (
     aria2_options,
@@ -37,6 +33,7 @@ from ..helper.ext_utils.bot_utils import (
 from ..helper.ext_utils.db_handler import database
 from ..helper.ext_utils.task_manager import start_from_queued
 from ..helper.telegram_helper.button_build import ButtonMaker
+from ..helper.telegram_helper.conversation import wait_for_message
 from ..helper.telegram_helper.message_utils import (
     delete_message,
     edit_message,
@@ -457,27 +454,20 @@ async def update_private_file(_, message, pre_message):
 
 
 async def event_handler(client, query, pfunc, rfunc, document=False):
-    chat_id = query.message.chat.id
-    handler_dict[chat_id] = True
-    start_time = time()
+    """Wait for the answer to the prompt this callback has just put on screen.
 
-    async def event_filter(_, __, event):
-        user = event.from_user or event.sender_chat
-        return bool(
-            user.id == query.from_user.id
-            and event.chat.id == chat_id
-            and (event.text or event.document and document)
-        )
-
-    handler = client.add_handler(
-        MessageHandler(pfunc, filters=create(event_filter)), group=-1
+    Keyed by chat rather than by user: the bot settings menu is a single
+    conversation per chat, whoever of the sudo users is driving it.
+    """
+    await wait_for_message(
+        client,
+        query,
+        pfunc,
+        handler_dict,
+        query.message.chat.id,
+        ("text", "document") if document else ("text",),
+        on_timeout=rfunc,
     )
-    while handler_dict[chat_id]:
-        await sleep(0.5)
-        if time() - start_time > 60:
-            handler_dict[chat_id] = False
-            await rfunc()
-    client.remove_handler(*handler)
 
 
 # --------------------------------------------------------------------------

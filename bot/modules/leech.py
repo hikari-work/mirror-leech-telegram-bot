@@ -10,7 +10,7 @@ from ..helper.ext_utils.links_utils import (
     is_telegram_link,
 )
 from ..helper.ext_utils.task_args import parse_leech_args, strip_link_tokens
-from ..helper.listeners.task_listener import TaskListener
+from ..helper.listeners.command_task import CommandTask
 from ..helper.mirror_leech_utils.download_utils.aria2_download import (
     add_aria2_download,
 )
@@ -44,35 +44,7 @@ from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
 
 
-class Leech(TaskListener):
-    def __init__(
-        self,
-        client,
-        message,
-        is_qbit=False,
-        same_dir=None,
-        bulk=None,
-        multi_tag=None,
-        options="",
-        mid=0,
-        cmd_text="",
-    ):
-        if same_dir is None:
-            same_dir = {}
-        if bulk is None:
-            bulk = []
-        self.message = message
-        self.client = client
-        self.multi_tag = multi_tag
-        self.options = options
-        self.same_dir = same_dir
-        self.bulk = bulk
-        # read by TaskConfig.__init__ to override the message-derived identity
-        self._forced_mid = mid
-        self._cmd_text = cmd_text
-        super().__init__()
-        self.is_qbit = is_qbit
-
+class Leech(CommandTask):
     async def new_event(self):
         text = self.cmd_text.split("\n")
         input_list = text[0].split(" ")
@@ -123,36 +95,14 @@ class Leech(TaskListener):
     # ── arg application ─────────────────────────────────────────────
 
     def _apply_args(self, args):
-        """Transfer parsed args onto *self*."""
-        self.select = args.select
+        """The shared options, plus the ones only a leech takes."""
+        super()._apply_args(args)
         self.seed = args.seed
-        self.name = args.name
-        self.link = args.link
-        self.compress = args.compress
         self.extract = args.extract
         self.join = args.join
-        self.thumb = args.thumb
-        self.split_size = args.split_size
-        self.sample_video = args.sample_video
-        self.screen_shots = args.screen_shots
-        self.force_run = args.force_run
-        self.force_download = args.force_download
-        self.force_upload = args.force_upload
-        self.convert_audio = args.convert_audio
-        self.convert_video = args.convert_video
-        self.name_sub = args.name_sub
-        self.hybrid_leech = args.hybrid_leech
-        self.thumbnail_layout = args.thumbnail_layout
-        self.as_doc = args.as_doc
-        self.as_med = args.as_med
-        self.folder_name = args.folder_name
-        self.bot_trans = args.bot_trans
-        self.user_trans = args.user_trans
         self.is_alldebrid = args.is_alldebrid
         self.is_torbox = args.is_torbox
         self.stream_upload = args.stream_upload
-        self.multi = args.multi
-        self.ffmpeg_cmds = args.ffmpeg_cmds
 
     # ── reply / link resolution ─────────────────────────────────────
 

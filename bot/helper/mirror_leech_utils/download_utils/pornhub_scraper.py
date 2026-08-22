@@ -12,7 +12,7 @@ from __future__ import annotations
 from re import match as re_match, sub as re_sub
 from urllib.parse import urlparse, parse_qs
 
-from ....core.config_manager import Config
+from ...ext_utils.gateway import gateway_headers, gateway_url
 from ...ext_utils.exceptions import DirectDownloadLinkException
 
 
@@ -37,11 +37,8 @@ def is_pornhub_link(url: str) -> bool:
 def _gateway_get(endpoint: str, params: dict, timeout: int = 120) -> dict:
     from requests import get as req_get
 
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    url = f"{gateway_base}{endpoint}"
-    headers = {}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
+    url = gateway_url(endpoint)
+    headers = gateway_headers(accept_json=False)
     try:
         resp = req_get(url, params=params, headers=headers, timeout=timeout)
         resp.raise_for_status()

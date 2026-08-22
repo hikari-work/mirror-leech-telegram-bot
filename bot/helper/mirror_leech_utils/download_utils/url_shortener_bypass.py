@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from requests import Session
 
-from ....core.config_manager import Config
+from ...ext_utils.gateway import gateway_headers, gateway_url
 from ...ext_utils.exceptions import DirectDownloadLinkException
 
 _OUO_DOMAINS = ("ouo.io", "ouo.press")
@@ -82,11 +82,7 @@ def bypass_shortener(link):
 
 def _gateway(path):
     """(url, headers) for a gateway endpoint."""
-    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return f"{base}{path}", headers
+    return gateway_url(path), gateway_headers()
 
 
 def _transient(reason):

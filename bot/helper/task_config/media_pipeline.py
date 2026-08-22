@@ -26,6 +26,7 @@ from ..ext_utils.files_utils import (
     is_archive_split,
     is_first_archive_split,
     split_file,
+    walk_files,
 )
 from ..ext_utils.links_utils import is_telegram_link
 from ..ext_utils.media_utils import (
@@ -39,31 +40,63 @@ from ..mirror_leech_utils.status_utils.sevenz_status import SevenZStatus
 from ..telegram_helper.message_utils import get_tg_link_message, temp_download
 
 
+def is_extractable(file_):
+    """What ``proceed_extract`` will hand to 7z.
+
+    A whole archive or the first part of a split one, but a plain ``.rar`` is
+    left alone -- only its ``.partN.rar`` form, which the split check catches, is
+    picked up. Both loops in ``proceed_extract`` decide with this, and they used
+    to spell the same three clauses out separately.
+    """
+    return (
+        is_first_archive_split(file_)
+        or is_archive(file_)
+        and not file_.strip().lower().endswith(".rar")
+    )
+
+
 class MediaPipelineMixin:
+    async def _ffmpeg_status(self, gid: str, status: str):
+        """An ffmpeg driver, registered as what this task is doing now."""
+        ffmpeg = FFMpeg(self)
+        async with task_dict_lock:
+            task_dict[self.mid] = FFmpegStatus(self, ffmpeg, gid, status)
+        return ffmpeg
+
+    async def _sevenz_status(self, gid: str, status: str):
+        sevenz = SevenZ(self)
+        async with task_dict_lock:
+            task_dict[self.mid] = SevenZStatus(self, sevenz, gid, status)
+        return sevenz
+
+    async def _claim_cpu(self, ffmpeg, gid: str) -> None:
+        """Show the ffmpeg status line and wait for the CPU to be free.
+
+        ``progress`` goes off while the task queues for the lock: it has nothing
+        to report until it is actually running, and the status list says
+        "queued" rather than 0% forever.
+        """
+        async with task_dict_lock:
+            task_dict[self.mid] = FFmpegStatus(self, ffmpeg, gid, "FFmpeg")
+        self.progress = False
+        await cpu_eater_lock.acquire()
+        self.progress = True
+
     async def proceed_extract(self, dl_path: str, gid: str) -> str:
         pswd = self.extract if isinstance(self.extract, str) else ""
         self.files_to_proceed = []
         if self.is_file and is_archive(dl_path):
             self.files_to_proceed.append(dl_path)
         else:
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    if (
-                        is_first_archive_split(file_)
-                        or is_archive(file_)
-                        and not file_.strip().lower().endswith(".rar")
-                    ):
-                        f_path = ospath.join(dirpath, file_)
-                        self.files_to_proceed.append(f_path)
+            for f_path in await walk_files(dl_path):
+                if is_extractable(ospath.basename(f_path)):
+                    self.files_to_proceed.append(f_path)
 
         if not self.files_to_proceed:
             return dl_path
         t_path = dl_path
-        sevenz = SevenZ(self)
         LOGGER.info(f"Extracting: {self.name}")
-        async with task_dict_lock:
-            task_dict[self.mid] = SevenZStatus(self, sevenz, gid, "Extract")
+        sevenz = await self._sevenz_status(gid, "Extract")
         walk_data = await sync_to_async(
             lambda: list(walk(self.up_dir or self.dir, topdown=False))
         )
@@ -72,11 +105,7 @@ class MediaPipelineMixin:
             for file_ in files:
                 if self.is_cancelled:
                     return False
-                if (
-                    is_first_archive_split(file_)
-                    or is_archive(file_)
-                    and not file_.strip().lower().endswith(".rar")
-                ):
+                if is_extractable(file_):
                     self.proceed_count += 1
                     f_path = ospath.join(dirpath, file_)
                     t_path = get_base_name(f_path) if self.is_file else dirpath
@@ -169,13 +198,7 @@ class MediaPipelineMixin:
                     await move(dl_path, file_path)
                     if not checked:
                         checked = True
-                        async with task_dict_lock:
-                            task_dict[self.mid] = FFmpegStatus(
-                                self, ffmpeg, gid, "FFmpeg"
-                            )
-                        self.progress = False
-                        await cpu_eater_lock.acquire()
-                        self.progress = True
+                        await self._claim_cpu(ffmpeg, gid)
                     LOGGER.info(f"Running ffmpeg cmd for: {file_path}")
                     var_cmd = cmd.copy()
                     for index in input_indexes:
@@ -262,13 +285,7 @@ class MediaPipelineMixin:
                                     var_cmd[index + 1] = file_dir
                             if not checked:
                                 checked = True
-                                async with task_dict_lock:
-                                    task_dict[self.mid] = FFmpegStatus(
-                                        self, ffmpeg, gid, "FFmpeg"
-                                    )
-                                self.progress = False
-                                await cpu_eater_lock.acquire()
-                                self.progress = True
+                                await self._claim_cpu(ffmpeg, gid)
                             LOGGER.info(f"Running ffmpeg cmd for: {f_path}")
                             if isinstance(f_path, list):
                                 self.subsize = 0
@@ -338,14 +355,13 @@ class MediaPipelineMixin:
             await move(dl_path, new_path)
             return new_path
         else:
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    f_path = ospath.join(dirpath, file_)
-                    new_name = perform_substitution(file_, self.name_sub)
-                    if not new_name:
-                        continue
-                    await move(f_path, ospath.join(dirpath, new_name))
+            for f_path in await walk_files(dl_path):
+                new_name = perform_substitution(
+                    ospath.basename(f_path), self.name_sub
+                )
+                if not new_name:
+                    continue
+                await move(f_path, ospath.join(ospath.dirname(f_path), new_name))
             return dl_path
 
     async def generate_screenshots(self, dl_path: str) -> None:
@@ -365,12 +381,9 @@ class MediaPipelineMixin:
                     return new_folder
         else:
             LOGGER.info(f"Creating Screenshot for: {dl_path}")
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    f_path = ospath.join(dirpath, file_)
-                    if (await get_document_type(f_path))[0]:
-                        await take_ss(f_path, ss_nb)
+            for f_path in await walk_files(dl_path):
+                if (await get_document_type(f_path))[0]:
+                    await take_ss(f_path, ss_nb)
         return dl_path
 
     async def convert_media(self, dl_path: str, gid: str) -> str:
@@ -415,11 +428,7 @@ class MediaPipelineMixin:
         if self.is_file:
             all_files.append(dl_path)
         else:
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    f_path = ospath.join(dirpath, file_)
-                    all_files.append(f_path)
+            all_files = await walk_files(dl_path)
 
         for f_path in all_files:
             is_video, is_audio, _ = await get_document_type(f_path)
@@ -453,9 +462,7 @@ class MediaPipelineMixin:
         del all_files
 
         if self.files_to_proceed:
-            ffmpeg = FFMpeg(self)
-            async with task_dict_lock:
-                task_dict[self.mid] = FFmpegStatus(self, ffmpeg, gid, "Convert")
+            ffmpeg = await self._ffmpeg_status(gid, "Convert")
             self.progress = False
             async with cpu_eater_lock:
                 self.progress = True
@@ -497,16 +504,11 @@ class MediaPipelineMixin:
             file_ = ospath.basename(dl_path)
             self.files_to_proceed[dl_path] = file_
         else:
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    f_path = ospath.join(dirpath, file_)
-                    if (await get_document_type(f_path))[0]:
-                        self.files_to_proceed[f_path] = file_
+            for f_path in await walk_files(dl_path):
+                if (await get_document_type(f_path))[0]:
+                    self.files_to_proceed[f_path] = ospath.basename(f_path)
         if self.files_to_proceed:
-            ffmpeg = FFMpeg(self)
-            async with task_dict_lock:
-                task_dict[self.mid] = FFmpegStatus(self, ffmpeg, gid, "Sample Video")
+            ffmpeg = await self._ffmpeg_status(gid, "Sample Video")
             self.progress = False
             async with cpu_eater_lock:
                 self.progress = True
@@ -544,9 +546,7 @@ class MediaPipelineMixin:
             self.is_file = False
         else:
             up_path = f"{dl_path}.zip"
-        sevenz = SevenZ(self)
-        async with task_dict_lock:
-            task_dict[self.mid] = SevenZStatus(self, sevenz, gid, "Zip")
+        sevenz = await self._sevenz_status(gid, "Zip")
         return await sevenz.zip(dl_path, up_path, pswd)
 
     async def proceed_split(self, dl_path: str, gid: str) -> str:
@@ -556,17 +556,12 @@ class MediaPipelineMixin:
             if f_size > self.split_size:
                 self.files_to_proceed[dl_path] = [f_size, ospath.basename(dl_path)]
         else:
-            walk_data = await sync_to_async(lambda: list(walk(dl_path, topdown=False)))
-            for dirpath, _, files in walk_data:
-                for file_ in files:
-                    f_path = ospath.join(dirpath, file_)
-                    f_size = await get_path_size(f_path)
-                    if f_size > self.split_size:
-                        self.files_to_proceed[f_path] = [f_size, file_]
+            for f_path in await walk_files(dl_path):
+                f_size = await get_path_size(f_path)
+                if f_size > self.split_size:
+                    self.files_to_proceed[f_path] = [f_size, ospath.basename(f_path)]
         if self.files_to_proceed:
-            ffmpeg = FFMpeg(self)
-            async with task_dict_lock:
-                task_dict[self.mid] = FFmpegStatus(self, ffmpeg, gid, "Split")
+            ffmpeg = await self._ffmpeg_status(gid, "Split")
             LOGGER.info(f"Splitting: {self.name}")
             for f_path, (f_size, file_) in self.files_to_proceed.items():
                 self.proceed_count += 1

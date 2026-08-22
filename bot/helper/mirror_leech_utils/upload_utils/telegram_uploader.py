@@ -368,6 +368,16 @@ class TelegramUploader:
             # telegram reclassified something on its way out, leave them alone
             LOGGER.info("Skipping album, not every message is a photo or video")
             return
+        return await self._send_group(msgs, media)
+
+    async def _send_group(self, msgs, media):
+        """Send *msgs* as one album and retire the originals.
+
+        What differs between an album and a group of split parts is how *media*
+        was built; what happens to the messages afterwards is the same, so both
+        callers land here. Returns the sent list, or None when the send did not
+        go through -- the caller must not treat a None as a delivered group.
+        """
         msgs_list = await self._wait_flood(
             self._group_client.send_media_group,
             chat_id=msgs[0].chat.id,
@@ -376,7 +386,7 @@ class TelegramUploader:
             disable_notification=True,
         )
         if msgs_list is None:
-            return
+            return None
         for msg in msgs:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -391,34 +401,124 @@ class TelegramUploader:
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
+        return msgs_list
 
     async def _send_media_group(self, subkey, key, msgs):
         for index, msg in enumerate(msgs):
             msgs[index] = await self._get_message(msg[0], msg[1])
-        msgs_list = await self._wait_flood(
-            self._group_client.send_media_group,
-            chat_id=msgs[0].chat.id,
-            media=self._get_input_media(subkey, key),
-            reply_to_message_id=msgs[0].reply_to_message_id,
-            disable_notification=True,
-        )
-        if msgs_list is None:
+        media = self._get_input_media(subkey, key)
+        if await self._send_group(msgs, media) is None:
             return
-        for msg in msgs:
-            if msg.link in self._msgs_dict:
-                del self._msgs_dict[msg.link]
-            await delete_message(msg)
         del self._media_dict[key][subkey]
-        if self._files_links and (
-            self._listener.is_super_chat or self._listener.up_dest
-        ):
-            for m in msgs_list:
-                self._msgs_dict[m.link] = m.caption
-        await self._copy_group_to_clone_dumps(msgs_list[-1].chat.id, msgs_list[-1].id)
-        self._sent_msg = msgs_list[-1]
+
+    async def _flush_media_groups(self, where=""):
+        """Send every media bucket that has more than one part waiting.
+
+        *where* labels the log line and, by being set at all, says failures are
+        to be swallowed: the end-of-task flush has nothing left to abort, while
+        the mid-upload flush wants the error to reach the per-file handler.
+        """
+        for key, value in list(self._media_dict.items()):
+            for subkey, msgs in list(value.items()):
+                if len(msgs) <= 1:
+                    continue
+                if not where:
+                    await self._send_media_group(subkey, key, msgs)
+                    continue
+                try:
+                    await self._send_media_group(subkey, key, msgs)
+                except Exception as e:
+                    LOGGER.info(
+                        f"While sending media group at the end of {where}. Error: {e}"
+                    )
+
+    async def _upload_one(self, file_, dirpath, f_path):
+        """Upload the file at ``self._up_path`` and delete it once it is sent.
+
+        Cancellation is reported through ``self._listener.is_cancelled`` instead
+        of a return value: every caller has to consult it anyway to decide
+        whether to abandon the rest of the batch. A file that is skipped -- zero
+        size, cancelled, or cancelled after an error -- is left on disk, which is
+        what both callers did before this was one method.
+        """
+        try:
+            f_size = await aiopath.getsize(self._up_path)
+            self._total_files += 1
+            if f_size == 0:
+                LOGGER.error(
+                    f"{self._up_path} size is zero, "
+                    "telegram don't upload zero size files"
+                )
+                self._corrupted += 1
+                return
+            if self._listener.is_cancelled:
+                return
+            cap_mono = await self._prepare_file(file_, dirpath)
+            if self._last_msg_in_group:
+                group_lists = [
+                    x for v in self._media_dict.values() for x in v.keys()
+                ]
+                match = re_match(SPLIT_NAME_RE, f_path)
+                if not match or match and match.group(0) not in group_lists:
+                    await self._flush_media_groups()
+            if self._listener.hybrid_leech and self._listener.user_transmission:
+                # only picks the client for this file; the anchor is
+                # addressed by id, so nothing has to be re-fetched
+                self._user_session = f_size > 2097152000
+            self._last_msg_in_group = False
+            self._last_uploaded = 0
+            await self._upload_file(cap_mono, file_, f_path)
+            if self._listener.is_cancelled:
+                return
+            if (
+                self._files_links
+                and (self._listener.is_super_chat or self._listener.up_dest)
+                and not self._is_private
+            ):
+                self._msgs_dict[self._sent_msg.link] = file_
+            await self._pace_next_file()
+        except Exception as err:
+            if isinstance(err, RetryError):
+                LOGGER.info(f"Total Attempts: {err.last_attempt.attempt_number}")
+                err = err.last_attempt.exception()
+            LOGGER.error(f"{err}. Path: {self._up_path}")
+            self._error = str(err)
+            self._corrupted += 1
+            if self._listener.is_cancelled:
+                return
+        if not self._listener.is_cancelled and await aiopath.exists(self._up_path):
+            await remove(self._up_path)
+
+    async def _finish(self, stream=False):
+        """Flush what is still buffered and report the outcome of the task."""
+        where = "stream task" if stream else "task"
+        try:
+            await self._send_album()
+        except Exception as e:
+            LOGGER.info(f"While sending album at the end of {where}. Error: {e}")
+        await self._flush_media_groups(where)
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
+        if self._listener.is_cancelled:
+            return
+        if self._total_files == 0:
+            await self._listener.on_upload_error(
+                "No files to upload. In case you have filled "
+                "EXCLUDED/INCLUDED EXTENSIONS, then check if all files "
+                "have those extensions or not."
+            )
+            return
+        if self._total_files <= self._corrupted:
+            await self._listener.on_upload_error(
+                f"Files Corrupted or unable to upload. {self._error or 'Check logs!'}"
+            )
+            return
+        done = "Stream Leech Completed" if stream else "Leech Completed"
+        LOGGER.info(f"{done}: {self._listener.name}")
+        await self._listener.on_upload_complete(
+            None, self._msgs_dict, self._total_files, self._corrupted
+        )
 
     async def upload(self):
         await self._user_settings()
@@ -442,95 +542,10 @@ class TelegramUploader:
                         return
                     LOGGER.error(f"{self._up_path} not exists! Continue uploading!")
                     continue
-                try:
-                    f_size = await aiopath.getsize(self._up_path)
-                    self._total_files += 1
-                    if f_size == 0:
-                        LOGGER.error(
-                            f"{self._up_path} size is zero, "
-                            "telegram don't upload zero size files"
-                        )
-                        self._corrupted += 1
-                        continue
-                    if self._listener.is_cancelled:
-                        return
-                    cap_mono = await self._prepare_file(file_, dirpath)
-                    if self._last_msg_in_group:
-                        group_lists = [
-                            x for v in self._media_dict.values() for x in v.keys()
-                        ]
-                        match = re_match(r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", f_path)
-                        if not match or match and match.group(0) not in group_lists:
-                            for key, value in list(self._media_dict.items()):
-                                for subkey, msgs in list(value.items()):
-                                    if len(msgs) > 1:
-                                        await self._send_media_group(subkey, key, msgs)
-                    if self._listener.hybrid_leech and self._listener.user_transmission:
-                        # only picks the client for this file; the anchor is
-                        # addressed by id, so nothing has to be re-fetched
-                        self._user_session = f_size > 2097152000
-                    self._last_msg_in_group = False
-                    self._last_uploaded = 0
-                    await self._upload_file(cap_mono, file_, f_path)
-                    if self._listener.is_cancelled:
-                        return
-                    if (
-                        self._files_links
-                        and (self._listener.is_super_chat or self._listener.up_dest)
-                        and not self._is_private
-                    ):
-                        self._msgs_dict[self._sent_msg.link] = file_
-                    await self._pace_next_file()
-                except Exception as err:
-                    if isinstance(err, RetryError):
-                        LOGGER.info(
-                            f"Total Attempts: {err.last_attempt.attempt_number}"
-                        )
-                        err = err.last_attempt.exception()
-                    LOGGER.error(f"{err}. Path: {self._up_path}")
-                    self._error = str(err)
-                    self._corrupted += 1
-                    if self._listener.is_cancelled:
-                        return
-                if not self._listener.is_cancelled and await aiopath.exists(
-                    self._up_path
-                ):
-                    await remove(self._up_path)
-        try:
-            await self._send_album()
-        except Exception as e:
-            LOGGER.info(f"While sending album at the end of task. Error: {e}")
-        for key, value in list(self._media_dict.items()):
-            for subkey, msgs in list(value.items()):
-                if len(msgs) > 1:
-                    try:
-                        await self._send_media_group(subkey, key, msgs)
-                    except Exception as e:
-                        LOGGER.info(
-                            f"While sending media group at the end of task. Error: {e}"
-                        )
-        if self._base_msg:
-            await delete_message(self._base_msg)
-            self._base_msg = None
-        if self._listener.is_cancelled:
-            return
-        if self._total_files == 0:
-            await self._listener.on_upload_error(
-                "No files to upload. In case you have filled "
-                "EXCLUDED/INCLUDED EXTENSIONS, then check if all files "
-                "have those extensions or not."
-            )
-            return
-        if self._total_files <= self._corrupted:
-            await self._listener.on_upload_error(
-                f"Files Corrupted or unable to upload. {self._error or 'Check logs!'}"
-            )
-            return
-        LOGGER.info(f"Leech Completed: {self._listener.name}")
-        await self._listener.on_upload_complete(
-            None, self._msgs_dict, self._total_files, self._corrupted
-        )
-        return
+                await self._upload_one(file_, dirpath, f_path)
+                if self._listener.is_cancelled:
+                    return
+        await self._finish()
 
     async def _resolve_thumb(self, file, thumb, is_video, is_audio, is_image):
         """Pick the thumbnail for this file, or None to let the sender make one.
@@ -800,96 +815,8 @@ class TelegramUploader:
         if not await aiopath.exists(self._up_path):
             LOGGER.error(f"{self._up_path} not exists! Skipping.")
             return
-        try:
-            f_size = await aiopath.getsize(self._up_path)
-            self._total_files += 1
-            if f_size == 0:
-                LOGGER.error(
-                    f"{self._up_path} size is zero, "
-                    "telegram don't upload zero size files"
-                )
-                self._corrupted += 1
-                return
-            if self._listener.is_cancelled:
-                return
-            cap_mono = await self._prepare_file(file_, dirpath)
-            if self._last_msg_in_group:
-                group_lists = [
-                    x for v in self._media_dict.values() for x in v.keys()
-                ]
-                match = re_match(
-                    r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)", f_path
-                )
-                if not match or match and match.group(0) not in group_lists:
-                    for key, value in list(self._media_dict.items()):
-                        for subkey, msgs in list(value.items()):
-                            if len(msgs) > 1:
-                                await self._send_media_group(
-                                    subkey, key, msgs
-                                )
-            if self._listener.hybrid_leech and self._listener.user_transmission:
-                self._user_session = f_size > 2097152000
-            self._last_msg_in_group = False
-            self._last_uploaded = 0
-            await self._upload_file(cap_mono, file_, f_path)
-            if self._listener.is_cancelled:
-                return
-            if (
-                self._files_links
-                and (self._listener.is_super_chat or self._listener.up_dest)
-                and not self._is_private
-            ):
-                self._msgs_dict[self._sent_msg.link] = file_
-            await self._pace_next_file()
-        except Exception as err:
-            if isinstance(err, RetryError):
-                LOGGER.info(
-                    f"Total Attempts: {err.last_attempt.attempt_number}"
-                )
-                err = err.last_attempt.exception()
-            LOGGER.error(f"{err}. Path: {self._up_path}")
-            self._error = str(err)
-            self._corrupted += 1
-            if self._listener.is_cancelled:
-                return
-        if not self._listener.is_cancelled and await aiopath.exists(
-            self._up_path
-        ):
-            await remove(self._up_path)
+        await self._upload_one(file_, dirpath, f_path)
 
     async def finalize_stream(self):
         """Flush pending albums and report completion after stream uploads."""
-        try:
-            await self._send_album()
-        except Exception as e:
-            LOGGER.info(f"While sending album at the end of stream task. Error: {e}")
-        for key, value in list(self._media_dict.items()):
-            for subkey, msgs in list(value.items()):
-                if len(msgs) > 1:
-                    try:
-                        await self._send_media_group(subkey, key, msgs)
-                    except Exception as e:
-                        LOGGER.info(
-                            f"While sending media group at the end of stream task. Error: {e}"
-                        )
-        if self._base_msg:
-            await delete_message(self._base_msg)
-            self._base_msg = None
-        if self._listener.is_cancelled:
-            return
-        if self._total_files == 0:
-            await self._listener.on_upload_error(
-                "No files to upload. In case you have filled "
-                "EXCLUDED/INCLUDED EXTENSIONS, then check if all files "
-                "have those extensions or not."
-            )
-            return
-        if self._total_files <= self._corrupted:
-            await self._listener.on_upload_error(
-                f"Files Corrupted or unable to upload. {self._error or 'Check logs!'}"
-            )
-            return
-        LOGGER.info(f"Stream Leech Completed: {self._listener.name}")
-        await self._listener.on_upload_complete(
-            None, self._msgs_dict, self._total_files, self._corrupted
-        )
+        await self._finish(stream=True)

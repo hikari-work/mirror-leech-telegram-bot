@@ -6,7 +6,9 @@ Each function follows the same contract:
 - On success returns ``True`` so the caller can short-circuit on failure.
 
 Extracted from the inline blocks in ``Leech.new_event()`` to eliminate
-the duplicated error-handling triple.
+the duplicated error-handling triple. What is left for each resolver to decide is
+whether a refusal is fatal; ``_fail`` and ``_declined`` hold the two answers, so
+the ``ERROR:`` convention is written down once instead of six times.
 """
 
 from __future__ import annotations
@@ -22,6 +24,47 @@ from ...ext_utils.bot_utils import get_content_type, sync_to_async
 from ...ext_utils.exceptions import DirectDownloadLinkException
 from ...ext_utils.links_utils import is_magnet
 from ...ext_utils.resolve_gate import resolve_gate
+
+
+def _link_is_broken(msg: str) -> bool:
+    """Whether a resolver is blaming the link rather than passing on it.
+
+    The resolvers signal that in the exception text: an ``ERROR:`` prefix is a
+    verdict on the link and worth showing the user, anything else means this
+    resolver has nothing to say about it and the caller should carry on with the
+    link it already had.
+    """
+    return msg.startswith("ERROR:")
+
+
+async def _fail(listener, exc, notify=None) -> None:
+    """Log *exc* and end the task over it.
+
+    For the debrid resolvers there is no carrying on -- they were asked for the
+    link and could not produce one -- so the prefix only decides whether the user
+    hears about it. *notify* overrides that for the resolvers that always report.
+    """
+    msg = str(exc)
+    LOGGER.info(msg)
+    await listener.fail_task(
+        msg, notify=_link_is_broken(msg) if notify is None else notify
+    )
+
+
+async def _declined(listener, exc, quiet="") -> bool:
+    """True when *exc* only means this resolver passed on the link.
+
+    False means the task is already failed and the caller has nothing left to do.
+    *quiet* is text that should not reach the log -- a password prompt is a normal
+    answer for the direct-link generators, not an incident.
+    """
+    msg = str(exc)
+    if not quiet or quiet not in msg:
+        LOGGER.info(msg)
+    if _link_is_broken(msg):
+        await listener.fail_task(msg)
+        return False
+    return True
 
 
 async def resolve_torbox_torrent(listener) -> bool:
@@ -57,10 +100,7 @@ async def resolve_torbox_torrent(listener) -> bool:
             listener.link = resolved
 
     except DirectDownloadLinkException as e:
-        msg = str(e)
-        LOGGER.info(msg)
-        notify = msg.startswith("ERROR:")
-        await listener.fail_task(msg, notify=notify)
+        await _fail(listener, e)
         return False
     except Exception as e:
         await listener.fail_task(e)
@@ -96,10 +136,7 @@ async def resolve_alldebrid_torrent(listener) -> bool:
                 is_cancelled=lambda: listener.is_cancelled,
             )
     except DirectDownloadLinkException as e:
-        msg = str(e)
-        LOGGER.info(msg)
-        if msg.startswith("ERROR:"):
-            await listener.fail_task(msg)
+        if not await _declined(listener, e):
             return False
         resolved = None
     except Exception as e:
@@ -126,10 +163,7 @@ async def resolve_torbox_web(listener) -> bool:
         listener._torbox_web_id = resolved.get("torbox_web_id", 0)
         listener.link = resolved
     except DirectDownloadLinkException as e:
-        msg = str(e)
-        LOGGER.info(msg)
-        notify = msg.startswith("ERROR:")
-        await listener.fail_task(msg, notify=notify)
+        await _fail(listener, e)
         return False
     except Exception as e:
         await listener.fail_task(e)
@@ -149,10 +183,7 @@ async def resolve_alldebrid_web(listener) -> bool:
         else:
             listener.link = resolved
     except DirectDownloadLinkException as e:
-        msg = str(e)
-        LOGGER.info(msg)
-        if msg.startswith("ERROR:"):
-            await listener.fail_task(msg)
+        if not await _declined(listener, e):
             return False
     except Exception as e:
         await listener.fail_task(e)
@@ -192,11 +223,7 @@ async def resolve_direct_link(listener, headers: list[str]) -> list[str]:
             listener.link = result
             LOGGER.info(f"Generated link: {listener.link}")
     except DirectDownloadLinkException as e:
-        e = str(e)
-        if "This link requires a password!" not in e:
-            LOGGER.info(e)
-        if e.startswith("ERROR:"):
-            await listener.fail_task(e)
+        if not await _declined(listener, e, quiet="This link requires a password!"):
             return None
         return headers
     except Exception as e:
@@ -233,9 +260,8 @@ async def resolve_pornhub(listener) -> bool:
             else:
                 resolved = await sync_to_async(resolve_listing, url_type, identifier)
     except DirectDownloadLinkException as exc:
-        msg = str(exc)
-        LOGGER.info(msg)
-        await listener.fail_task(msg)
+        # every PornHub failure ends the task, and the user is always told which
+        await _fail(listener, exc, notify=True)
         return False
     except Exception as exc:
         await listener.fail_task(exc)

@@ -1,12 +1,7 @@
 from aiofiles.os import remove, path as aiopath
 from asyncio import iscoroutinefunction
 
-from .. import (
-    task_dict,
-    task_dict_lock,
-    user_data,
-    LOGGER,
-)
+from .. import LOGGER
 from ..core.config_manager import Config
 from ..core.torrent_manager import TorrentManager
 from ..helper.ext_utils.bot_utils import (
@@ -14,6 +9,7 @@ from ..helper.ext_utils.bot_utils import (
     new_task,
 )
 from ..helper.ext_utils.status_utils import get_task_by_gid, MirrorStatus
+from ..helper.ext_utils.task_lookup import task_from_command, task_is_yours
 from ..helper.telegram_helper.message_utils import (
     send_message,
     send_status_message,
@@ -28,32 +24,14 @@ async def select(_, message):
         return
     user_id = message.from_user.id
     msg = message.text.split()
-    if len(msg) > 1:
-        gid = msg[1]
-        task = await get_task_by_gid(gid)
-        if task is None:
-            await send_message(message, f"GID: <code>{gid}</code> Not Found.")
-            return
-    elif reply_to_id := message.reply_to_message_id:
-        async with task_dict_lock:
-            task = task_dict.get(reply_to_id)
-        if task is None:
-            await send_message(message, "This is not an active task!")
-            return
-    elif len(msg) == 1:
-        msg = (
-            "Reply to an active /cmd which was used to start the download or add gid along with cmd\n\n"
-            + "This command mainly for selection incase you decided to select files from already added torrent. "
-            + "But you can always use /cmd with arg `s` to select files before download start."
-        )
-        await send_message(message, msg)
-        return
-    if (
-        Config.OWNER_ID != user_id
-        and task.listener.user_id != user_id
-        and (user_id not in user_data or not user_data[user_id].get("SUDO"))
-    ):
-        await send_message(message, "This task is not for you!")
+    task = await task_from_command(
+        message,
+        msg[1] if len(msg) > 1 else "",
+        "Reply to an active /cmd which was used to start the download or add gid along with cmd\n\n"
+        + "This command mainly for selection incase you decided to select files from already added torrent. "
+        + "But you can always use /cmd with arg `s` to select files before download start.",
+    )
+    if task is None or not await task_is_yours(message, task, user_id):
         return
     if not iscoroutinefunction(task.status):
         await send_message(message, "The task have finished the download stage!")

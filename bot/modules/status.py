@@ -7,7 +7,6 @@ from .. import (
     status_dict,
     task_dict,
     bot_start_time,
-    intervals,
     DOWNLOAD_DIR,
 )
 from ..core.torrent_manager import TorrentManager
@@ -25,6 +24,7 @@ from ..helper.telegram_helper.message_utils import (
     send_message,
     delete_message,
     auto_delete_message,
+    cancel_status_interval,
     send_status_message,
     update_status_message,
     edit_message,
@@ -71,10 +71,9 @@ async def task_status(_, message):
             user_id = message.from_user.id if text[1] == "me" else int(text[1])
         else:
             user_id = 0
-            sid = message.chat.id
-            if obj := intervals["status"].get(sid):
-                obj.cancel()
-                del intervals["status"][sid]
+            # /status wants a message at the bottom of the chat, so the ticker
+            # that would edit the old one in place is stopped first
+            cancel_status_interval(message.chat.id)
         await send_status_message(message, user_id, force=True)
         await delete_message(message)
 

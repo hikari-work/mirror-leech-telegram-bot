@@ -14,14 +14,11 @@ from .bot_utils import arg_parser
 
 # ── shared arg-default dicts ────────────────────────────────────────
 
-LEECH_ARG_DEFAULTS: dict[str, object] = {
+COMMON_ARG_DEFAULTS: dict[str, object] = {
     "-doc": False,
     "-med": False,
-    "-d": False,
-    "-j": False,
     "-s": False,
     "-b": False,
-    "-e": False,
     "-z": False,
     "-sv": False,
     "-ss": False,
@@ -31,17 +28,11 @@ LEECH_ARG_DEFAULTS: dict[str, object] = {
     "-hl": False,
     "-bt": False,
     "-ut": False,
-    "-ad": False,
-    "-tb": False,
-    "-su": False,
     "-i": 0,
     "-sp": 0,
     "link": "",
     "-n": "",
     "-m": "",
-    "-au": "",
-    "-ap": "",
-    "-h": [],
     "-t": "",
     "-ca": "",
     "-cv": "",
@@ -49,50 +40,71 @@ LEECH_ARG_DEFAULTS: dict[str, object] = {
     "-tl": "",
     "-ff": set(),
 }
+"""The flags ``/leech`` and ``/ytdl`` both take.
+
+Kept in one dict because the two commands only differ by a handful of flags, and
+the copies drifted: an option added to one was silently ignored by the other.
+"""
+
+LEECH_ARG_DEFAULTS: dict[str, object] = {
+    **COMMON_ARG_DEFAULTS,
+    "-d": False,
+    "-j": False,
+    "-e": False,
+    "-ad": False,
+    "-tb": False,
+    "-su": False,
+    "-au": "",
+    "-ap": "",
+    "-h": [],
+}
 
 YTDLP_ARG_DEFAULTS: dict[str, object] = {
-    "-doc": False,
-    "-med": False,
-    "-s": False,
-    "-b": False,
-    "-z": False,
-    "-sv": False,
-    "-ss": False,
-    "-f": False,
-    "-fd": False,
-    "-fu": False,
-    "-hl": False,
-    "-bt": False,
-    "-ut": False,
-    "-i": 0,
-    "-sp": 0,
-    "link": "",
-    "-m": "",
+    **COMMON_ARG_DEFAULTS,
     "-opt": {},
-    "-n": "",
-    "-t": "",
-    "-ca": "",
-    "-cv": "",
-    "-ns": "",
-    "-tl": "",
-    "-ff": set(),
+}
+
+# Raw flag -> attribute, for everything both commands parse the same way.
+COMMON_ARG_FIELDS: dict[str, str] = {
+    "-doc": "as_doc",
+    "-med": "as_med",
+    "-s": "select",
+    "-z": "compress",
+    "-sv": "sample_video",
+    "-ss": "screen_shots",
+    "-f": "force_run",
+    "-fd": "force_download",
+    "-fu": "force_upload",
+    "-hl": "hybrid_leech",
+    "-bt": "bot_trans",
+    "-ut": "user_trans",
+    "-sp": "split_size",
+    "link": "link",
+    "-n": "name",
+    "-t": "thumb",
+    "-ca": "convert_audio",
+    "-cv": "convert_video",
+    "-ns": "name_sub",
+    "-tl": "thumbnail_layout",
+    "-ff": "ffmpeg_cmds",
 }
 
 
 # ── dataclasses ─────────────────────────────────────────────────────
 
 @dataclass
-class LeechArgs:
-    """Parsed arguments for a ``/leech`` or ``/qbleech`` command."""
+class CommonArgs:
+    """What a ``/leech`` and a ``/ytdl`` command have in common.
+
+    The two commands share every field here; only the seeding, extraction and
+    debrid flags are leech's alone and only ``-opt`` is yt-dlp's.
+    """
 
     # bool flags
     as_doc: bool = False
     as_med: bool = False
-    seed: bool = False
-    join: bool = False
     select: bool = False
     is_bulk: bool = False
-    extract: bool = False
     compress: bool = False
     sample_video: bool = False
     screen_shots: bool = False
@@ -102,9 +114,6 @@ class LeechArgs:
     hybrid_leech: bool = False
     bot_trans: bool = False
     user_trans: bool = False
-    is_alldebrid: bool = False
-    is_torbox: bool = False
-    stream_upload: bool = False
 
     # int
     multi: int = 0
@@ -120,17 +129,8 @@ class LeechArgs:
     name_sub: str = ""
     thumbnail_layout: str = ""
 
-    # str – auth
-    ussr: str = ""
-    pssw: str = ""
-
-    # list / set
-    headers: list[str] = field(default_factory=list)
+    # set
     ffmpeg_cmds: set = field(default_factory=set)
-
-    # seed detail (parsed from ``-d ratio:seed_time``)
-    ratio: str | None = None
-    seed_time: str | None = None
 
     # bulk detail (parsed from ``-b start:end``)
     bulk_start: int | str = 0
@@ -138,47 +138,35 @@ class LeechArgs:
 
 
 @dataclass
-class YtdlpArgs:
-    """Parsed arguments for a ``/ytdl`` command."""
+class LeechArgs(CommonArgs):
+    """Parsed arguments for a ``/leech`` or ``/qbleech`` command."""
 
     # bool flags
-    as_doc: bool = False
-    as_med: bool = False
-    select: bool = False
-    is_bulk: bool = False
-    compress: bool = False
-    sample_video: bool = False
-    screen_shots: bool = False
-    force_run: bool = False
-    force_download: bool = False
-    force_upload: bool = False
-    hybrid_leech: bool = False
-    bot_trans: bool = False
-    user_trans: bool = False
+    seed: bool = False
+    join: bool = False
+    extract: bool = False
+    is_alldebrid: bool = False
+    is_torbox: bool = False
+    stream_upload: bool = False
 
-    # int
-    multi: int = 0
-    split_size: int = 0
+    # str – auth
+    ussr: str = ""
+    pssw: str = ""
 
-    # str
-    link: str = ""
-    name: str = ""
-    folder_name: str = ""
-    thumb: str = ""
-    convert_audio: str = ""
-    convert_video: str = ""
-    name_sub: str = ""
-    thumbnail_layout: str = ""
+    # list
+    headers: list[str] = field(default_factory=list)
+
+    # seed detail (parsed from ``-d ratio:seed_time``)
+    ratio: str | None = None
+    seed_time: str | None = None
+
+
+@dataclass
+class YtdlpArgs(CommonArgs):
+    """Parsed arguments for a ``/ytdl`` command."""
 
     # dict – yt-dlp options
     opt: dict = field(default_factory=dict)
-
-    # set
-    ffmpeg_cmds: set = field(default_factory=set)
-
-    # bulk detail
-    bulk_start: int | str = 0
-    bulk_end: int | str = 0
 
 
 # ── parsing functions ───────────────────────────────────────────────
@@ -191,61 +179,24 @@ def parse_leech_args(input_list: list[str]) -> LeechArgs:
     this function owns the post-parse normalisation that used to be
     scattered across ``Leech.new_event``.
     """
-    raw: dict[str, object] = {
-        k: _copy_default(v) for k, v in LEECH_ARG_DEFAULTS.items()
-    }
-    arg_parser(input_list, raw)
+    raw = _parse_raw(LEECH_ARG_DEFAULTS, input_list)
 
     la = LeechArgs()
+    _apply_common(la, raw)
 
-    # direct bool flags
-    la.as_doc = raw["-doc"]
-    la.as_med = raw["-med"]
+    # leech-only flags
     la.join = raw["-j"]
-    la.select = raw["-s"]
     la.extract = raw["-e"]
-    la.compress = raw["-z"]
-    la.sample_video = raw["-sv"]
-    la.screen_shots = raw["-ss"]
-    la.force_run = raw["-f"]
-    la.force_download = raw["-fd"]
-    la.force_upload = raw["-fu"]
-    la.hybrid_leech = raw["-hl"]
-    la.bot_trans = raw["-bt"]
-    la.user_trans = raw["-ut"]
     la.is_alldebrid = raw["-ad"]
     la.is_torbox = raw["-tb"]
     la.stream_upload = raw["-su"]
-
-    # str / list / set
-    la.link = raw["link"]
-    la.name = raw["-n"]
-    la.thumb = raw["-t"]
-    la.convert_audio = raw["-ca"]
-    la.convert_video = raw["-cv"]
-    la.name_sub = raw["-ns"]
-    la.thumbnail_layout = raw["-tl"]
     la.ussr = raw["-au"]
     la.pssw = raw["-ap"]
-    la.ffmpeg_cmds = raw["-ff"]
 
     # headers
     h = raw["-h"]
     if h:
         la.headers = h.split("|") if isinstance(h, str) else list(h)
-
-    # folder_name
-    m = raw["-m"]
-    la.folder_name = f"/{m}".rstrip("/") if len(m) > 0 else ""
-
-    # split_size
-    la.split_size = raw["-sp"]
-
-    # -i (multi) – tolerant parse
-    try:
-        la.multi = int(raw["-i"])
-    except (ValueError, TypeError):
-        la.multi = 0
 
     # -d (seed ratio:time)
     seed_raw = raw["-d"]
@@ -258,84 +209,59 @@ def parse_leech_args(input_list: list[str]) -> LeechArgs:
     else:
         la.seed = seed_raw
 
-    # -b (bulk start:end)
-    bulk_raw = raw["-b"]
-    if not isinstance(bulk_raw, bool):
-        dargs = bulk_raw.split(":")
-        la.bulk_start = dargs[0] or 0
-        if len(dargs) == 2:
-            la.bulk_end = dargs[1] or 0
-        la.is_bulk = True
-    else:
-        la.is_bulk = bulk_raw
-
     return la
 
 
 def parse_ytdlp_args(input_list: list[str]) -> YtdlpArgs:
     """Parse *input_list* into a :class:`YtdlpArgs`."""
-    raw: dict[str, object] = {
-        k: _copy_default(v) for k, v in YTDLP_ARG_DEFAULTS.items()
-    }
-    arg_parser(input_list, raw)
+    raw = _parse_raw(YTDLP_ARG_DEFAULTS, input_list)
 
     ya = YtdlpArgs()
-
-    # bool flags
-    ya.as_doc = raw["-doc"]
-    ya.as_med = raw["-med"]
-    ya.select = raw["-s"]
-    ya.compress = raw["-z"]
-    ya.sample_video = raw["-sv"]
-    ya.screen_shots = raw["-ss"]
-    ya.force_run = raw["-f"]
-    ya.force_download = raw["-fd"]
-    ya.force_upload = raw["-fu"]
-    ya.hybrid_leech = raw["-hl"]
-    ya.bot_trans = raw["-bt"]
-    ya.user_trans = raw["-ut"]
-
-    # str / set
-    ya.link = raw["link"]
-    ya.name = raw["-n"]
-    ya.thumb = raw["-t"]
-    ya.convert_audio = raw["-ca"]
-    ya.convert_video = raw["-cv"]
-    ya.name_sub = raw["-ns"]
-    ya.thumbnail_layout = raw["-tl"]
-    ya.ffmpeg_cmds = raw["-ff"]
-
-    # folder_name
-    m = raw["-m"]
-    ya.folder_name = f"/{m}".rstrip("/") if len(m) > 0 else ""
-
-    # split_size
-    ya.split_size = raw["-sp"]
-
-    # -i (multi)
-    try:
-        ya.multi = int(raw["-i"])
-    except (ValueError, TypeError):
-        ya.multi = 0
+    _apply_common(ya, raw)
 
     # -opt (yt-dlp options) – raw dict or string
     ya.opt = raw["-opt"] if isinstance(raw["-opt"], dict) else {}
-
-    # -b (bulk)
-    bulk_raw = raw["-b"]
-    if not isinstance(bulk_raw, bool):
-        dargs = bulk_raw.split(":")
-        ya.bulk_start = dargs[0] or None
-        if len(dargs) == 2:
-            ya.bulk_end = dargs[1] or None
-        ya.is_bulk = True
-    else:
-        ya.is_bulk = bulk_raw
 
     return ya
 
 
 # ── internal helpers ────────────────────────────────────────────────
+
+def _parse_raw(defaults: dict[str, object], input_list: list[str]) -> dict[str, object]:
+    """Run :func:`arg_parser` over a fresh copy of *defaults*."""
+    raw: dict[str, object] = {k: _copy_default(v) for k, v in defaults.items()}
+    arg_parser(input_list, raw)
+    return raw
+
+
+def _apply_common(args: CommonArgs, raw: dict[str, object]) -> None:
+    """Copy everything both commands parse alike from *raw* onto *args*."""
+    for key, attr in COMMON_ARG_FIELDS.items():
+        setattr(args, attr, raw[key])
+
+    # folder_name
+    m = raw["-m"]
+    args.folder_name = f"/{m}".rstrip("/") if len(m) > 0 else ""
+
+    # -i (multi) – tolerant parse
+    try:
+        args.multi = int(raw["-i"])
+    except (ValueError, TypeError):
+        args.multi = 0
+
+    # -b: a bare flag, or the ``start:end`` slice of the replied-to list. The
+    # empty halves fall back to 0 because ``extract_bulk_links`` puts both
+    # through ``int()``, and ``-b :5`` used to reach it as None from here.
+    bulk_raw = raw["-b"]
+    if not isinstance(bulk_raw, bool):
+        dargs = bulk_raw.split(":")
+        args.bulk_start = dargs[0] or 0
+        if len(dargs) == 2:
+            args.bulk_end = dargs[1] or 0
+        args.is_bulk = True
+    else:
+        args.is_bulk = bulk_raw
+
 
 def _copy_default(value: object) -> object:
     """Return a shallow copy of mutable defaults so each parse starts fresh."""
@@ -358,8 +284,7 @@ def parse_folder_name(input_list: list[str], *, ytdlp: bool = False) -> str:
     instead, and keeps the ``f"/{m}".rstrip("/")`` normalisation in one place.
     """
     defaults = YTDLP_ARG_DEFAULTS if ytdlp else LEECH_ARG_DEFAULTS
-    raw: dict[str, object] = {k: _copy_default(v) for k, v in defaults.items()}
-    arg_parser(input_list, raw)
+    raw = _parse_raw(defaults, input_list)
     m = raw["-m"]
     return f"/{m}".rstrip("/") if len(m) > 0 else ""
 

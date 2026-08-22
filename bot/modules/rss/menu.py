@@ -8,16 +8,13 @@ the router that called it.
 
 from __future__ import annotations
 
-from asyncio import sleep
-from time import time
-
-from pyrogram.filters import create
-from pyrogram.handlers import MessageHandler
+from functools import partial
 
 from ... import rss_dict, scheduler
 from ...core.config_manager import Config
 from ...helper.ext_utils.bot_utils import new_task
 from ...helper.telegram_helper.button_build import ButtonMaker
+from ...helper.telegram_helper.conversation import wait_for_message
 from ...helper.telegram_helper.filters import CustomFilters
 from ...helper.telegram_helper.message_utils import edit_message, send_message
 from .store import handler_dict, parse_chat_target, rss_dict_lock
@@ -173,20 +170,11 @@ async def event_handler(client, query, pfunc):
     torn down by whatever sets `handler_dict[user_id] = False` — either the
     reply handler itself or the next button press.
     """
-    user_id = query.from_user.id
-    handler_dict[user_id] = True
-    start_time = time()
-
-    async def event_filter(_, __, event):
-        user = event.from_user or event.sender_chat
-        return bool(
-            user.id == user_id and event.chat.id == query.message.chat.id and event.text
-        )
-
-    handler = client.add_handler(MessageHandler(pfunc, create(event_filter)), group=-1)
-    while handler_dict[user_id]:
-        await sleep(0.5)
-        if time() - start_time > 60:
-            handler_dict[user_id] = False
-            await update_rss_menu(query)
-    client.remove_handler(*handler)
+    await wait_for_message(
+        client,
+        query,
+        pfunc,
+        handler_dict,
+        query.from_user.id,
+        on_timeout=partial(update_rss_menu, query),
+    )

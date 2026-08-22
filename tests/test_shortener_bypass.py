@@ -27,7 +27,9 @@ def shortener(monkeypatch):
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
     ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = []
+    ext_utils_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "ext_utils")
+    ]  # real submodules (gateway) load from disk; the stubs above win in sys.modules
     exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
 
     class DirectDownloadLinkException(Exception):
@@ -54,11 +56,21 @@ def shortener(monkeypatch):
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
+    # the real gateway helper binds Config at import time; drop any copy an
+    # earlier test left in sys.modules so it binds this fixture's stub
+    sys.modules.pop("bot.helper.ext_utils.gateway", None)
     sys.modules.pop(_MODULE, None)
     module = importlib.import_module(_MODULE)
     # Never actually sleep between retries.
     monkeypatch.setattr(module, "sleep", lambda _seconds: None)
     return module
+
+
+@pytest.fixture
+def gateway_config(shortener):
+    """The stub Config the gateway helper read at import; mutate it to move the
+    gateway the bypasser talks to."""
+    return sys.modules["bot.core.config_manager"].Config
 
 
 def _mock_session(*responses):
@@ -132,9 +144,9 @@ def test_linkvertise_success_returns_target(shortener):
     assert session.get.call_count == 1
 
 
-def test_linkvertise_honours_configured_gateway_and_token(shortener):
-    shortener.Config.GATEWAY_URL = "https://gw.example.com/"
-    shortener.Config.GATEWAY_TOKEN = "secret"
+def test_linkvertise_honours_configured_gateway_and_token(shortener, gateway_config):
+    gateway_config.GATEWAY_URL = "https://gw.example.com/"
+    gateway_config.GATEWAY_TOKEN = "secret"
     mock_cls, _session, calls = _mock_session(
         (200, {"success": True, "url": "https://example.com/target"})
     )

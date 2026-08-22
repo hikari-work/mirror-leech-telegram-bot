@@ -17,9 +17,9 @@ from requests import Session
 
 from .._common import (
     LOGGER,
-    Config,
     DirectDownloadLinkException,
-    user_agent,
+    gateway_headers,
+    gateway_url,
 )
 from ..registry import register
 
@@ -53,17 +53,6 @@ def is_bunkr_link(url):
     return any(domain == d or domain.endswith(f".{d}") for d in BUNKR_DOMAINS)
 
 
-def _gateway_headers():
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _gateway_base():
-    return (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-
-
 def _parse_size(size_str):
     """Best-effort parse of human-readable size like '3.98 MB' to bytes."""
     if not size_str:
@@ -82,14 +71,17 @@ def _parse_size(size_str):
 
 # ── sync helpers (used by the @register handler) ────────────────────
 
-def _scrape_album(session, album_url):
-    """Scrape album page -> (response_dict, error_reason, retryable)."""
-    api = f"{_gateway_base()}/api/v1/scrape/bunkr"
+def _gateway_get(session, endpoint, query):
+    """Read one bunkr gateway endpoint -> (response_dict, error_reason, retryable).
+
+    A dead session or a 5xx is worth another attempt; an album that no longer
+    exists is not. Both endpoints answer in the same envelope.
+    """
     try:
         resp = session.get(
-            api,
-            params={"q": album_url},
-            headers=_gateway_headers(),
+            gateway_url(endpoint),
+            params={"q": query},
+            headers=gateway_headers(),
             timeout=60,
         )
     except Exception as exc:
@@ -103,6 +95,15 @@ def _scrape_album(session, album_url):
     if not data.get("success"):
         reason = data.get("error") or f"HTTP {resp.status_code}"
         return None, reason, resp.status_code >= 500
+
+    return data, None, False
+
+
+def _scrape_album(session, album_url):
+    """Scrape album page -> (response_dict, error_reason, retryable)."""
+    data, reason, retryable = _gateway_get(session, "/api/v1/scrape/bunkr", album_url)
+    if not data:
+        return None, reason, retryable
 
     if not data.get("files"):
         return None, "album has no files", False
@@ -112,30 +113,35 @@ def _scrape_album(session, album_url):
 
 def _resolve_file(session, file_url):
     """Resolve single file -> (response_dict, error_reason, retryable)."""
-    api = f"{_gateway_base()}/api/v1/scrape/bunkr/download"
-    try:
-        resp = session.get(
-            api,
-            params={"q": file_url},
-            headers=_gateway_headers(),
-            timeout=60,
-        )
-    except Exception as exc:
-        return None, exc.__class__.__name__, True
-
-    try:
-        data = resp.json()
-    except Exception:
-        return None, f"HTTP {resp.status_code} (non-JSON)", resp.status_code >= 500
-
-    if not data.get("success"):
-        reason = data.get("error") or f"HTTP {resp.status_code}"
-        return None, reason, resp.status_code >= 500
+    data, reason, retryable = _gateway_get(
+        session, "/api/v1/scrape/bunkr/download", file_url
+    )
+    if not data:
+        return None, reason, retryable
 
     if not (data.get("download_url") or "").startswith("http"):
         return None, "no download URL in response", False
 
     return data, None, False
+
+
+def _fetch_with_retries(fetch, failed, exhausted):
+    """Call *fetch* until it answers, or until the retryable attempts run out.
+
+    *failed* names what went wrong in the log line each attempt writes;
+    *exhausted* is what the user is told once the attempts are spent.
+    """
+    reason = "unknown error"
+    for attempt in range(1, BUNKR_ATTEMPTS + 1):
+        data, reason, retryable = fetch()
+        if data:
+            return data
+        LOGGER.info(f"Bunkr: {failed} ({reason})")
+        if not retryable:
+            raise DirectDownloadLinkException(f"ERROR: {reason}")
+        if attempt < BUNKR_ATTEMPTS:
+            sleep(3)
+    raise DirectDownloadLinkException(f"ERROR: {exhausted} ({reason})")
 
 
 # ── async resolver (called by DirectListener at download time) ──────
@@ -146,8 +152,8 @@ async def bunkr_resolve_download(file_url):
     Returns (download_url, filename, file_size) on success,
     or (None, "", 0) on failure.
     """
-    api = f"{_gateway_base()}/api/v1/scrape/bunkr/download"
-    headers = _gateway_headers()
+    api = gateway_url("/api/v1/scrape/bunkr/download")
+    headers = gateway_headers()
     timeout = ClientTimeout(total=60)
 
     for attempt in range(1, BUNKR_ATTEMPTS + 1):
@@ -200,20 +206,11 @@ def _handle_album(session, url):
 
     Each content entry carries the bunkr file page URL.  DirectListener
     resolves them just-in-time via ``bunkr_resolve_download``."""
-    reason = "unknown error"
-    for attempt in range(1, BUNKR_ATTEMPTS + 1):
-        album, reason, retryable = _scrape_album(session, url)
-        if album:
-            break
-        LOGGER.info(f"Bunkr: album scrape failed ({reason})")
-        if not retryable:
-            raise DirectDownloadLinkException(f"ERROR: {reason}")
-        if attempt < BUNKR_ATTEMPTS:
-            sleep(3)
-    else:
-        raise DirectDownloadLinkException(
-            f"ERROR: Bunkr album could not be scraped ({reason})"
-        )
+    album = _fetch_with_retries(
+        lambda: _scrape_album(session, url),
+        "album scrape failed",
+        "Bunkr album could not be scraped",
+    )
 
     title = (album.get("album_title") or "").strip() or album.get("album_id", "bunkr")
     contents = []
@@ -253,20 +250,11 @@ def _handle_album(session, url):
 
 def _handle_single(session, url):
     """Resolve a single Bunkr file URL (immediate, not lazy)."""
-    reason = "unknown error"
-    for attempt in range(1, BUNKR_ATTEMPTS + 1):
-        data, reason, retryable = _resolve_file(session, url)
-        if data:
-            break
-        LOGGER.info(f"Bunkr: single file resolve failed ({reason})")
-        if not retryable:
-            raise DirectDownloadLinkException(f"ERROR: {reason}")
-        if attempt < BUNKR_ATTEMPTS:
-            sleep(3)
-    else:
-        raise DirectDownloadLinkException(
-            f"ERROR: Bunkr file could not be resolved ({reason})"
-        )
+    data = _fetch_with_retries(
+        lambda: _resolve_file(session, url),
+        "single file resolve failed",
+        "Bunkr file could not be resolved",
+    )
 
     filename = data.get("filename") or ospath.basename(urlparse(url).path) or "bunkr"
     size = data.get("file_size") or 0

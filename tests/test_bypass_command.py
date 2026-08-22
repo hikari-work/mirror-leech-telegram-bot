@@ -91,6 +91,9 @@ def bypass_cmd(monkeypatch):
     mlu_pkg = _pkg("bot.helper.mirror_leech_utils")
     du_pkg = _pkg(_DU)
     tg_pkg = _pkg("bot.helper.telegram_helper")
+    # the real `conversation` helper is loaded from here -- it only needs
+    # bot_loop and the message_utils double below, both of which are stubbed
+    tg_pkg.__path__ = [str(_ROOT / "bot" / "helper" / "telegram_helper")]
     modules_pkg = _pkg("bot.modules")
     modules_pkg.__path__ = [str(_ROOT / "bot" / "modules")]
 
@@ -139,6 +142,9 @@ def bypass_cmd(monkeypatch):
         monkeypatch.setitem(sys.modules, name, mod)
 
     sys.modules.pop("bot.modules.bypass", None)
+    # `conversation` binds bot_loop and delete_message at import; drop any copy an
+    # earlier test left behind so it binds this fixture's doubles
+    sys.modules.pop("bot.helper.telegram_helper.conversation", None)
     return importlib.import_module("bot.modules.bypass"), stubs
 
 

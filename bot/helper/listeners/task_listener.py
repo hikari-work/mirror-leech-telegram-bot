@@ -549,6 +549,18 @@ class TaskListener(TaskConfig):
                 self.message, f"{self.tag} Download: {escape(str(error))}", button
             )
 
+        await self._teardown_after_error(count)
+
+    async def _teardown_after_error(self, count):
+        """Give the task's slots back and wipe what it left on disk.
+
+        Reached from both error paths: a download that never finished and an
+        upload that failed have the same debt to settle -- the status message,
+        the incomplete-task record, the four queue registries, and the task's
+        own directories. *count* is how many tasks were left in ``task_dict``
+        after this one was removed, which decides whether the status message is
+        torn down or merely refreshed.
+        """
         if count == 0:
             await self.clean()
         else:
@@ -594,35 +606,4 @@ class TaskListener(TaskConfig):
             else:
                 await send_message(self.message, f"{self.tag} {escape(str(error))}")
 
-        if count == 0:
-            await self.clean()
-        else:
-            await update_status_message(self.message.chat.id)
-
-        if (
-            self.is_super_chat
-            and Config.INCOMPLETE_TASK_NOTIFIER
-            and Config.DATABASE_URL
-        ):
-            await database.rm_complete_task(self.message.link)
-
-        async with queue_dict_lock:
-            if self.mid in queued_dl:
-                queued_dl[self.mid].set()
-                del queued_dl[self.mid]
-            if self.mid in queued_up:
-                queued_up[self.mid].set()
-                del queued_up[self.mid]
-            if self.mid in non_queued_dl:
-                non_queued_dl.remove(self.mid)
-            if self.mid in non_queued_up:
-                non_queued_up.remove(self.mid)
-            upload_chat_of.pop(self.mid, None)
-
-        await start_from_queued()
-        await sleep(3)
-        await clean_download(self.dir)
-        if self.up_dir:
-            await clean_download(self.up_dir)
-        if self.thumb and await aiopath.exists(self.thumb):
-            await remove(self.thumb)
+        await self._teardown_after_error(count)

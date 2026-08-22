@@ -14,58 +14,24 @@ bulk of folders from hitting the gateway once per video all at once.
 from __future__ import annotations
 
 from os import path as ospath
-from secrets import token_urlsafe
-from time import time
 
 from aiofiles.os import makedirs
 from aiofiles.os import path as aiopath
 from yt_dlp import YoutubeDL
 
-from .... import LOGGER, task_dict, task_dict_lock
+from .... import LOGGER
 from ...ext_utils.bot_utils import sync_to_async
 from ...ext_utils.resolve_gate import resolve_gate
-from ...ext_utils.task_manager import check_running_tasks
-from ...telegram_helper.message_utils import send_status_message
-from ..status_utils.queue_status import QueueStatus
+from .multi_video_download import MultiVideoDownloadHelper
 
 
-class VidaraDownloadHelper:
+class VidaraDownloadHelper(MultiVideoDownloadHelper):
     """Downloads every video of a resolved Vidara folder in one task."""
 
-    def __init__(self, listener):
-        self._listener = listener
-        self._gid = token_urlsafe(10)
-        self._processed = 0
-        self._current_downloaded = 0
-        self._speed = 0.0
-        self._last_time = 0.0
-        self._last_bytes = 0
-        self._done_count = 0
-        self._total_count = 0
+    def _make_status(self):
+        from ..status_utils.vidara_status import VidaraStatus
 
-    @property
-    def processed_bytes(self):
-        return self._processed + self._current_downloaded
-
-    @property
-    def speed(self):
-        now = time()
-        total = self._processed + self._current_downloaded
-        if (elapsed := now - self._last_time) > 0.5:
-            self._speed = (total - self._last_bytes) / elapsed
-            self._last_time = now
-            self._last_bytes = total
-        return self._speed
-
-    @property
-    def progress_str(self):
-        return f"{self._done_count}/{self._total_count}"
-
-    def _on_progress(self, d):
-        if self._listener.is_cancelled:
-            raise SystemExit("Cancelled")
-        if d["status"] == "downloading":
-            self._current_downloaded = d.get("downloaded_bytes", 0) or 0
+        return VidaraStatus(self._listener, self, self._gid)
 
     def _download_one(self, url: str, stem: str, headers: dict):
         """Mux one HLS stream to *stem* with yt-dlp (blocking).
@@ -104,36 +70,6 @@ class VidaraDownloadHelper:
 
         async with resolve_gate():
             return await sync_to_async(vidara_resolve, entry["url"], entry["name"])
-
-    async def _start(self):
-        """Announce the task and take a download slot. Returns *False* when the
-        task was cancelled while queued."""
-        from ..status_utils.vidara_status import VidaraStatus
-
-        add_to_queue, event = await check_running_tasks(self._listener)
-        if add_to_queue:
-            LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
-            async with task_dict_lock:
-                task_dict[self._listener.mid] = QueueStatus(
-                    self._listener, self._gid, "dl",
-                )
-            await self._listener.on_download_start()
-            if self._listener.multi <= 1 and not self._listener.is_rss:
-                await send_status_message(self._listener.message)
-            await event.wait()
-            if self._listener.is_cancelled:
-                return False
-
-        async with task_dict_lock:
-            task_dict[self._listener.mid] = VidaraStatus(
-                self._listener, self, self._gid,
-            )
-
-        if not add_to_queue:
-            await self._listener.on_download_start()
-            if self._listener.multi <= 1 and not self._listener.is_rss:
-                await send_status_message(self._listener.message)
-        return True
 
     async def _fetch_entry(self, entry, base):
         """Resolve one entry and mux it into *base*.
@@ -226,11 +162,6 @@ class VidaraDownloadHelper:
             )
 
         await self._listener.on_download_complete()
-
-    async def cancel_task(self):
-        self._listener.is_cancelled = True
-        LOGGER.info(f"Cancelling Download: {self._listener.name}")
-        await self._listener.on_download_error("Stopped by User!")
 
 
 async def add_vidara_download(listener, path):

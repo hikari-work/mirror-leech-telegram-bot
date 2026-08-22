@@ -1,14 +1,10 @@
-from asyncio import wait_for
 from html import escape
 from re import sub as re_sub
 from urllib.parse import urlparse
 
 from aiofiles import open as aiopen
 from aiofiles.os import remove, path as aiopath
-from pyrogram.filters import create
-from pyrogram.handlers import MessageHandler
 
-from .. import bot_loop
 from ..helper.ext_utils.bot_utils import new_task, sync_to_async
 from ..helper.ext_utils.exceptions import DirectDownloadLinkException
 from ..helper.mirror_leech_utils.download_utils.bypass_dispatcher import (
@@ -19,6 +15,7 @@ from ..helper.mirror_leech_utils.download_utils.url_shortener_bypass import (
     bypass_shortener,
     is_url_shortener,
 )
+from ..helper.telegram_helper.conversation import wait_for_reply
 from ..helper.telegram_helper.message_utils import (
     delete_message,
     edit_message,
@@ -50,36 +47,7 @@ def _format_page_list(text, total_pages):
 
 async def _ask_reply(client, message, user_id):
     """Wait for user's next text message in the same chat. Returns text or None."""
-    future = bot_loop.create_future()
-
-    async def event_filter(_, __, event):
-        user = event.from_user
-        return bool(
-            user
-            and user.id == user_id
-            and event.chat.id == message.chat.id
-            and event.text
-        )
-
-    async def catcher(_, event):
-        if not future.done():
-            future.set_result(event)
-
-    handler = client.add_handler(
-        MessageHandler(catcher, filters=create(event_filter)), group=-1
-    )
-    try:
-        reply = await wait_for(future, _PAGE_TIMEOUT)
-    except TimeoutError:
-        reply = None
-    finally:
-        client.remove_handler(*handler)
-
-    if reply is None:
-        return None
-    text = reply.text.strip()
-    await delete_message(reply)
-    return text
+    return await wait_for_reply(client, message, user_id, _PAGE_TIMEOUT)
 
 
 async def _resolve_shortlink(status, link):

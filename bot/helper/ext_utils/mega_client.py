@@ -19,7 +19,7 @@ from yarl import URL
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from bot.core.config_manager import Config
+from bot.helper.ext_utils.gateway import gateway_headers, gateway_url
 
 LOGGER = getLogger(__name__)
 
@@ -186,13 +186,10 @@ async def _gateway_get(session, path, params, context):
     Returns the parsed JSON body on success; raises MegaApiError on a final
     gateway error or once the attempts are spent.
     """
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    base = f"{gateway_base}/api/v1/scrape/mega{path}"
+    base = gateway_url(f"/api/v1/scrape/mega{path}")
     query_str = urlencode(params or {}, safe="%")
     req_url = URL(f"{base}?{query_str}", encoded=True) if query_str else URL(base)
-    headers = {"User-Agent": _USER_AGENT}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
+    headers = {"User-Agent": _USER_AGENT, **gateway_headers(accept_json=False)}
     reason = "unknown gateway error"
 
     for attempt in range(1, _API_ATTEMPTS + 1):

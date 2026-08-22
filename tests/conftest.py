@@ -57,6 +57,10 @@ def vidara(monkeypatch):
     common.Config = Config
     common.DirectDownloadLinkException = DirectDownloadLinkException
     common.user_agent = "UA"
+    # vidara reads the gateway through _common; the tests replace Session, so
+    # only the shape of these matters here
+    common.gateway_url = lambda path="": f"{Config.GATEWAY_URL}{path}"
+    common.gateway_headers = lambda accept_json=True: {"accept": "application/json"}
 
     registry = ModuleType("dlg_stub.registry")
     registry.register = lambda **kwargs: (lambda func: func)

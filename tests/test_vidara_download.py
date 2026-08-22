@@ -191,6 +191,21 @@ def _stub_modules(resolved):
     return modules
 
 
+def _load(monkeypatch, name):
+    """Load one real ``download_utils`` module under the stubbed package tree."""
+    path = (
+        _ROOT / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
+        / f"{name}.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        f"bot.helper.mirror_leech_utils.download_utils.{name}", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture
 def vidara_dl(monkeypatch, tmp_path):
     """Load ``vidara_download.py`` with the bot package stubbed to what it uses."""
@@ -201,15 +216,9 @@ def vidara_dl(monkeypatch, tmp_path):
     for name, mod in _stub_modules(resolved).items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    name = "bot.helper.mirror_leech_utils.download_utils.vidara_download"
-    path = (
-        _ROOT / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
-        / "vidara_download.py"
-    )
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, name, module)
-    spec.loader.exec_module(module)
+    # the queue slot, the counters and the cancel path come from the shared base
+    _load(monkeypatch, "multi_video_download")
+    module = _load(monkeypatch, "vidara_download")
     monkeypatch.setattr(module, "YoutubeDL", _FakeYoutubeDL)
 
     return SimpleNamespace(module=module, resolved=resolved, path=str(tmp_path))

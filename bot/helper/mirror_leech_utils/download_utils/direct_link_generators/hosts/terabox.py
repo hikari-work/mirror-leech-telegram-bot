@@ -17,45 +17,24 @@ from requests import Session
 
 from .._common import (
     LOGGER,
-    Config,
     DirectDownloadLinkException,
+    gateway_headers,
+    gateway_url,
+    header_dict,
     user_agent,
 )
 from ..registry import register
 
 
-from urllib.parse import quote
-
-def _get_proxy_list():
-    """Return the current proxy pool (gateway-backed, cached; see proxy_pool).
+def _proxied_url(cdn_url, proxy_index=0):
+    """Wrap cdn_url through the selected proxy worker.
 
     Imported lazily so that merely importing the host registry does not require
     the proxy_pool module (the direct-link test harness stubs ext_utils).
-    Entries are bare base URLs; _proxied_url() appends the ?url= form.
     """
-    from bot.helper.ext_utils.proxy_pool import get_proxy_pool
+    from bot.helper.ext_utils.proxy_pool import proxied_url
 
-    return get_proxy_pool()
-
-
-def _proxied_url(cdn_url, proxy_index=0):
-    """Wrap cdn_url through the selected proxy worker."""
-    proxies = _get_proxy_list()
-    if not proxies:
-        return cdn_url
-        
-    base = proxies[proxy_index % len(proxies)]
-    encoded_cdn = quote(cdn_url, safe="")
-    
-    if "{url}" in base:
-        return base.format(url=encoded_cdn)
-    if base.endswith("=") or base.endswith("&"):
-        return f"{base}{encoded_cdn}"
-    if "?" in base:
-        return f"{base}&url={encoded_cdn}"
-    if base.endswith("/"):
-        return f"{base}?url={encoded_cdn}"
-    return f"{base}/?url={encoded_cdn}"
+    return proxied_url(cdn_url, proxy_index)
 
 
 def _probe_with_proxy(link, headers, proxy_index=0):
@@ -143,11 +122,7 @@ def _sanitize_url(url):
 
 def _gateway():
     """(url, headers) for the scrape API."""
-    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    headers = {}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return f"{base}/api/v1/scrape/terabox", headers
+    return gateway_url("/api/v1/scrape/terabox"), gateway_headers(accept_json=False)
 
 
 def _build_header(download_info):
@@ -166,14 +141,6 @@ def _build_header(download_info):
     if cookie:
         header.append(f"Cookie: {cookie}")
     return header
-
-
-def _header_dict(header):
-    headers = {}
-    for line in header:
-        key, _, value = line.partition(":")
-        headers[key.strip()] = value.strip()
-    return headers
 
 
 def _links(file):
@@ -301,14 +268,14 @@ def _resolve_links(session, sanitized_url):
     
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         # Only call API if we need fresh data or credentials changed
-        if contents is None or (last_header and _header_dict(header) != _header_dict(last_header)):
+        if contents is None or (last_header and header_dict(header) != header_dict(last_header)):
             files, header, title = _scrape(session, sanitized_url)
-            headers = _header_dict(header)
+            headers = header_dict(header)
             LOGGER.info(f"Terabox: API call #{attempt} - got {len(files)} files")
         else:
             # Reuse existing data for retry
             files = contents
-            headers = _header_dict(header)
+            headers = header_dict(header)
 
         if contents is None:
             contents = files

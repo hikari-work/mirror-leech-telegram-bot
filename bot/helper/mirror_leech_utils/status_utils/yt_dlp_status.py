@@ -1,31 +1,17 @@
-from ...ext_utils.status_utils import (
-    MirrorStatus,
-    get_readable_file_size,
-    get_readable_time,
-)
+from ...ext_utils.status_utils import get_readable_file_size, get_readable_time
+from .base import BaseStatus
 
 
-class YtDlpStatus:
-    def __init__(self, listener, obj, gid):
-        self._obj = obj
-        self._gid = gid
-        self.listener = listener
-        self.tool = "yt-dlp"
+class YtDlpStatus(BaseStatus):
+    """yt-dlp keeps its own totals, so every count here comes off the helper."""
 
-    def gid(self):
-        return self._gid
+    tool = "yt-dlp"
 
     def processed_bytes(self):
         return get_readable_file_size(self._obj.downloaded_bytes)
 
     def size(self):
         return get_readable_file_size(self._obj.size)
-
-    def status(self):
-        return MirrorStatus.STATUS_DOWNLOAD
-
-    def name(self):
-        return self.listener.name
 
     def progress(self):
         return f"{round(self._obj.progress, 2)}%"
@@ -43,6 +29,3 @@ class YtDlpStatus:
             return get_readable_time(seconds)
         except Exception:
             return "-"
-
-    def task(self):
-        return self._obj

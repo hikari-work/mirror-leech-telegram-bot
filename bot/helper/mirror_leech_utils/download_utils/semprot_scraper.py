@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 
 from aiohttp import ClientSession, ClientTimeout
 
-from ....core.config_manager import Config
+from ...ext_utils.gateway import gateway_headers, gateway_url
 from ...ext_utils.exceptions import DirectDownloadLinkException
 
 
@@ -22,16 +22,8 @@ def _normalize_url(url: str) -> str:
     return url.replace("senang.top", "semprot.com")
 
 
-def _gateway_headers():
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
 def _gateway_url():
-    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    return f"{base}/api/v1/scrape/semprot"
+    return gateway_url("/api/v1/scrape/semprot")
 
 
 async def scrape_pages(url: str, page_list: str = "1", filter_host: str = ""):
@@ -57,7 +49,7 @@ async def scrape_pages(url: str, page_list: str = "1", filter_host: str = ""):
             async with session.get(
                 _gateway_url(),
                 params=params,
-                headers=_gateway_headers(),
+                headers=gateway_headers(),
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()

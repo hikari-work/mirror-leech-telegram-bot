@@ -8,7 +8,13 @@ from cloudscraper import create_scraper
 from lxml.etree import HTML
 from requests import Session, get
 
-from .._common import Config, DirectDownloadLinkException, user_agent
+from .._common import (
+    Config,
+    DirectDownloadLinkException,
+    gateway_headers,
+    gateway_url,
+    user_agent,
+)
 from ..registry import register
 
 # --- DoodStream ---
@@ -95,11 +101,8 @@ _STREAMTAPE_DOMAINS = (
 
 @register(*_STREAMTAPE_DOMAINS, order=33)
 def streamtape(url):
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    api_url = f"{gateway_base}/api/v1/scrape/streamtape"
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
+    api_url = gateway_url("/api/v1/scrape/streamtape")
+    headers = gateway_headers()
     try:
         resp = get(api_url, params={"q": url}, headers=headers, timeout=60)
         result = resp.json()

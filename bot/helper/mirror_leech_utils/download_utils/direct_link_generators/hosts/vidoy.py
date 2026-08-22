@@ -8,8 +8,10 @@ from requests import Session
 
 from .._common import (
     LOGGER,
-    Config,
     DirectDownloadLinkException,
+    gateway_headers,
+    gateway_url,
+    header_lines,
     user_agent,
 )
 from ..registry import register
@@ -50,11 +52,8 @@ def vidoy_sanitize_url(url):
 def vidoy_scrape(session, target, probe=False):
     """Return (response, reason, retryable). A gateway hiccup is worth another
     attempt, a removed video is not."""
-    gateway_base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    vidoy_api = f"{gateway_base}/api/v1/scrape/vidoy"
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
+    vidoy_api = gateway_url("/api/v1/scrape/vidoy")
+    headers = gateway_headers()
     params = {"q": target}
     if probe:
         params["probe"] = "true"
@@ -152,17 +151,6 @@ def vidoy(url):
 
     max_attempts = VIDOY_ATTEMPTS
 
-    def __build_header(download_info):
-        headers = vidoy_headers(download_info)
-        return [f"{key}: {value}" for key, value in sorted(headers.items())]
-
-    def __header_dict(header):
-        headers = {}
-        for line in header:
-            key, _, value = line.partition(":")
-            headers[key.strip()] = value.strip()
-        return headers
-
     def __filename(response):
         name = (response.get("title") or "").strip().replace("\\", "/")
         name = ospath.basename(name).strip()
@@ -239,10 +227,9 @@ def vidoy(url):
                         "name": vidoy_stem(response),
                         "headers": vidoy_headers(response.get("download") or {}),
                     }
-                header = __build_header(response.get("download") or {})
-                link, probed_size, reason = __probe(
-                    response["cdn_url"], __header_dict(header)
-                )
+                headers = vidoy_headers(response.get("download") or {})
+                header = header_lines(headers)
+                link, probed_size, reason = __probe(response["cdn_url"], headers)
                 if link:
                     break
                 reason = f"CDN link rejected ({reason})"

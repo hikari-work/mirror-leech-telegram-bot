@@ -187,30 +187,60 @@ async def temp_download(msg):
     return await msg.download(file_name=f"{path}/")
 
 
+def cancel_status_interval(sid):
+    """Stop the ticker that refreshes the status message of *sid*."""
+    if obj := intervals["status"].get(sid):
+        obj.cancel()
+        del intervals["status"][sid]
+
+
+def _drop_status(sid):
+    """Forget the status message of *sid* and stop refreshing it.
+
+    Every path that gives up on a status message -- nothing left to report,
+    Telegram refusing the edit -- has to do both, and dropping the entry while
+    leaving the ticker behind means it keeps firing against a message that is no
+    longer tracked.
+    """
+    del status_dict[sid]
+    cancel_status_interval(sid)
+
+
+async def _render_status(sid, is_user):
+    """The status text and buttons for *sid*, on the page it was left at."""
+    data = status_dict[sid]
+    return await get_readable_message(
+        sid, is_user, data["page_no"], data["status"], data["page_step"]
+    )
+
+
+async def _send_status(msg, sid, text, buttons):
+    """Send a status message as a reply to *msg*, or None if Telegram refused.
+
+    ``.text`` is kept on the returned message because the update path compares
+    against it to decide whether an edit is worth a request.
+    """
+    message = await send_message(msg, text, buttons, block=False)
+    if isinstance(message, str):
+        LOGGER.error(f"Status with id: {sid} haven't been sent. Error: {message}")
+        return None
+    message.text = text
+    return message
+
+
 async def update_status_message(sid, force=False):
     if intervals["stopAll"]:
         return
     async with task_dict_lock:
         if not status_dict.get(sid):
-            if obj := intervals["status"].get(sid):
-                obj.cancel()
-                del intervals["status"][sid]
+            cancel_status_interval(sid)
             return
         if not force and time() - status_dict[sid]["time"] < 3:
             return
         status_dict[sid]["time"] = time()
-        page_no = status_dict[sid]["page_no"]
-        status = status_dict[sid]["status"]
-        is_user = status_dict[sid]["is_user"]
-        page_step = status_dict[sid]["page_step"]
-        text, buttons = await get_readable_message(
-            sid, is_user, page_no, status, page_step
-        )
+        text, buttons = await _render_status(sid, status_dict[sid]["is_user"])
         if text is None:
-            del status_dict[sid]
-            if obj := intervals["status"].get(sid):
-                obj.cancel()
-                del intervals["status"][sid]
+            _drop_status(sid)
             return
         if text != status_dict[sid]["message"].text:
             message = await edit_message(
@@ -218,10 +248,7 @@ async def update_status_message(sid, force=False):
             )
             if isinstance(message, str):
                 if message.startswith("Telegram says: [40"):
-                    del status_dict[sid]
-                    if obj := intervals["status"].get(sid):
-                        obj.cancel()
-                        del intervals["status"][sid]
+                    _drop_status(sid)
                 else:
                     LOGGER.error(
                         f"Status with id: {sid} haven't been updated. Error: {message}"
@@ -251,27 +278,15 @@ async def send_status_message(msg, user_id=0, force=False):
             ):
                 throttled = True
             else:
-                page_no = status_dict[sid]["page_no"]
-                status = status_dict[sid]["status"]
-                page_step = status_dict[sid]["page_step"]
-                text, buttons = await get_readable_message(
-                    sid, is_user, page_no, status, page_step
-                )
+                text, buttons = await _render_status(sid, is_user)
                 if text is None:
-                    del status_dict[sid]
-                    if obj := intervals["status"].get(sid):
-                        obj.cancel()
-                        del intervals["status"][sid]
+                    _drop_status(sid)
                     return
                 old_message = status_dict[sid]["message"]
-                message = await send_message(msg, text, buttons, block=False)
-                if isinstance(message, str):
-                    LOGGER.error(
-                        f"Status with id: {sid} haven't been sent. Error: {message}"
-                    )
+                message = await _send_status(msg, sid, text, buttons)
+                if message is None:
                     return
                 await delete_message(old_message)
-                message.text = text
                 status_dict[sid].update(
                     {"message": message, "time": time(), "sent_at": time()}
                 )
@@ -279,13 +294,9 @@ async def send_status_message(msg, user_id=0, force=False):
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
                 return
-            message = await send_message(msg, text, buttons, block=False)
-            if isinstance(message, str):
-                LOGGER.error(
-                    f"Status with id: {sid} haven't been sent. Error: {message}"
-                )
+            message = await _send_status(msg, sid, text, buttons)
+            if message is None:
                 return
-            message.text = text
             status_dict[sid] = {
                 "message": message,
                 "time": time(),

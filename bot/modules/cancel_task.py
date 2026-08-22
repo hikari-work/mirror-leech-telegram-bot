@@ -1,13 +1,12 @@
 from asyncio import sleep
 
-from .. import task_dict, task_dict_lock, user_data, multi_tags
-from ..core.config_manager import Config
+from .. import task_dict, task_dict_lock, multi_tags
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.status_utils import (
-    get_task_by_gid,
     get_all_tasks,
     MirrorStatus,
 )
+from ..helper.ext_utils.task_lookup import task_from_command, task_is_yours
 from ..helper.telegram_helper import button_build
 from ..helper.telegram_helper.bot_commands import BotCommands
 from ..helper.telegram_helper.filters import CustomFilters
@@ -23,35 +22,18 @@ from ..helper.telegram_helper.message_utils import (
 async def cancel(_, message):
     user_id = message.from_user.id if message.from_user else message.sender_chat.id
     msg = message.text.split()
-    if len(msg) > 1:
-        gid = msg[1]
-        if len(gid) == 4:
-            multi_tags.discard(gid)
-            return
-        else:
-            task = await get_task_by_gid(gid)
-            if task is None:
-                await send_message(message, f"GID: <code>{gid}</code> Not Found.")
-                return
-    elif reply_to_id := message.reply_to_message_id:
-        async with task_dict_lock:
-            task = task_dict.get(reply_to_id)
-        if task is None:
-            await send_message(message, "This is not an active task!")
-            return
-    elif len(msg) == 1:
-        msg = (
-            "Reply to an active Command message which was used to start the download"
-            f" or send <code>/{BotCommands.CancelTaskCommand[0]} GID</code> to cancel it!"
-        )
-        await send_message(message, msg)
+    gid = msg[1] if len(msg) > 1 else ""
+    if len(gid) == 4:
+        # four characters is a bulk's tag, not a task's gid
+        multi_tags.discard(gid)
         return
-    if (
-        Config.OWNER_ID != user_id
-        and task.listener.user_id != user_id
-        and (user_id not in user_data or not user_data[user_id].get("SUDO"))
-    ):
-        await send_message(message, "This task is not for you!")
+    task = await task_from_command(
+        message,
+        gid,
+        "Reply to an active Command message which was used to start the download"
+        f" or send <code>/{BotCommands.CancelTaskCommand[0]} GID</code> to cancel it!",
+    )
+    if task is None or not await task_is_yours(message, task, user_id):
         return
     obj = task.task()
     await obj.cancel_task()

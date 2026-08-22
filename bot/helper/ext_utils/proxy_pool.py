@@ -8,12 +8,14 @@ the hot path (one call per download segment) never touches the network.
 """
 
 from time import time
+from urllib.parse import quote
 
 from aiohttp import ClientSession, ClientTimeout
 from requests import get as _requests_get
 
 from ... import LOGGER
 from ...core.config_manager import Config
+from .gateway import gateway_headers, gateway_url
 
 # Final fallback when both the gateway and Config.MEGA_PROXY_URL are empty.
 _DEFAULT_PROXIES = [
@@ -61,15 +63,7 @@ def _parse(body):
 
 
 def _proxy_endpoint():
-    base = (getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me").rstrip("/")
-    return f"{base}/api/v1/proxy"
-
-
-def _gateway_headers():
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+    return gateway_url("/api/v1/proxy")
 
 
 def _store(proxies):
@@ -97,6 +91,33 @@ def reset_proxy_pool():
     _cache["ts"] = 0.0
 
 
+def proxied_url(cdn_url, proxy_index=0):
+    """*cdn_url* fetched through one worker of the pool, chosen by *proxy_index*.
+
+    The workers are not all written the same way -- some take a ``{url}``
+    placeholder, some already end in ``?url=``, most are a bare base -- so
+    callers hand over a plain URL and an index and the splicing happens here.
+    Rotating is the caller's job: it bumps the index when a worker answers with a
+    quota status. An empty pool means the URL is returned untouched, which is
+    what the terabox path relied on and the mega path used to divide by.
+    """
+    proxies = get_proxy_pool()
+    if not proxies:
+        return cdn_url
+
+    base = proxies[proxy_index % len(proxies)]
+    encoded_cdn = quote(cdn_url, safe="")
+    if "{url}" in base:
+        return base.format(url=encoded_cdn)
+    if base.endswith(("=", "&")):
+        return f"{base}{encoded_cdn}"
+    if "?" in base:
+        return f"{base}&url={encoded_cdn}"
+    if base.endswith("/"):
+        return f"{base}?url={encoded_cdn}"
+    return f"{base}/?url={encoded_cdn}"
+
+
 def refresh_proxy_pool_sync(force=False):
     """Refresh the pool from the gateway with a blocking request (terabox path).
 
@@ -105,7 +126,7 @@ def refresh_proxy_pool_sync(force=False):
     if not force and _is_fresh():
         return _cache["proxies"]
     try:
-        resp = _requests_get(_proxy_endpoint(), headers=_gateway_headers(), timeout=10)
+        resp = _requests_get(_proxy_endpoint(), headers=gateway_headers(), timeout=10)
         resp.raise_for_status()
         proxies = _parse(resp.json())
         if proxies:
@@ -128,7 +149,7 @@ async def refresh_proxy_pool(session=None, force=False):
     try:
         if own:
             session = ClientSession(timeout=ClientTimeout(total=15))
-        async with session.get(_proxy_endpoint(), headers=_gateway_headers()) as resp:
+        async with session.get(_proxy_endpoint(), headers=gateway_headers()) as resp:
             resp.raise_for_status()
             body = await resp.json(content_type=None)
         proxies = _parse(body)

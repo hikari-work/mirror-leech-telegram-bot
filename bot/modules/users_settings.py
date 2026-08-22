@@ -1,14 +1,10 @@
-from asyncio import sleep
 from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
 from re import findall
-from time import time
 
 from aiofiles.os import path as aiopath
 from aiofiles.os import remove
-from pyrogram.filters import create
-from pyrogram.handlers import MessageHandler
 
 from .. import (
     auth_chats,
@@ -25,6 +21,7 @@ from ..helper.ext_utils.db_handler import database
 from ..helper.ext_utils.help_messages import user_settings_text
 from ..helper.ext_utils.media_utils import create_thumb
 from ..helper.telegram_helper.button_build import ButtonMaker
+from ..helper.telegram_helper.conversation import wait_for_message
 from ..helper.telegram_helper.message_utils import (
     delete_message,
     edit_message,
@@ -221,31 +218,16 @@ async def ffmpeg_variables(
 
 
 async def event_handler(client, query, pfunc, photo=False, document=False):
-    user_id = query.from_user.id
-    handler_dict[user_id] = True
-    start_time = time()
-
-    async def event_filter(_, __, event):
-        if photo:
-            mtype = event.photo
-        elif document:
-            mtype = event.document
-        else:
-            mtype = event.text
-        user = event.from_user or event.sender_chat
-        return bool(
-            user.id == user_id and event.chat.id == query.message.chat.id and mtype
-        )
-
-    handler = client.add_handler(
-        MessageHandler(pfunc, filters=create(event_filter)), group=-1
+    """Wait for the answer to the prompt this callback has just put on screen."""
+    if photo:
+        media = ("photo",)
+    elif document:
+        media = ("document",)
+    else:
+        media = ("text",)
+    await wait_for_message(
+        client, query, pfunc, handler_dict, query.from_user.id, media
     )
-
-    while handler_dict[user_id]:
-        await sleep(0.5)
-        if time() - start_time > 60:
-            handler_dict[user_id] = False
-    client.remove_handler(*handler)
 
 
 @dataclass(slots=True)

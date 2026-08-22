@@ -1,4 +1,3 @@
-from asyncio import wait_for, TimeoutError as AsyncTimeoutError
 from pyrogram import Client, enums
 from pyrogram.errors import (
     FloodWait,
@@ -9,15 +8,14 @@ from pyrogram.errors import (
     PhoneNumberInvalid,
     SessionPasswordNeeded,
 )
-from pyrogram.filters import create
-from pyrogram.handlers import MessageHandler
 from pyrogram.types import User
 
-from .. import LOGGER, bot_loop, user_data, user_clients
+from .. import LOGGER, user_data, user_clients
 from ..core.config_manager import Config
 from ..core.telegram_manager import get_user_client, stop_user_client
 from ..helper.ext_utils.bot_utils import new_task, update_user_ldata
 from ..helper.ext_utils.user_sessions import save_user_session
+from ..helper.telegram_helper.conversation import wait_for_reply
 from ..helper.telegram_helper.message_utils import (
     delete_message,
     send_message,
@@ -36,36 +34,7 @@ async def _ask(client, message, user_id, text):
     prompt = await send_message(message, text)
     if isinstance(prompt, str):
         return None, None
-    future = bot_loop.create_future()
-
-    async def event_filter(_, __, event):
-        user = event.from_user
-        return bool(
-            user
-            and user.id == user_id
-            and event.chat.id == message.chat.id
-            and event.text
-        )
-
-    async def catcher(_, event):
-        if not future.done():
-            future.set_result(event)
-
-    handler = client.add_handler(
-        MessageHandler(catcher, filters=create(event_filter)), group=-1
-    )
-    try:
-        reply = await wait_for(future, TIMEOUT)
-    except AsyncTimeoutError:
-        reply = None
-    finally:
-        client.remove_handler(*handler)
-
-    if reply is None:
-        return prompt, None
-    answer = reply.text.strip()
-    await delete_message(reply)
-    return prompt, answer
+    return prompt, await wait_for_reply(client, message, user_id, TIMEOUT)
 
 
 @new_task

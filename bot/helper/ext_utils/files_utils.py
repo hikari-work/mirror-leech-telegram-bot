@@ -1,6 +1,5 @@
 from aioshutil import rmtree as aiormtree, move
 from asyncio import create_subprocess_exec, wait_for
-from asyncio.subprocess import PIPE
 from magic import Magic
 from os import walk, path as ospath, readlink
 from re import split as re_split, I, search as re_search, escape
@@ -18,6 +17,7 @@ from ... import LOGGER, DOWNLOAD_DIR
 from ...core.torrent_manager import TorrentManager
 from .bot_utils import sync_to_async, cmd_exec
 from .exceptions import NotSupportedExtractionArchive
+from .subproc_runner import SubprocRunner, run_subproc
 
 ARCH_EXT = [
     ".7z",
@@ -189,19 +189,31 @@ async def clean_unwanted(opath):
             await rmdir(dirpath)
 
 
+async def walk_files(opath, topdown=False):
+    """Every file under *opath*, deepest directory first by default.
+
+    ``os.walk`` blocks, so the whole tree is drained into a list off the event
+    loop before any of the paths are touched -- which is also what makes the
+    deepest-first order safe to move or delete through.
+    """
+    walk_data = await sync_to_async(lambda: list(walk(opath, topdown=topdown)))
+    return [
+        ospath.join(dirpath, file_)
+        for dirpath, _, files in walk_data
+        for file_ in files
+    ]
+
+
 async def get_path_size(opath):
     total_size = 0
     if await aiopath.isfile(opath):
         if await aiopath.islink(opath):
             opath = await aioreadlink(opath)
         return await aiopath.getsize(opath)
-    walk_data = await sync_to_async(lambda: list(walk(opath)))
-    for root, _, files in walk_data:
-        for f in files:
-            abs_path = ospath.join(root, f)
-            if await aiopath.islink(abs_path):
-                abs_path = await aioreadlink(abs_path)
-            total_size += await aiopath.getsize(abs_path)
+    for abs_path in await walk_files(opath):
+        if await aiopath.islink(abs_path):
+            abs_path = await aioreadlink(abs_path)
+        total_size += await aiopath.getsize(abs_path)
     return total_size
 
 
@@ -250,25 +262,27 @@ def get_mime_type(file_path):
     return mime_type
 
 
-async def remove_excluded_files(fpath, ee):
+async def _remove_walked(fpath, should_remove):
+    """Delete every file under *fpath* that *should_remove* accepts by name.
+
+    The thumbnail directory yt-dlp writes is skipped: both callers mean the
+    payload, and a filter written for videos would take the thumbs with it.
+    """
     walk_data = await sync_to_async(lambda: list(walk(fpath)))
     for root, _, files in walk_data:
         if root.strip().endswith("/yt-dlp-thumb"):
             continue
         for f in files:
-            if f.strip().lower().endswith(tuple(ee)):
+            if should_remove(f):
                 await remove(ospath.join(root, f))
 
 
+async def remove_excluded_files(fpath, ee):
+    await _remove_walked(fpath, lambda f: f.strip().lower().endswith(tuple(ee)))
+
+
 async def remove_non_included_files(fpath, ie):
-    walk_data = await sync_to_async(lambda: list(walk(fpath)))
-    for root, _, files in walk_data:
-        if root.strip().endswith("/yt-dlp-thumb"):
-            continue
-        for f in files:
-            if f.strip().lower().endswith(tuple(ie)):
-                continue
-            await remove(ospath.join(root, f))
+    await _remove_walked(fpath, lambda f: not f.strip().lower().endswith(tuple(ie)))
 
 
 async def move_and_merge(source, destination, mid):
@@ -323,34 +337,28 @@ async def join_files(opath):
 
 async def split_file(f_path, split_size, listener):
     out_path = f"{f_path}."
-    if listener.is_cancelled:
-        return False
-    listener.subproc = await create_subprocess_exec(
-        "split",
-        "--numeric-suffixes=1",
-        "--suffix-length=3",
-        f"--bytes={split_size}",
-        f_path,
-        out_path,
-        stderr=PIPE,
+    # stdout is left alone: `split` says nothing on it, and there is no progress
+    # to read back
+    code, stderr = await run_subproc(
+        listener,
+        [
+            "split",
+            "--numeric-suffixes=1",
+            "--suffix-length=3",
+            f"--bytes={split_size}",
+            f_path,
+            out_path,
+        ],
+        stdout=None,
     )
-    _, stderr = await listener.subproc.communicate()
-    code = listener.subproc.returncode
-    if listener.is_cancelled:
+    if code is None:
         return False
-    if code == -9:
-        listener.is_cancelled = True
-        return False
-    elif code != 0:
-        try:
-            stderr = stderr.decode().strip()
-        except Exception:
-            stderr = "Unable to decode the error!"
+    if code != 0:
         LOGGER.error(f"{stderr}. Split Document: {f_path}")
     return True
 
 
-class SevenZ:
+class SevenZ(SubprocRunner):
     def __init__(self, listener):
         self._listener = listener
         self._processed_bytes = 0
@@ -364,7 +372,7 @@ class SevenZ:
     def progress(self):
         return self._percentage
 
-    async def _sevenz_progress(self):
+    async def _read_progress(self):
         pattern = (
             r"(\d+)\s+bytes|Total Physical Size\s*=\s*(\d+)|Physical Size\s*=\s*(\d+)"
         )
@@ -430,26 +438,10 @@ class SevenZ:
         ]
         if not pswd:
             del cmd[2]
-        if self._listener.is_cancelled:
+        code, stderr = await self._run_cmd(cmd)
+        if code is None:
             return False
-        self._listener.subproc = await create_subprocess_exec(
-            *cmd,
-            stdout=PIPE,
-            stderr=PIPE,
-        )
-        await self._sevenz_progress()
-        _, stderr = await self._listener.subproc.communicate()
-        code = self._listener.subproc.returncode
-        if self._listener.is_cancelled:
-            return False
-        if code == -9:
-            self._listener.is_cancelled = True
-            return False
-        elif code != 0:
-            try:
-                stderr = stderr.decode().strip()
-            except (UnicodeDecodeError, AttributeError):
-                stderr = "Unable to decode the error!"
+        if code != 0:
             LOGGER.error(f"{stderr}. Unable to extract archive!. Path: {f_path}")
         return code
 
@@ -481,28 +473,13 @@ class SevenZ:
             if not pswd:
                 del cmd[3]
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}")
-        if self._listener.is_cancelled:
+        code, stderr = await self._run_cmd(cmd)
+        if code is None:
             return False
-        self._listener.subproc = await create_subprocess_exec(
-            *cmd, stdout=PIPE, stderr=PIPE
-        )
-        await self._sevenz_progress()
-        _, stderr = await self._listener.subproc.communicate()
-        code = self._listener.subproc.returncode
-        if self._listener.is_cancelled:
-            return False
-        if code == -9:
-            self._listener.is_cancelled = True
-            return False
-        elif code == 0:
+        if code == 0:
             await clean_target(dl_path)
             return up_path
-        else:
-            if await aiopath.exists(up_path):
-                await remove(up_path)
-            try:
-                stderr = stderr.decode().strip()
-            except (UnicodeDecodeError, AttributeError):
-                stderr = "Unable to decode the error!"
-            LOGGER.error(f"{stderr}. Unable to zip this path: {dl_path}")
-            return dl_path
+        if await aiopath.exists(up_path):
+            await remove(up_path)
+        LOGGER.error(f"{stderr}. Unable to zip this path: {dl_path}")
+        return dl_path

@@ -54,7 +54,9 @@ def dlg(monkeypatch):
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
     ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = []
+    ext_utils_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "ext_utils")
+    ]  # real submodules (gateway) load from disk; the stubs above win in sys.modules
 
     exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
 
@@ -118,6 +120,9 @@ def dlg(monkeypatch):
     base = "bot.helper.mirror_leech_utils.download_utils.direct_link_generators"
     for name in [m for m in sys.modules if m.startswith(base)]:
         sys.modules.pop(name, None)
+    # the real gateway helper binds Config at import time; drop any copy an
+    # earlier test left in sys.modules so it binds this fixture's stub
+    sys.modules.pop("bot.helper.ext_utils.gateway", None)
     return importlib.import_module(base)
 
 

@@ -8,6 +8,7 @@ from requests import post
 from ..... import LOGGER  # noqa: F401
 from .....core.config_manager import Config  # noqa: F401
 from ....ext_utils.exceptions import DirectDownloadLinkException  # noqa: F401
+from ....ext_utils.gateway import gateway_headers, gateway_url  # noqa: F401
 from ....ext_utils.help_messages import PASSWORD_ERROR_MESSAGE  # noqa: F401
 from ....ext_utils.links_utils import is_share_link  # noqa: F401
 from ....ext_utils.status_utils import speed_string_to_bytes  # noqa: F401
@@ -16,6 +17,23 @@ from ..url_shortener_bypass import bypass_shortener, is_url_shortener  # noqa: F
 user_agent = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 )
+
+
+def header_lines(headers):
+    """A header map as the "Key: value" lines aria2 takes."""
+    return [f"{key}: {value}" for key, value in sorted(headers.items())]
+
+
+def header_dict(lines):
+    """"Key: value" lines back to a map, for the probes that want one.
+
+    Only the first colon separates: a value is a URL as often as not.
+    """
+    headers = {}
+    for line in lines:
+        key, _, value = line.partition(":")
+        headers[key.strip()] = value.strip()
+    return headers
 
 
 def get_captcha_token(session, params):

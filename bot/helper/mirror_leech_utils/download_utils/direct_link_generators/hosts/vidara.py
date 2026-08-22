@@ -9,8 +9,9 @@ from requests import Session
 
 from .._common import (
     LOGGER,
-    Config,
     DirectDownloadLinkException,
+    gateway_headers,
+    gateway_url,
     user_agent,
 )
 from ..registry import register
@@ -102,30 +103,20 @@ def is_vidara_folder_link(url):
 
 def vidara_gateway(endpoint=""):
     """(url, headers) for a Vidara endpoint on the gateway."""
-    base = (
-        getattr(Config, "GATEWAY_URL", "") or "https://api.piyann.me"
-    ).rstrip("/")
-    headers = {"accept": "application/json"}
-    if token := getattr(Config, "GATEWAY_TOKEN", ""):
-        headers["Authorization"] = f"Bearer {token}"
-    return f"{base}/api/v1/scrape/vidara{endpoint}", headers
+    return gateway_url(f"/api/v1/scrape/vidara{endpoint}"), gateway_headers()
 
 
-def vidara_scrape(session, target, probe=False):
-    """Return (response, reason, retryable, retry_after). A gateway hiccup or a
+def vidara_read(session, endpoint, params, timeout):
+    """Read one gateway endpoint and classify what came back.
+
+    Returns (response, reason, retryable, retry_after). A gateway hiccup or a
     rate limit is worth another attempt, a removed video is not; retry_after is
-    the gateway's own hint when it sent one."""
-    vidara_api, headers = vidara_gateway()
-    params = {"q": target}
-    if probe:
-        params["probe"] = "true"
+    the gateway's own hint when it sent one. The single-video endpoint and the
+    folder endpoint answer in the same envelope, so both are read here.
+    """
+    api, headers = vidara_gateway(endpoint)
     try:
-        resp = session.get(
-            vidara_api,
-            params=params,
-            headers=headers,
-            timeout=60,
-        )
+        resp = session.get(api, params=params, headers=headers, timeout=timeout)
     except Exception as e:
         return None, e.__class__.__name__, True, None
 
@@ -146,6 +137,17 @@ def vidara_scrape(session, target, probe=False):
     if not response.get("success"):
         reason = response.get("error") or f"HTTP {resp.status_code}"
         return None, reason, retryable or vidara_rate_limited(reason), retry_after
+    return response, None, False, None
+
+
+def vidara_scrape(session, target, probe=False):
+    """One video page, resolved to the response that carries its HLS ladder."""
+    params = {"q": target}
+    if probe:
+        params["probe"] = "true"
+    response, reason, retryable, retry_after = vidara_read(session, "", params, 60)
+    if not response:
+        return None, reason, retryable, retry_after
 
     # Check for either master_url or master_playlist_url
     master_url = response.get("master_url") or response.get("master_playlist_url")
@@ -200,35 +202,56 @@ def vidara_folder_scrape(session, target):
     reached them -- so the listing is fetched here and each video is resolved
     when its turn comes.
     """
-    folder_api, headers = vidara_gateway("/folder")
-    try:
-        resp = session.get(
-            folder_api,
-            params={"q": target, "resolve": "false"},
-            headers=headers,
-            timeout=90,
+    return vidara_read(
+        session, "/folder", {"q": target, "resolve": "false"}, 90
+    )
+
+
+def vidara_targets(url):
+    """The spellings of *url* worth trying, the one the user sent first."""
+    sanitized = vidara_sanitize_url(url)
+    return [url] if sanitized == url else [url, sanitized]
+
+
+def vidara_scrape_targets(session, targets, probe=False):
+    """Scrape each spelling of a video page, stopping at the first that answers.
+
+    Answers like ``vidara_scrape`` does; when none of them resolved, the reason
+    and the retry hint are the last one's, which is what decides the next attempt.
+    """
+    reason, retryable, retry_after = "unknown error", False, None
+    for target in targets:
+        response, reason, retryable, retry_after = vidara_scrape(
+            session, target, probe
         )
-    except Exception as e:
-        return None, e.__class__.__name__, True, None
+        if response:
+            return response, None, retryable, retry_after
+        LOGGER.info(f"Vidara: {target} rejected by the API ({reason})")
+    return None, reason, retryable, retry_after
 
-    resp_headers = getattr(resp, "headers", None)
-    retry_after = resp_headers.get("Retry-After") if resp_headers else None
-    retryable = vidara_retryable_status(resp.status_code)
 
-    try:
-        response = resp.json()
-    except Exception:
-        return (
-            None,
-            f"HTTP {resp.status_code} (non-JSON response)",
-            retryable,
-            retry_after,
+def vidara_retry(scrape, label=""):
+    """Call *scrape* until it answers, backing off on the answers worth retrying.
+
+    *scrape* hands back the ``(response, reason, retryable, retry_after)`` a
+    gateway read produces. The jittered backoff is the point of doing this in one
+    place: a bulk retries in lockstep otherwise. Raises with the last reason once
+    the attempts are spent, or as soon as one comes back final.
+    """
+    reason = "unknown error"
+    for attempt in range(1, VIDARA_ATTEMPTS + 1):
+        response, reason, retryable, retry_after = scrape()
+        if response:
+            return response
+        if not retryable or attempt == VIDARA_ATTEMPTS:
+            break
+        delay = vidara_retry_delay(attempt, retry_after)
+        LOGGER.info(
+            f"Vidara: {reason}, retrying{label} in {delay:.1f}s "
+            f"[{attempt}/{VIDARA_ATTEMPTS}]"
         )
-
-    if not response.get("success"):
-        reason = response.get("error") or f"HTTP {resp.status_code}"
-        return None, reason, retryable or vidara_rate_limited(reason), retry_after
-    return response, None, False, None
+        sleep(delay)
+    raise DirectDownloadLinkException(f"ERROR: {reason}")
 
 
 def vidara_folder_fetch(session, url):
@@ -237,21 +260,14 @@ def vidara_folder_fetch(session, url):
     Same classification the single-video path uses: a 429 a bulk provoked is
     another attempt, a folder that no longer exists is not.
     """
-    reason = "unknown error"
-    for attempt in range(1, VIDARA_ATTEMPTS + 1):
-        response, reason, retryable, retry_after = vidara_folder_scrape(session, url)
-        if response:
-            return response
-        LOGGER.info(f"Vidara: folder {url} rejected by the API ({reason})")
-        if not retryable or attempt == VIDARA_ATTEMPTS:
-            break
-        delay = vidara_retry_delay(attempt, retry_after)
-        LOGGER.info(
-            f"Vidara: {reason}, retrying folder in {delay:.1f}s "
-            f"[{attempt}/{VIDARA_ATTEMPTS}]"
-        )
-        sleep(delay)
-    raise DirectDownloadLinkException(f"ERROR: {reason}")
+
+    def _scrape():
+        answer = vidara_folder_scrape(session, url)
+        if not answer[0]:
+            LOGGER.info(f"Vidara: folder {url} rejected by the API ({answer[1]})")
+        return answer
+
+    return vidara_retry(_scrape, label=" folder")
 
 
 def vidara_folder_videos(response, subpath, taken):
@@ -389,39 +405,17 @@ def vidara_folder_list(url):
 def vidara_resolve(url, name=""):
     """Resolve a Vidara page to its HLS master playlist for yt-dlp.
     Returns (name, link, headers) for HLS streaming."""
-    sanitized = vidara_sanitize_url(url)
-    targets = [url] if sanitized == url else [url, sanitized]
-    reason = "unknown error"
+    targets = vidara_targets(url)
 
     with Session() as session:
-        for attempt in range(1, VIDARA_ATTEMPTS + 1):
-            retryable = False
-            retry_after = None
-            for target in targets:
-                response, reason, retryable, retry_after = vidara_scrape(
-                    session, target
-                )
-                if response:
-                    if not name:
-                        name = vidara_stem(response)
-                    master_url = response.get("master_url") or response.get("master_playlist_url")
-                    return (
-                        name,
-                        master_url,
-                        vidara_headers(response.get("download") or {}),
-                    )
-                LOGGER.info(f"Vidara: {target} rejected by the API ({reason})")
+        response = vidara_retry(lambda: vidara_scrape_targets(session, targets))
 
-            if not retryable or attempt == VIDARA_ATTEMPTS:
-                break
-            delay = vidara_retry_delay(attempt, retry_after)
-            LOGGER.info(
-                f"Vidara: {reason}, retrying in {delay:.1f}s "
-                f"[{attempt}/{VIDARA_ATTEMPTS}]"
-            )
-            sleep(delay)
-
-    raise DirectDownloadLinkException(f"ERROR: {reason}")
+    master_url = response.get("master_url") or response.get("master_playlist_url")
+    return (
+        name or vidara_stem(response),
+        master_url,
+        vidara_headers(response.get("download") or {}),
+    )
 
 
 @register(predicate=is_vidara_link, order=37)
@@ -434,36 +428,6 @@ def vidara(url):
         return vidara_folder_list(url)
 
     max_attempts = VIDARA_ATTEMPTS
-
-    def __build_header(download_info):
-        headers = vidara_headers(download_info)
-        return [f"{key}: {value}" for key, value in sorted(headers.items())]
-
-    def __header_dict(header):
-        headers = {}
-        for line in header:
-            key, _, value = line.partition(":")
-            headers[key.strip()] = value.strip()
-        return headers
-
-    def __filename(response):
-        # First try the filename field from API response
-        filename = response.get("filename", "").strip()
-        if filename:
-            name = ospath.basename(filename).strip()
-            if name:
-                return name
-        
-        # Fall back to title
-        name = (response.get("title") or "").strip().replace("\\", "/")
-        name = ospath.basename(name).strip()
-        if not name:
-            name = (response.get("file_code") or "").strip() or "vidara"
-        
-        # For HLS streams, ensure we have an extension
-        if not ospath.splitext(name)[1]:
-            name = f"{name}.mp4"
-        return name
 
     def __probe_hls(link, headers):
         """Probe HLS master playlist to verify it's accessible."""
@@ -490,36 +454,28 @@ def vidara(url):
         except Exception as e:
             return None, e.__class__.__name__
 
-    sanitized_url = vidara_sanitize_url(url)
-    targets = [url] if sanitized_url == url else [url, sanitized_url]
+    targets = vidara_targets(url)
     reason = "unknown error"
 
     with Session() as session:
         for attempt in range(1, max_attempts + 1):
-            response = None
-            retryable = False
-            retry_after = None
-            for target in targets:
-                response, reason, retryable, retry_after = vidara_scrape(
-                    session, target, probe=True
-                )
-                if response:
-                    break
-                LOGGER.info(f"Vidara: {target} rejected by the API ({reason})")
+            response, reason, retryable, retry_after = vidara_scrape_targets(
+                session, targets, probe=True
+            )
 
             if response:
                 # Get master URL - try both field names for compatibility
                 master_url = response.get("master_url") or response.get("master_playlist_url")
                 if master_url:
-                    header = __build_header(response.get("download") or {})
-                    hls_link, probe_reason = __probe_hls(master_url, __header_dict(header))
+                    headers = vidara_headers(response.get("download") or {})
+                    hls_link, probe_reason = __probe_hls(master_url, headers)
                     if hls_link:
                         # Return for yt-dlp processing
                         return {
                             "ytdlp": True,
                             "link": hls_link,
                             "name": vidara_stem(response),
-                            "headers": vidara_headers(response.get("download") or {}),
+                            "headers": headers,
                         }
                     reason = f"HLS playlist rejected ({probe_reason})"
                     retryable = True

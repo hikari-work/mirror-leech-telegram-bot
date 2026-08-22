@@ -15,7 +15,6 @@ from asyncio import CancelledError, Lock, Semaphore, create_task, gather, sleep
 from os import path as ospath
 from secrets import token_urlsafe
 from time import time
-from urllib.parse import quote
 
 from aiofiles import open as aiopen
 from aiofiles.os import makedirs, remove
@@ -34,7 +33,7 @@ from ...ext_utils.mega_client import (
     list_folder,
     resolve_link,
 )
-from ...ext_utils.proxy_pool import get_proxy_pool, refresh_proxy_pool
+from ...ext_utils.proxy_pool import get_proxy_pool, proxied_url, refresh_proxy_pool
 from ...ext_utils.resolve_gate import resolve_gate
 from ...ext_utils.task_manager import check_running_tasks
 from ...telegram_helper.message_utils import send_status_message
@@ -64,24 +63,6 @@ class _CDNExpiredError(Exception):
 def _get_proxy_list():
     """Return the current proxy pool (gateway-backed, cached; see proxy_pool)."""
     return get_proxy_pool()
-
-
-def _proxied_url(cdn_url, proxy_index=0):
-    """Wrap cdn_url through the selected proxy worker from Config.MEGA_PROXY_URL or default list."""
-    proxies = _get_proxy_list()
-    base = proxies[proxy_index % len(proxies)]
-
-    encoded_cdn = quote(cdn_url, safe="")
-    if "{url}" in base:
-        return base.format(url=encoded_cdn)
-    if base.endswith("=") or base.endswith("&"):
-        return f"{base}{encoded_cdn}"
-
-    if "?" in base:
-        return f"{base}&url={encoded_cdn}"
-    if base.endswith("/"):
-        return f"{base}?url={encoded_cdn}"
-    return f"{base}/?url={encoded_cdn}"
 
 
 class MegaDownloadHelper:
@@ -130,7 +111,7 @@ class MegaDownloadHelper:
         aligned = (at // BLOCK) * BLOCK
         skip = at - aligned
 
-        proxied = _proxied_url(cdn_url, proxy_n)
+        proxied = proxied_url(cdn_url, proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
         worker_sem = self._worker_sems[proxy_n % len(self._worker_sems)]
         async with worker_sem:
