@@ -3,7 +3,17 @@ from aiofiles.os import remove
 
 
 def filter_links(links_list, bulk_start, bulk_end):
-    start = bulk_start if bulk_start > 0 else None
+    """Select ``bulk_start``..``bulk_end`` of the list, 1-based and inclusive.
+
+    The range is what a person counting lines in the replied-to message means:
+    ``-b 3401:3500`` is the 3401st link through the 3500th, so 100 links. Handing
+    the two numbers straight to a slice instead -- which is what this did -- made
+    both ends off by one in the same direction: the window started at the 3402nd
+    link and held 99 of them, and nothing in the batch counter hinted at why.
+
+    ``0`` (the parser's "not given") still means "no bound on this side".
+    """
+    start = bulk_start - 1 if bulk_start > 0 else None
     end = bulk_end if bulk_end > 0 else None
     return links_list[start:end]
 

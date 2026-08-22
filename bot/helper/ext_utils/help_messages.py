@@ -73,7 +73,8 @@ Reply to this example by this cmd -> /cmd -b(bulk)
 Note: Any arg along with the cmd will be setted to all links
 /cmd -b -z -m folder name (all links contents in one zipped folder)
 You can set start and end of the links from the bulk like seed, with -b start:end or only end by -b :end or only start by -b start.
-The default start is from zero(first link) to inf."""
+The range counts links from 1 and includes both ends, so -b 3401:3500 takes the 3401st link through the 3500th (100 links).
+The default is from the first link to the last."""
 
 extract_zip = """<b>Extract/Zip</b>: -e -z
 
