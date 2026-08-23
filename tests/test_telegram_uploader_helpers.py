@@ -131,15 +131,17 @@ def uploader_module(monkeypatch):
     for name, mod in modules.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    target = "bot.helper.mirror_leech_utils.upload_utils.telegram_uploader"
-    pacer = "bot.helper.mirror_leech_utils.upload_utils.flood_pacer"
-    # The pacer is popped too: it binds the stubbed FloodWait classes at import
-    # time, so a copy left behind would hand the next test file the wrong ones.
-    for name in (target, pacer):
+    pkg = "bot.helper.mirror_leech_utils.upload_utils"
+    target = f"{pkg}.telegram_uploader"
+    # The siblings are popped too: they bind the stubbed FloodWait and
+    # InputMedia classes at import time, so a copy left behind would hand the
+    # next test file the wrong ones.
+    siblings = (f"{pkg}.flood_pacer", f"{pkg}.media_group_batcher")
+    for name in (target, *siblings):
         sys.modules.pop(name, None)
     module = importlib.import_module(target)
     yield module
-    for name in (target, pacer):
+    for name in (target, *siblings):
         sys.modules.pop(name, None)
 
 
@@ -189,7 +191,7 @@ def _make_uploader(uploader_module):
     uploader = uploader_module.TelegramUploader(listener, "/tmp/task")
     uploader._thumb = None
     uploader._sent_msg = FakeMessage()
-    uploader._media_group = True
+    uploader._batcher.enabled = True
     return uploader
 
 
@@ -345,95 +347,6 @@ def test_pick_key_buckets_by_media_type(uploader_module):
     assert uploader._pick_key(False, False, True, False) == "audios"
     assert uploader._pick_key(False, False, False, True) == "photos"
     assert uploader._pick_key(False, False, False, False) == "documents"
-
-
-# --- _queue_in_group -------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_queue_in_group_sets_flag_until_group_is_full(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._last_msg_in_group = False
-    for _ in range(9):
-        await uploader._queue_in_group("documents", "big.rar")
-        assert uploader._last_msg_in_group is True
-    assert len(uploader._media_dict["documents"]["big.rar"]) == 9
-
-
-@pytest.mark.asyncio
-async def test_queue_in_group_flushes_at_ten(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._send_media_group = AsyncMock()
-    for _ in range(10):
-        await uploader._queue_in_group("videos", "big.mkv")
-    uploader._send_media_group.assert_awaited_once()
-    pname, key, msgs = uploader._send_media_group.await_args.args
-    assert (pname, key) == ("big.mkv", "videos")
-    assert len(msgs) == 10
-
-
-@pytest.mark.asyncio
-async def test_queue_in_group_keys_parts_by_their_shared_stem(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    await uploader._queue_in_group("documents", "big.mkv")
-    await uploader._queue_in_group("documents", "big.mkv")
-    await uploader._queue_in_group("documents", "other.mkv")
-    assert len(uploader._media_dict["documents"]["big.mkv"]) == 2
-    assert len(uploader._media_dict["documents"]["other.mkv"]) == 1
-
-
-# --- _track_media_group ----------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_split_video_parts_go_to_a_media_group_not_the_album(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._sent_msg = FakeMessage("video")
-    attempt = uploader_module._Attempt(None)
-
-    await uploader._track_media_group("/tmp/big.mkv.001", attempt)
-
-    assert list(uploader._media_dict["videos"]) == ["/tmp/big.mkv"]
-    assert uploader._album_msgs == []
-    assert attempt.key == "videos"
-
-
-@pytest.mark.asyncio
-async def test_whole_video_goes_to_the_album(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._sent_msg = FakeMessage("video")
-    attempt = uploader_module._Attempt(None)
-
-    await uploader._track_media_group("/tmp/movie.mkv", attempt)
-
-    assert uploader._media_dict["videos"] == {}
-    assert len(uploader._album_msgs) == 1
-
-
-@pytest.mark.asyncio
-async def test_documents_never_join_the_album(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._sent_msg = FakeMessage("document")
-    attempt = uploader_module._Attempt(None)
-
-    await uploader._track_media_group("/tmp/a.bin", attempt)
-
-    assert uploader._album_msgs == []
-    assert uploader._media_dict["documents"] == {}
-    assert attempt.key == "documents"
-
-
-@pytest.mark.asyncio
-async def test_cancelled_task_tracks_nothing(uploader_module):
-    uploader = _make_uploader(uploader_module)
-    uploader._sent_msg = FakeMessage("photo")
-    uploader._listener.is_cancelled = True
-    attempt = uploader_module._Attempt(None)
-
-    await uploader._track_media_group("/tmp/a.jpg", attempt)
-
-    assert uploader._album_msgs == []
-    assert attempt.key is None
 
 
 # --- reply target and client routing ---------------------------------------

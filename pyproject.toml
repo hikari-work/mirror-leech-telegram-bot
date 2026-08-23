@@ -55,12 +55,16 @@ max-complexity = 10
 "bot/helper/mirror_leech_utils/download_utils/alldebrid_resolver.py"      = ["E722"]
 
 # --- Fase 5 — telegram_uploader._upload_file ---
-# `_upload_file` sudah dipecah; E501 dan I001 dicabut. E722 juga sudah dicabut:
-# bare `except:` di properti `speed` sudah hilang (Fase 10), jadi entri itu basi.
-# Sisa C901 tinggal satu, `_upload_one` (CX 12), yang jadi target Fase 11c —
-# `upload()` yang dulu CX 42 sudah tidak melanggar lagi. `flood_pacer.py`
-# (Fase 11a) sengaja tidak didaftarkan: file itu bersih.
-"bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py"         = ["C901"]
+# Seluruh entri untuk `telegram_uploader.py` sudah dicabut, dan itu bukan karena
+# ambangnya dilonggarkan. E501/I001 hilang di Fase 5, E722 di Fase 10 (bare
+# `except:` di properti `speed`), dan C901 terakhir — `_upload_one` (CX 12) —
+# hilang sendiri di Fase 11b saat blok hold pindah ke `MediaGroupBatcher`. Jadi
+# `upload_utils/` sekarang tidak punya utang lint sama sekali, termasuk
+# `flood_pacer.py` (Fase 11a) dan `media_group_batcher.py` (Fase 11b) yang memang
+# lahir bersih. Diverifikasi dengan:
+#   ruff check bot/helper/mirror_leech_utils/upload_utils/ \
+#       --config 'lint.per-file-ignores = {}'
+# Kalau ada yang menambah baris untuk direktori ini lagi, itu regresi.
 
 # --- Fase 6 — task_listener.on_download_complete ---
 # `on_download_complete` sudah dipecah; F401 dan I001 dicabut. Sisa C901 ada di

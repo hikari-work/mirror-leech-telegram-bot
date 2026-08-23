@@ -18,12 +18,7 @@ from aioshutil import rmtree
 from natsort import natsorted
 from PIL import Image
 from pyrogram.errors import BadRequest, FloodPremiumWait, FloodWait, RPCError
-from pyrogram.types import (
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputMediaVideo,
-    ReplyParameters,
-)
+from pyrogram.types import InputMediaPhoto, ReplyParameters
 from tenacity import (
     RetryError,
     retry,
@@ -46,12 +41,9 @@ from ...ext_utils.media_utils import (
 )
 from ...telegram_helper.message_utils import delete_message
 from .flood_pacer import FLOOD_SLACK, FloodPacer
+from .media_group_batcher import MediaGroupBatcher
 
 LOGGER = getLogger(__name__)
-
-# Matches the stem of a split part, e.g. "movie.mkv" out of "movie.mkv.001"
-# or "movie.mkv.part2.rar". Parts sharing a stem are grouped into one album.
-SPLIT_NAME_RE = r".+(?=\.0*\d+$)|.+(?=\.part\d+\..+$)"
 
 
 class _Attempt:
@@ -84,12 +76,8 @@ class TelegramUploader:
         self._thumb = self._listener.thumb or f"thumbnails/{listener.user_id}.jpg"
         self._msgs_dict = {}
         self._corrupted = 0
-        self._media_dict = {"videos": {}, "documents": {}}
-        self._album_msgs = []
-        self._last_msg_in_group = False
         self._up_path = ""
         self._lprefix = ""
-        self._media_group = False
         self._is_private = False
         self._sent_msg = None
         self._user_session = self._listener.user_transmission
@@ -97,6 +85,7 @@ class TelegramUploader:
         self._base_msg = None
         self._files_links = False
         self._pacer = FloodPacer(lambda: self._listener.is_cancelled)
+        self._batcher = MediaGroupBatcher(self)
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -130,7 +119,7 @@ class TelegramUploader:
         }
 
     async def _user_settings(self):
-        self._media_group = self._listener.user_dict.get("MEDIA_GROUP", False) or (
+        self._batcher.enabled = self._listener.user_dict.get("MEDIA_GROUP", False) or (
             Config.MEDIA_GROUP
             if "MEDIA_GROUP" not in self._listener.user_dict
             else False
@@ -233,20 +222,6 @@ class TelegramUploader:
             self._up_path = new_path
         return cap_mono
 
-    def _get_input_media(self, subkey, key):
-        rlist = []
-        for msg in self._media_dict[key][subkey]:
-            if key == "videos":
-                input_media = InputMediaVideo(
-                    media=msg.video.file_id, caption=msg.caption
-                )
-            else:
-                input_media = InputMediaDocument(
-                    media=msg.document.file_id, caption=msg.caption
-                )
-            rlist.append(input_media)
-        return rlist
-
     async def _send_screenshots(self, dirpath, outputs):
         inputs = [
             InputMediaPhoto(ospath.join(dirpath, p), p.rsplit("/", 1)[-1])
@@ -270,12 +245,55 @@ class TelegramUploader:
             return self._listener.client
         return TgClient.user
 
-    async def _get_message(self, chat_id, message_id):
+    # --- what the media group batcher asks of the uploader ---
+
+    @property
+    def anchor(self):
+        """The message the next send replies under."""
+        return self._sent_msg
+
+    @property
+    def is_cancelled(self):
+        return self._listener.is_cancelled
+
+    async def resolve_message(self, chat_id, message_id):
+        """Fetch a sent message back, for the file_id an album has to reuse."""
         return await self._pacer.guard(
             self._group_client.get_messages,
             chat_id=chat_id,
             message_ids=message_id,
         )
+
+    async def send_group(self, chat_id, media, reply_to_message_id):
+        """Send one album. None means it never reached telegram."""
+        return await self._pacer.guard(
+            self._group_client.send_media_group,
+            chat_id=chat_id,
+            media=media,
+            reply_to_message_id=reply_to_message_id,
+            disable_notification=True,
+        )
+
+    async def retire_group(self, originals, sent):
+        """Book an album that went out and dispose of what it replaced.
+
+        The album becomes the anchor: the messages it absorbed are deleted, so
+        anything still replying to one of them would have nothing to reply to.
+        """
+        for msg in originals:
+            if msg.link in self._msgs_dict:
+                del self._msgs_dict[msg.link]
+            await delete_message(msg)
+        if self._files_links and (
+            self._listener.is_super_chat or self._listener.up_dest
+        ):
+            for msg in sent:
+                self._msgs_dict[msg.link] = msg.caption
+        await self._copy_group_to_clone_dumps(sent[-1].chat.id, sent[-1].id)
+        self._sent_msg = sent[-1]
+        if self._base_msg:
+            await delete_message(self._base_msg)
+            self._base_msg = None
 
     async def _copy_group_to_clone_dumps(self, from_chat_id, message_id):
         """Copy a whole album to the clone dump chats.
@@ -302,91 +320,6 @@ class TelegramUploader:
                     f"Can't forward message to clone dump chat: {ch}. Error: {e}"
                 )
 
-    async def _send_album(self):
-        """Group the pending photos/videos of this task into one album."""
-        msgs = self._album_msgs
-        self._album_msgs = []
-        if len(msgs) < 2:
-            return
-        media = []
-        for index, msg in enumerate(msgs):
-            msgs[index] = msg = await self._get_message(msg[0], msg[1])
-            if msg.photo:
-                media.append(
-                    InputMediaPhoto(media=msg.photo.file_id, caption=msg.caption)
-                )
-            elif msg.video:
-                media.append(
-                    InputMediaVideo(media=msg.video.file_id, caption=msg.caption)
-                )
-        if len(media) != len(msgs):
-            # telegram reclassified something on its way out, leave them alone
-            LOGGER.info("Skipping album, not every message is a photo or video")
-            return
-        return await self._send_group(msgs, media)
-
-    async def _send_group(self, msgs, media):
-        """Send *msgs* as one album and retire the originals.
-
-        What differs between an album and a group of split parts is how *media*
-        was built; what happens to the messages afterwards is the same, so both
-        callers land here. Returns the sent list, or None when the send did not
-        go through -- the caller must not treat a None as a delivered group.
-        """
-        msgs_list = await self._pacer.guard(
-            self._group_client.send_media_group,
-            chat_id=msgs[0].chat.id,
-            media=media,
-            reply_to_message_id=msgs[0].reply_to_message_id,
-            disable_notification=True,
-        )
-        if msgs_list is None:
-            return None
-        for msg in msgs:
-            if msg.link in self._msgs_dict:
-                del self._msgs_dict[msg.link]
-            await delete_message(msg)
-        if self._files_links and (
-            self._listener.is_super_chat or self._listener.up_dest
-        ):
-            for m in msgs_list:
-                self._msgs_dict[m.link] = m.caption
-        await self._copy_group_to_clone_dumps(msgs_list[-1].chat.id, msgs_list[-1].id)
-        self._sent_msg = msgs_list[-1]
-        if self._base_msg:
-            await delete_message(self._base_msg)
-            self._base_msg = None
-        return msgs_list
-
-    async def _send_media_group(self, subkey, key, msgs):
-        for index, msg in enumerate(msgs):
-            msgs[index] = await self._get_message(msg[0], msg[1])
-        media = self._get_input_media(subkey, key)
-        if await self._send_group(msgs, media) is None:
-            return
-        del self._media_dict[key][subkey]
-
-    async def _flush_media_groups(self, where=""):
-        """Send every media bucket that has more than one part waiting.
-
-        *where* labels the log line and, by being set at all, says failures are
-        to be swallowed: the end-of-task flush has nothing left to abort, while
-        the mid-upload flush wants the error to reach the per-file handler.
-        """
-        for key, value in list(self._media_dict.items()):
-            for subkey, msgs in list(value.items()):
-                if len(msgs) <= 1:
-                    continue
-                if not where:
-                    await self._send_media_group(subkey, key, msgs)
-                    continue
-                try:
-                    await self._send_media_group(subkey, key, msgs)
-                except Exception as e:
-                    LOGGER.info(
-                        f"While sending media group at the end of {where}. Error: {e}"
-                    )
-
     async def _upload_one(self, file_, dirpath, f_path):
         """Upload the file at ``self._up_path`` and delete it once it is sent.
 
@@ -409,18 +342,11 @@ class TelegramUploader:
             if self._listener.is_cancelled:
                 return
             cap_mono = await self._prepare_file(file_, dirpath)
-            if self._last_msg_in_group:
-                group_lists = [
-                    x for v in self._media_dict.values() for x in v.keys()
-                ]
-                match = re_match(SPLIT_NAME_RE, f_path)
-                if not match or match and match.group(0) not in group_lists:
-                    await self._flush_media_groups()
+            await self._batcher.release_unless_continued(f_path)
             if self._listener.hybrid_leech and self._listener.user_transmission:
                 # only picks the client for this file; the anchor is
                 # addressed by id, so nothing has to be re-fetched
                 self._user_session = f_size > 2097152000
-            self._last_msg_in_group = False
             self._last_uploaded = 0
             await self._upload_file(cap_mono, file_, f_path)
             if self._listener.is_cancelled:
@@ -448,10 +374,10 @@ class TelegramUploader:
         """Flush what is still buffered and report the outcome of the task."""
         where = "stream task" if stream else "task"
         try:
-            await self._send_album()
+            await self._batcher.send_album()
         except Exception as e:
             LOGGER.info(f"While sending album at the end of {where}. Error: {e}")
-        await self._flush_media_groups(where)
+        await self._batcher.flush(where)
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
@@ -485,7 +411,7 @@ class TelegramUploader:
             if dirpath.strip().endswith("/yt-dlp-thumb"):
                 continue
             if dirpath.strip().endswith("_mltbss"):
-                await self._send_album()
+                await self._batcher.send_album()
                 await self._send_screenshots(dirpath, files)
                 await rmtree(dirpath, ignore_errors=True)
                 continue
@@ -549,7 +475,7 @@ class TelegramUploader:
             return False
         if attempt.thumb == "none":
             attempt.thumb = None
-        await self._send_album()
+        await self._batcher.send_album()
         self._sent_msg = await self._send_client.send_document(
             **self._reply_args(),
             document=self._up_path,
@@ -601,7 +527,7 @@ class TelegramUploader:
             return False
         if attempt.thumb == "none":
             attempt.thumb = None
-        await self._send_album()
+        await self._batcher.send_album()
         self._sent_msg = await self._send_client.send_audio(
             **self._reply_args(),
             audio=self._up_path,
@@ -648,38 +574,6 @@ class TelegramUploader:
             return "audios"
         return "photos"
 
-    async def _queue_in_group(self, key, pname):
-        """Hold a split part until its group is full, then send it as one."""
-        group = self._media_dict[key]
-        msgs = group.setdefault(pname, [])
-        msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
-        if len(msgs) == 10:
-            await self._send_media_group(pname, key, msgs)
-        else:
-            self._last_msg_in_group = True
-
-    async def _track_media_group(self, o_path, attempt):
-        """File the message just sent into its split group or into the album.
-
-        Parts of one split file belong together, so they are keyed by the stem
-        they share. Everything else goes to the running album.
-        """
-        if self._listener.is_cancelled:
-            return
-        if self._sent_msg.photo or self._sent_msg.video:
-            match = re_match(SPLIT_NAME_RE, o_path)
-            if match and self._media_group and self._sent_msg.video:
-                attempt.key = "videos"
-                await self._queue_in_group("videos", match.group(0))
-            elif self._media_group:
-                self._album_msgs.append([self._sent_msg.chat.id, self._sent_msg.id])
-                if len(self._album_msgs) == 10:
-                    await self._send_album()
-        elif self._media_group and self._sent_msg.document:
-            attempt.key = "documents"
-            if match := re_match(SPLIT_NAME_RE, o_path):
-                await self._queue_in_group("documents", match.group(0))
-
     async def _send_one(self, cap_mono, file, o_path, force_document, attempt):
         """Send one file. Returns False if cancellation cut the send short."""
         is_video, is_audio, is_image = await get_document_type(self._up_path)
@@ -691,7 +585,11 @@ class TelegramUploader:
         if not await self._SENDERS[attempt.key](self, cap_mono, attempt):
             attempt.aborted = True
             return False
-        await self._track_media_group(o_path, attempt)
+        # What telegram made of the file beats what the probe guessed, and it is
+        # settled before the filing: filing sends groups, a group send can fail,
+        # and the bucket is what that failure gets judged on.
+        attempt.key = self._batcher.classify(o_path) or attempt.key
+        await self._batcher.track(o_path)
         return True
 
     @retry(
@@ -736,7 +634,7 @@ class TelegramUploader:
             raise err
         if not sent:
             return
-        if self._base_msg and not self._last_msg_in_group and not self._album_msgs:
+        if self._base_msg and not self._batcher.pending:
             await delete_message(self._base_msg)
             self._base_msg = None
 

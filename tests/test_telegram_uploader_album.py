@@ -127,15 +127,17 @@ def uploader_module(monkeypatch):
     for name, mod in modules.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    target = "bot.helper.mirror_leech_utils.upload_utils.telegram_uploader"
-    pacer = "bot.helper.mirror_leech_utils.upload_utils.flood_pacer"
-    # The pacer is popped too: it binds the stubbed FloodWait classes at import
-    # time, so a copy left behind would hand the next test file the wrong ones.
-    for name in (target, pacer):
+    pkg = "bot.helper.mirror_leech_utils.upload_utils"
+    target = f"{pkg}.telegram_uploader"
+    # The siblings are popped too: they bind the stubbed FloodWait and
+    # InputMedia classes at import time, so a copy left behind would hand the
+    # next test file the wrong ones.
+    siblings = (f"{pkg}.flood_pacer", f"{pkg}.media_group_batcher")
+    for name in (target, *siblings):
         sys.modules.pop(name, None)
     module = importlib.import_module(target)
     yield module
-    for name in (target, pacer):
+    for name in (target, *siblings):
         sys.modules.pop(name, None)
 
 
@@ -229,8 +231,8 @@ def _make_uploader(uploader_module, calls):
     uploader._files_links = True
     # Album batching is enabled by the MEDIA_GROUP user setting, which is
     # resolved at upload start in `_user_settings`; the tests exercise
-    # `_upload_file` directly, so set it here to mirror that resolution.
-    uploader._media_group = True
+    # `_upload_file` directly, so set it on the batcher here to mirror that.
+    uploader._batcher.enabled = True
     return uploader, calls_by_id
 
 
@@ -242,12 +244,12 @@ async def test_album_is_sent_every_ten_media(uploader_module):
     for i in range(9):
         await uploader._upload_file(f"<code>{i}.jpg</code>", f"{i}.jpg", f"/tmp/{i}.jpg")
     assert calls == []
-    assert len(uploader._album_msgs) == 9
+    assert len(uploader._batcher._album_msgs) == 9
 
     await uploader._upload_file("<code>9.jpg</code>", "9.jpg", "/tmp/9.jpg")
     assert len(calls) == 1
     assert len(calls[0][1]) == 10
-    assert uploader._album_msgs == []
+    assert uploader._batcher._album_msgs == []
 
 
 @pytest.mark.asyncio
@@ -263,7 +265,7 @@ async def test_photos_and_videos_share_one_album_in_order(uploader_module):
     media_utils.get_document_type.return_value = (False, False, True)
     await uploader._upload_file("<code>c.jpg</code>", "c.jpg", "/tmp/c.jpg")
 
-    await uploader._send_album()
+    await uploader._batcher.send_album()
 
     assert len(calls) == 1
     media = calls[0][1]
@@ -285,10 +287,10 @@ async def test_single_pending_media_stays_a_standalone_message(uploader_module):
     uploader, _ = _make_uploader(uploader_module, calls)
 
     await uploader._upload_file("<code>only.jpg</code>", "only.jpg", "/tmp/only.jpg")
-    await uploader._send_album()
+    await uploader._batcher.send_album()
 
     assert calls == []
-    assert uploader._album_msgs == []
+    assert uploader._batcher._album_msgs == []
 
 
 @pytest.mark.asyncio
@@ -306,7 +308,7 @@ async def test_pending_album_is_flushed_before_a_document(uploader_module):
 
     assert len(calls) == 1, "album should go out before the document"
     assert len(calls[0][1]) == 2
-    assert uploader._album_msgs == []
+    assert uploader._batcher._album_msgs == []
     assert uploader._sent_msg.document is not None
 
 
@@ -321,7 +323,7 @@ async def test_album_replaces_individual_links_in_msgs_dict(uploader_module):
     await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
     uploader._msgs_dict[uploader._sent_msg.link] = "b.jpg"
 
-    await uploader._send_album()
+    await uploader._batcher.send_album()
 
     assert individual not in uploader._msgs_dict
     assert len(uploader._msgs_dict) == 2

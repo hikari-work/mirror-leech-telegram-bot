@@ -1066,6 +1066,127 @@ tertinggal akan menyerahkan exception class yang salah ke file test berikutnya.
 
 ---
 
+### Fase 11b — `MediaGroupBatcher` keluar dari `TelegramUploader` ✅
+
+**Status:** selesai
+
+**Target:** ubah klaster media group dari sekumpulan method di atas `self` yang
+sama menjadi objek yang **memiliki** state batching-nya sendiri.
+
+Berbeda dengan Fase 11a, klaster ini tidak bersih: ia berbagi dua hal dengan
+uploader yang memang bukan miliknya — anchor rantai balasan (`_sent_msg`) dan
+pembukuan link (`_msgs_dict`, clone dump). Jadi yang dipecah bukan "state milik
+siapa", melainkan **siapa yang memutuskan** vs **siapa yang membukukan**.
+
+| | HEAD | sesudah |
+|---|---|---|
+| `telegram_uploader.py` | 779 LOC | 677 LOC |
+| `TelegramUploader` | 36 method, 22 atribut | 33 method, 19 atribut |
+| `media_group_batcher.py` | — | 232 LOC, 11 method, 5 atribut |
+
+Delapan method keluar, lima anggota protokol masuk:
+
+| Sebelum (uploader) | Sesudah |
+|---|---|
+| `_track_media_group()` | `MediaGroupBatcher.classify()` + `.track()` |
+| `_queue_in_group(key, pname)` | `._queue(key, pname)` |
+| `_send_media_group(subkey, key, msgs)` | `._send_bucket(subkey, key)` — parameter `msgs` **hilang** |
+| `_get_input_media(msgs, key)` | `._input_media(msgs, key)` |
+| `_send_album()` | `.send_album()` |
+| `_flush_media_groups(where)` | `.flush(where)` |
+| `_send_group(...)` | dipecah: `._ship()` (batcher) + `send_group()`/`retire_group()` (uploader) |
+| `_get_message(chat, id)` | `resolve_message(chat, id)` (uploader, dipanggil batcher) |
+
+Blok "hold" yang dulu inline di `_upload_one` jadi
+`release_unless_continued(f_path)`, dan `_media_group`/`_last_msg_in_group` jadi
+`enabled`/`_holding` milik batcher.
+
+**Jebakan aliasing yang hilang by construction.** `_queue_in_group` melakukan
+`msgs = group.setdefault(pname, [])`, meneruskan *objek list yang sama* ke
+`_send_media_group` yang menulis ulang elemennya in-place, lalu
+`_get_input_media` **membaca ulang `self._media_dict[key][subkey]`** dan
+mengharapkan `Message` yang sudah resolved. Itu hanya jalan karena keduanya objek
+yang sama; ekstraksi yang menyalin list akan merusaknya secara senyap. Karena
+batcher yang memiliki `_media_dict`, `_send_bucket` mencari list-nya sendiri —
+parameter `msgs` dihapus dan jebakannya tidak bisa lagi dipicu.
+
+**Kontrak yang menggantikan `self` bersama.** Batcher tidak menyimpan salinan
+anchor dan tidak menyentuh pembukuan. Ia meminta lima anggota dari sender-nya,
+didokumentasikan di docstring class: `anchor` (dibaca ulang setiap kali, karena
+kiriman grup me-re-anchor rantai balasan), `is_cancelled`, `resolve_message`,
+`send_group`, `retire_group`. Uploader yang menghapus link individual yang
+digantikan, menulis link album, menyalin ke clone dump, dan memindahkan anchor.
+
+**Deviasi API yang disengaja — dan alasannya bukan estetika.** `track()` dipecah
+jadi `classify()` (murni, memutuskan bucket) + `track()` (efek: mengisi grup,
+mungkin mengirimnya). Uploader memanggil keduanya berurutan:
+
+```python
+attempt.key = self._batcher.classify(o_path) or attempt.key
+await self._batcher.track(o_path)
+```
+
+Ini **bukan** kerapian belaka. Kode lama menstempel `attempt.key` **sebelum**
+`await self._queue_in_group(...)`, dan urutan itu load-bearing: mengisi grup bisa
+memicu kiriman grup, kiriman grup bisa melempar `BadRequest`, dan jalur exception
+di `_upload_file` membaca `attempt.key` untuk memutuskan apakah upload-nya boleh
+diulang. Draf pertama saya menstempel **setelah** `track()` selesai — dan itu
+lolos dari 103 skenario harness tanpa satu pun divergensi. Yang menangkapnya
+adalah mutation check: satu mutasi yang "bertahan" ternyata bukan lubang harness,
+tapi regresi perilaku betulan di ekstraksi saya sendiri.
+
+Jalurnya nyata, bukan hipotetis: `_pick_key` mengembalikan `"documents"` untuk apa
+pun yang tidak bisa dibaca ffprobe, sementara telegram bisa mengembalikan pesan
+*video* dari `send_document` — jadi tebakan probe dan bucket sungguhan memang bisa
+berbeda. Harness kemudian diberi parameter `sent_as` untuk memodelkan telegram
+mereklasifikasi kiriman, plus operasi `send_one` yang memaparkan `attempt.key`,
+dan satu mutasi baru yang menukar ulang urutan itu sekarang tertangkap.
+
+**Asimetri perilaku yang dipertahankan apa adanya** (semuanya dipaku harness dan
+mutasi, dan sekarang dijelaskan di docstring, karena tiap satu terlihat seperti
+kelalaian):
+
+- Foto bernama split **tidak** membentuk grup — cabang split mensyaratkan video.
+- Dokumen **tidak pernah** masuk album; hanya grup, dan hanya kalau namanya cocok
+  pola split.
+- Bucket `len(msgs) <= 1` tidak pernah dikirim **dan tidak pernah dihapus**.
+- `send_album()` meng-clear `_album_msgs` **sebelum** ia bisa gagal.
+- `flush()` tanpa `where` melempar; `flush(where)` menelan + log.
+- `_holding` dibersihkan **setelah** flush-nya, jadi flush yang gagal menyisakan
+  hold untuk dicoba file berikutnya.
+
+**Verifikasi:**
+
+- `tools/_phase11b_diff.py` — **103 skenario, 103 identical, 0 divergent**,
+  stabil 3× run. Membandingkan urutan panggilan + argumen, sleep, output LOGGER,
+  state akhir (dibaca lewat snapshot berbasis nilai, karena state-nya pindah
+  objek), dan tipe/pesan exception. Ditambah pengecekan call site level AST:
+  **7 panggilan batching di 6 method, tidak ada yang pindah.**
+- `tools/_phase11b_mutants.py` — **62 mutasi, 62 tertangkap.** Nol lolos. Tiga
+  yang awalnya lolos ditindak, tidak diasumsikan no-op: satu anchor basi, dua
+  butuh skenario baru (`a_filled_group_leaves_no_hold` dan
+  `hold_continues_into_the_same_document_stem`), dan satu — seperti di atas —
+  ternyata bug di refactor saya.
+- `tests/test_media_group_batcher.py` — **31 test langsung**, nol uploader
+  dibangun. Modul dimuat lewat `spec_from_file_location`, jadi test ini tidak
+  butuh satu pun stub `bot.*` yang dibutuhkan kedua file test uploader. Tujuh di
+  antaranya pindahan dari `test_telegram_uploader_helpers.py` yang dulu memanggil
+  method privat uploader.
+- **794 passed, 0 failed** (770 → 794). `ruff check bot/` tetap **51 temuan**,
+  identik dengan baseline.
+- **Seluruh baris ledger untuk `telegram_uploader.py` dicabut**, bukan dikecilkan.
+  C901 terakhir (`_upload_one`, CX 12) — yang di Fase 11a masih ditulis sebagai
+  target Fase 11c — hilang sendiri begitu blok hold pindah ke batcher. Dibuktikan
+  dengan `ruff check bot/helper/mirror_leech_utils/upload_utils/ --config
+  'lint.per-file-ignores = {}'` → bersih. Direktori `upload_utils/` sekarang tidak
+  punya utang lint sama sekali.
+
+**Koreksi untuk rencana Fase 11c:** rencana menyebut fase itu "memiliki sisa C901
+`_upload_one`". Itu sudah tidak berlaku — 11c murni soal menyatukan dua lifecycle,
+tanpa utang lint yang menempel.
+
+---
+
 ## 4. Urutan Eksekusi yang Disarankan
 
 ```
