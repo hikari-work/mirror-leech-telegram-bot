@@ -34,6 +34,7 @@ COMMON_ARG_DEFAULTS: dict[str, object] = {
     "-n": "",
     "-m": "",
     "-t": "",
+    "-c": "",
     "-ca": "",
     "-cv": "",
     "-ns": "",
@@ -82,6 +83,7 @@ COMMON_ARG_FIELDS: dict[str, str] = {
     "link": "link",
     "-n": "name",
     "-t": "thumb",
+    "-c": "copy_preset",
     "-ca": "convert_audio",
     "-cv": "convert_video",
     "-ns": "name_sub",
@@ -124,6 +126,7 @@ class CommonArgs:
     name: str = ""
     folder_name: str = ""
     thumb: str = ""
+    copy_preset: str = ""
     convert_audio: str = ""
     convert_video: str = ""
     name_sub: str = ""

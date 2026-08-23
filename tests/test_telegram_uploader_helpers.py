@@ -184,6 +184,7 @@ def _make_uploader(uploader_module):
         is_super_chat=True,
         up_dest=None,
         clone_dump_chats={},
+        copy_preset="",
         user_dict={},
         mid=1,
         message=None,

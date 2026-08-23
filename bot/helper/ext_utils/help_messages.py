@@ -1,5 +1,6 @@
 from ..telegram_helper.bot_commands import BotCommands
 from ...core.telegram_manager import TgClient
+from .copy_presets import MAX_DESTS, MAX_PRESETS
 
 leech = """<b>Send link along with command line or </b>
 
@@ -172,6 +173,15 @@ transmission = """<b>Tg transmission</b>: -hl -ut -bt
 thumbnail_layout = """Thumbnail Layout: -tl
 /cmd link -tl 3x3 (widthxheight) 3 photos in row and 3 photos in column"""
 
+copy_preset = f"""<b>Copy Preset</b>: -c
+/cmd link -c anime
+
+Copies every album this task uploads to the chats saved under that preset name. Presets are made in usetting -> Leech -> Copy Presets: up to {MAX_PRESETS} of them, each holding up to {MAX_DESTS} chats written as chat_id or chat_id|thread_id (the thread id addresses one topic of a forum).
+Notes:
+1. The preset takes the place of your Clone Dump Chats for this task, it is not added to them.
+2. Media Group is forced on for the task, because what gets copied is the album. Any file no album carried is copied on its own at the end.
+3. The bot has to be able to post to every chat in the preset, or the task is refused before it downloads anything and told you which chat failed."""
+
 leech_as = """<b>Leech as</b>: -doc -med
 /cmd link -doc (Leech as document)
 /cmd link -med (Leech as media)"""
@@ -233,6 +243,7 @@ YT_HELP_DICT = {
     "TG-Transmission": transmission,
     "Thumb-Layout": thumbnail_layout,
     "Leech-Type": leech_as,
+    "Copy-Preset": copy_preset,
     "FFmpeg-Cmds": ffmpeg_cmds,
 }
 
@@ -268,6 +279,7 @@ LEECH_HELP_DICT = {
     "TG-Transmission": transmission,
     "Thumb-Layout": thumbnail_layout,
     "Leech-Type": leech_as,
+    "Copy-Preset": copy_preset,
     "FFmpeg-Cmds": ffmpeg_cmds,
     "AllDebrid": alldebrid_arg,
     "TorBox": torbox_arg,
@@ -344,6 +356,7 @@ Here I will explain how to use mltb.* which is reference to files you want to wo
 5. FFmpeg Variables in last cmd which is metadata ({title}, {title2}, etc...), you can edit them in usetting
 6. Telegram link for small size inputs like photo to set watermark.""",
     "CLONE_DUMP_CHATS": "Send List/Int/Str Chat_id/username|thread_id. Example: -100xxxx555|5 or @dumpchat|8 or @mltb_dump or pm or List like: [-100xxx885552|6, '@username', 65585541254, 'pm']",
+    "COPY_PRESETS": f"Copy presets are edited from the Manage Presets button, not typed here. Each is a name plus up to {MAX_DESTS} chats, written as chat_id or chat_id|thread_id; pick one per task with -c name and it replaces your Clone Dump Chats for that task.",
 }
 
 

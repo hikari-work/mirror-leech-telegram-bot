@@ -517,15 +517,24 @@ def test_asking_for_document_is_kept():
         pytest.param("@named", {"@named": None}, id="username"),
     ],
 )
-def test_every_shape_of_dump_chat_is_indexed_by_id(configured, expected):
+def test_every_shape_of_dump_chat_is_indexed_by_chat_and_thread(configured, expected):
     listener = Listener()
     listener.user_dict = {"CLONE_DUMP_CHATS": configured}
 
     listener._resolve_clone_dump_chats()
 
-    assert {
-        chat: entry["thread_id"] for chat, entry in listener.clone_dump_chats.items()
-    } == expected
+    # the keys are `(chat_id, thread_id)` pairs, which is the mapping itself
+    assert dict(listener.clone_dump_chats.keys()) == expected
+
+
+def test_two_topics_of_one_group_are_two_destinations():
+    """Keying by chat alone used to keep only the last topic of a group."""
+    listener = Listener()
+    listener.user_dict = {"CLONE_DUMP_CHATS": f"['{DEST}|12', '{DEST}|34']"}
+
+    listener._resolve_clone_dump_chats()
+
+    assert set(listener.clone_dump_chats) == {(DEST, 12), (DEST, 34)}
 
 
 def test_a_dump_chat_starts_with_nothing_sent_to_it():
@@ -534,7 +543,7 @@ def test_a_dump_chat_starts_with_nothing_sent_to_it():
 
     listener._resolve_clone_dump_chats()
 
-    assert listener.clone_dump_chats[DEST]["last_sent_msg"] is None
+    assert listener.clone_dump_chats[(DEST, None)]["last_sent_msg"] is None
 
 
 def test_no_dump_chats_configured_stays_an_empty_mapping():

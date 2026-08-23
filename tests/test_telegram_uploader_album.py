@@ -211,6 +211,7 @@ def _make_uploader(uploader_module, calls):
     listener = SimpleNamespace(
         thumb="none",
         user_id=1,
+        name="task",
         client=client,
         is_cancelled=False,
         as_doc=False,
@@ -221,9 +222,12 @@ def _make_uploader(uploader_module, calls):
         is_super_chat=True,
         up_dest=None,
         clone_dump_chats={},
+        copy_preset="",
         user_dict={},
         mid=1,
         message=None,
+        on_upload_complete=AsyncMock(),
+        on_upload_error=AsyncMock(),
     )
     uploader = uploader_module.TelegramUploader(listener, "/tmp/task")
     uploader._thumb = None
@@ -330,4 +334,207 @@ async def test_album_replaces_individual_links_in_msgs_dict(uploader_module):
     assert sorted(uploader._msgs_dict.values()) == [
         "<code>a.jpg</code>",
         "<code>b.jpg</code>",
+    ]
+
+
+# --- copying to a preset's chats -------------------------------------------
+#
+# A copy preset points `clone_dump_chats` at the chats it names and copies the
+# albums there. What needs pinning is the seam: an album is copied once, the
+# files it carried are not copied again, and a file that never joined an album is
+# not left behind.
+
+
+DUMPS = ((-2001, 12), (-2001, 34), (-2002, None))
+
+
+def _record_copies(uploader, dumps=DUMPS, preset="anime"):
+    """Point the uploader at *dumps* and record what the bot is asked to copy.
+
+    Returns the log of `(kind, chat_id, thread_id, reply_to)` tuples, where kind
+    is "group" for a whole album and "one" for a single message. Set on the
+    stubbed `TgClient.bot` because that is the session the copies go out on,
+    whichever one carried the upload.
+    """
+    copied = []
+
+    async def copy_media_group(
+        chat_id, message_thread_id=None, reply_to_message_id=None, **_kwargs
+    ):
+        copied.append(("group", chat_id, message_thread_id, reply_to_message_id))
+        return [FakeMessage("photo"), FakeMessage("photo")]
+
+    async def copy_message(
+        chat_id, message_thread_id=None, reply_to_message_id=None, **_kwargs
+    ):
+        copied.append(("one", chat_id, message_thread_id, reply_to_message_id))
+        return FakeMessage("photo")
+
+    sys.modules["bot.core.telegram_manager"].TgClient.bot = SimpleNamespace(
+        copy_media_group=copy_media_group, copy_message=copy_message
+    )
+    uploader._listener.copy_preset = preset
+    uploader._listener.clone_dump_chats = {
+        key: {"last_sent_msg": None} for key in dumps
+    }
+    return copied
+
+
+async def _finish(uploader):
+    """End the task the way the uploader does, past the "no files" guard."""
+    uploader._total_files = 1
+    await uploader._finish()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_preset_forces_media_group_on(uploader_module):
+    """With grouping off there would be no album to copy, which is the one thing
+    a preset promises."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    uploader._batcher.enabled = False
+    uploader._listener.copy_preset = "anime"
+    uploader._listener.user_dict = {
+        "MEDIA_GROUP": False,
+        "LEECH_FILENAME_PREFIX": "",
+        "FILES_LINKS": False,
+    }
+
+    await uploader._user_settings()
+
+    assert uploader._batcher.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_an_album_is_copied_to_every_destination(uploader_module):
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader)
+
+    await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
+    await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
+    await uploader._batcher.send_album()
+
+    assert [(kind, chat, thread) for kind, chat, thread, _ in copied] == [
+        ("group", -2001, 12),
+        ("group", -2001, 34),
+        ("group", -2002, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_two_topics_of_one_group_each_get_their_own_copy(uploader_module):
+    """The headline case: addressed by thread, not by replying into one."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader, dumps=((-2001, 12), (-2001, 34)))
+
+    await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
+    await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
+    await uploader._batcher.send_album()
+
+    assert [thread for _, _, thread, _ in copied] == [12, 34]
+
+
+@pytest.mark.asyncio
+async def test_files_an_album_carried_are_not_copied_again(uploader_module):
+    """The album is the copy; copying its files individually would double them."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader)
+
+    await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
+    await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
+    await uploader._batcher.send_album()
+    await _finish(uploader)
+
+    assert [kind for kind, *_ in copied] == ["group"] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_single_file_task_still_reaches_the_destinations(uploader_module):
+    """One file never becomes an album, and would otherwise be copied nowhere."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader)
+
+    await uploader._upload_file("<code>only.jpg</code>", "only.jpg", "/tmp/only.jpg")
+    await _finish(uploader)
+
+    assert [(kind, chat, thread) for kind, chat, thread, _ in copied] == [
+        ("one", -2001, 12),
+        ("one", -2001, 34),
+        ("one", -2002, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_odd_file_left_after_an_album_is_copied_on_its_own(uploader_module):
+    """An album goes out at ten, so a task of eleven files leaves one over."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader, dumps=((-2002, None),))
+
+    await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
+    await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
+    await uploader._batcher.send_album()
+    await uploader._upload_file("<code>c.jpg</code>", "c.jpg", "/tmp/c.jpg")
+    await _finish(uploader)
+
+    assert [kind for kind, *_ in copied] == ["group", "one"]
+
+
+@pytest.mark.asyncio
+async def test_each_destination_keeps_its_own_reply_chain(uploader_module):
+    """Threading is per destination: the second copy answers the first copy in
+    that chat, not the one in whichever chat was copied to last."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader, dumps=((-2001, None), (-2002, None)))
+
+    for name in ("a", "b"):
+        await uploader._upload_file(f"<code>{name}.jpg</code>", f"{name}.jpg", f"/{name}")
+    await uploader._batcher.send_album()
+    first = {chat: reply for _, chat, _, reply in copied}
+    copied.clear()
+    for name in ("c", "d"):
+        await uploader._upload_file(f"<code>{name}.jpg</code>", f"{name}.jpg", f"/{name}")
+    await uploader._batcher.send_album()
+
+    assert set(first.values()) == {None}, "nothing to reply to on the first album"
+    assert len({reply for _, _, _, reply in copied}) == 2, (
+        "each chat should answer its own last message"
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_preset_a_lone_file_is_not_copied(uploader_module):
+    """Plain `CLONE_DUMP_CHATS` copies albums and nothing else, exactly as
+    before -- only `-c` opts into the individual copies."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader, preset="")
+
+    await uploader._upload_file("<code>only.jpg</code>", "only.jpg", "/tmp/only.jpg")
+    await _finish(uploader)
+
+    assert copied == []
+    assert uploader._uncopied == []
+
+
+@pytest.mark.asyncio
+async def test_one_unreachable_destination_does_not_cost_the_others(uploader_module):
+    """A `return` here used to skip every destination after the first failure."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    copied = _record_copies(uploader)
+    good = sys.modules["bot.core.telegram_manager"].TgClient.bot.copy_media_group
+
+    async def copy_media_group(chat_id, **kwargs):
+        if chat_id == -2001 and kwargs.get("message_thread_id") == 12:
+            raise _Err("chat not found")
+        return await good(chat_id, **kwargs)
+
+    sys.modules["bot.core.telegram_manager"].TgClient.bot.copy_media_group = (
+        copy_media_group
+    )
+
+    await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
+    await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")
+    await uploader._batcher.send_album()
+
+    assert [(chat, thread) for _, chat, thread, _ in copied] == [
+        (-2001, 34),
+        (-2002, None),
     ]

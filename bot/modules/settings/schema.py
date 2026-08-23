@@ -19,6 +19,7 @@ from aiofiles.os import path as aiopath
 
 from ... import excluded_extensions, included_extensions
 from ...core.config_manager import Config
+from ...helper.ext_utils.copy_presets import presets_of
 
 
 class _NotSet:
@@ -79,6 +80,18 @@ async def user_or_runtime_list(key, user_dict, user_id):
     return NOT_SET
 
 
+async def copy_preset_count(key, user_dict, user_id):
+    """How many copy presets the user keeps, and nothing when they keep none.
+
+    The only option with no bot-wide default behind it: a preset names chats one
+    person wants their own uploads copied to, so there is no ``Config`` twin --
+    and the shared resolvers would raise reaching for one. The names live on the
+    preset screens; this line only says whether there is anything to look at.
+    """
+    presets = presets_of(user_dict)
+    return f"{len(presets)} saved" if presets else NOT_SET
+
+
 async def thumb_exists(key, user_dict, user_id):
     """The thumbnail is a file on disk, not a stored value."""
     exists = await aiopath.exists(f"thumbnails/{user_id}.jpg")
@@ -103,7 +116,8 @@ class Field:
     escape_value: bool = False
     kind: str = "text"
     """Shapes the submenu: "file" is set by upload, "dict"/"ffmpeg" support
-    per-key add/remove, "ffmpeg" additionally exposes the variables editor.
+    per-key add/remove, "ffmpeg" additionally exposes the variables editor,
+    "copy" has no value to type and opens the preset screens instead.
     """
 
 
@@ -172,6 +186,13 @@ LEECH_OPTIONS = (
         "CLONE_DUMP_CHATS",
         "Clone Dump Chats",
         "Clone Dump Chats is <code>{value}</code>",
+    ),
+    Field(
+        "COPY_PRESETS",
+        "Copy Presets",
+        "Copy Presets is <b>{value}</b>",
+        copy_preset_count,
+        kind="copy",
     ),
     Toggle(
         "AS_DOCUMENT",
@@ -302,6 +323,7 @@ MENUS = {
             "FILES_LINKS",
             "THUMBNAIL_LAYOUT",
             "CLONE_DUMP_CHATS",
+            "COPY_PRESETS",
         ),
         lines=(
             "AS_DOCUMENT",
@@ -311,6 +333,7 @@ MENUS = {
             "MEDIA_GROUP",
             "LEECH_FILENAME_PREFIX",
             "CLONE_DUMP_CHATS",
+            "COPY_PRESETS",
             "USER_TRANSMISSION",
             "HYBRID_LEECH",
             "THUMBNAIL_LAYOUT",

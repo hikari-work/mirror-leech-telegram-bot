@@ -86,6 +86,9 @@ class TelegramUploader:
         self._files_links = False
         self._pacer = FloodPacer(lambda: self._listener.is_cancelled)
         self._batcher = MediaGroupBatcher(self)
+        # Messages sent but not yet copied anywhere. Only kept for a task using
+        # a copy preset; see `_copy_uncopied_to_clone_dumps`.
+        self._uncopied = []
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -124,6 +127,11 @@ class TelegramUploader:
             if "MEDIA_GROUP" not in self._listener.user_dict
             else False
         )
+        # A copy preset delivers albums, so it decides the grouping rather than
+        # the user's standing preference: with grouping off there is no album to
+        # copy, and the whole point of the preset is that its chats get one.
+        if self._listener.copy_preset:
+            self._batcher.enabled = True
         self._lprefix = self._listener.user_dict.get("LEECH_FILENAME_PREFIX") or (
             Config.LEECH_FILENAME_PREFIX
             if "LEECH_FILENAME_PREFIX" not in self._listener.user_dict
@@ -280,6 +288,10 @@ class TelegramUploader:
         The album becomes the anchor: the messages it absorbed are deleted, so
         anything still replying to one of them would have nothing to reply to.
         """
+        # The album is what gets copied, and the messages it carried are about
+        # to be deleted -- there is nothing left to copy one at a time.
+        carried = {(msg.chat.id, msg.id) for msg in originals}
+        self._uncopied = [msg for msg in self._uncopied if msg not in carried]
         for msg in originals:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -289,36 +301,59 @@ class TelegramUploader:
         ):
             for msg in sent:
                 self._msgs_dict[msg.link] = msg.caption
-        await self._copy_group_to_clone_dumps(sent[-1].chat.id, sent[-1].id)
+        await self._copy_to_clone_dumps(
+            TgClient.bot.copy_media_group, sent[-1].chat.id, sent[-1].id
+        )
         self._sent_msg = sent[-1]
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
 
-    async def _copy_group_to_clone_dumps(self, from_chat_id, message_id):
-        """Copy a whole album to the clone dump chats.
+    async def _copy_to_clone_dumps(self, copy, from_chat_id, message_id):
+        """Copy one album, or one message, to every clone dump chat.
 
-        ``copy_media_group`` takes no ``message_thread_id``, so topics are
-        targeted by replying inside them, falling back to the topic root.
+        A topic is addressed with ``message_thread_id`` rather than by replying
+        into it: the reply only lands in the right topic by inheriting it from
+        the message it answers, which is one deletion away from being wrong.
+
+        One unreachable dump chat is not the others' problem, so a failure --
+        including a send that never reached telegram -- moves on to the next.
         """
-        for ch, ch_data in list(self._listener.clone_dump_chats.items()):
+        for (ch, thread_id), ch_data in list(self._listener.clone_dump_chats.items()):
             try:
                 res = await self._pacer.guard(
-                    TgClient.bot.copy_media_group,
+                    copy,
                     chat_id=ch,
                     from_chat_id=from_chat_id,
                     message_id=message_id,
                     disable_notification=True,
-                    reply_to_message_id=ch_data["last_sent_msg"]
-                    or ch_data["thread_id"],
+                    message_thread_id=thread_id,
+                    reply_to_message_id=ch_data["last_sent_msg"],
                 )
                 if res is None:
-                    return
-                self._listener.clone_dump_chats[ch]["last_sent_msg"] = res[-1].id
-            except Exception as e:
-                LOGGER.error(
-                    f"Can't forward message to clone dump chat: {ch}. Error: {e}"
+                    continue
+                # An album answers with every message it became, a single copy
+                # with the one; the chain hangs off the last of them either way.
+                ch_data["last_sent_msg"] = (
+                    res[-1].id if isinstance(res, list) else res.id
                 )
+            except Exception as e:
+                LOGGER.error(f"Can't copy message to clone dump chat: {ch}. Error: {e}")
+
+    async def _copy_uncopied_to_clone_dumps(self):
+        """Copy whatever no album carried, one message at a time.
+
+        Only albums are copied while the task runs, so a file that never joined
+        one would otherwise not reach the dump chats at all -- a task with a
+        single file, the lone part a split group of one leaves behind, an album
+        telegram refused. By now there is nothing left to group it with, so it
+        goes on its own.
+        """
+        uncopied, self._uncopied = self._uncopied, []
+        for from_chat_id, message_id in uncopied:
+            await self._copy_to_clone_dumps(
+                TgClient.bot.copy_message, from_chat_id, message_id
+            )
 
     async def _upload_one(self, file_, dirpath, f_path):
         """Upload the file at ``self._up_path`` and delete it once it is sent.
@@ -383,6 +418,7 @@ class TelegramUploader:
             self._base_msg = None
         if self._listener.is_cancelled:
             return
+        await self._copy_uncopied_to_clone_dumps()
         if self._total_files == 0:
             await self._listener.on_upload_error(
                 "No files to upload. In case you have filled "
@@ -589,6 +625,11 @@ class TelegramUploader:
         # settled before the filing: filing sends groups, a group send can fail,
         # and the bucket is what that failure gets judged on.
         attempt.key = self._batcher.classify(o_path) or attempt.key
+        if self._listener.copy_preset:
+            # Booked before the filing, because filing can ship an album that
+            # takes this message with it: ``retire_group`` strikes off whatever
+            # an album carried, and what survives is copied at the end.
+            self._uncopied.append((self._sent_msg.chat.id, self._sent_msg.id))
         await self._batcher.track(o_path)
         return True
 

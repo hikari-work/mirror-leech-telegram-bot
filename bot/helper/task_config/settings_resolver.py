@@ -11,6 +11,7 @@ from ... import (
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient
 from ..ext_utils.bot_utils import get_size_bytes
+from ..ext_utils.copy_presets import presets_of
 from ..ext_utils.links_utils import is_telegram_link
 from ..ext_utils.media_utils import create_thumb
 from ..telegram_helper.dest_chat import (
@@ -103,6 +104,7 @@ class SettingsResolverMixin:
         self._resolve_upload_format()
         self._resolve_thumbnail_layout()
         self._resolve_clone_dump_chats()
+        await self._resolve_copy_preset()
         await self._resolve_thumbnail()
 
     # ── plain settings ──────────────────────────────────────────────────
@@ -384,7 +386,11 @@ class SettingsResolverMixin:
     # ── clone dump chats ────────────────────────────────────────────────
 
     def _resolve_clone_dump_chats(self) -> None:
-        """Index every extra dump chat by id, ready to record what was sent."""
+        """Index every extra dump chat by id, ready to record what was sent.
+
+        Keyed by chat *and* thread: two topics of one group are two
+        destinations, and keying by chat alone silently dropped one of them.
+        """
         self.clone_dump_chats = (
             _setting_for(
                 self.user_dict, "CLONE_DUMP_CHATS", Config.CLONE_DUMP_CHATS, {}
@@ -394,7 +400,7 @@ class SettingsResolverMixin:
         if not self.clone_dump_chats:
             return
         self.clone_dump_chats = {
-            chat_id: {"thread_id": thread_id, "last_sent_msg": None}
+            (chat_id, thread_id): {"last_sent_msg": None}
             for chat_id, thread_id in map(
                 self._as_dump_target, _as_dump_entries(self.clone_dump_chats)
             )
@@ -410,3 +416,94 @@ class SettingsResolverMixin:
         if entry.lower() == "pm":
             return self.user_id, None
         return _as_chat_id(entry), None
+
+    # ── copy presets ────────────────────────────────────────────────────
+
+    async def _resolve_copy_preset(self) -> None:
+        """Point this task's copies at the preset ``-c`` named.
+
+        The preset replaces whatever ``CLONE_DUMP_CHATS`` resolved to rather
+        than adding to it: naming a preset is how a user says where this task
+        goes, and a standing default quietly tagging along would be a surprise.
+
+        Every destination is checked before the task is allowed to start. The
+        alternative is finding out that a chat was never writable after the
+        download finished, which is the whole reason the check is here and not
+        at the point the copy is sent.
+        """
+        if not self.copy_preset:
+            return
+        presets = presets_of(self.user_dict)
+        entries = presets.get(self.copy_preset)
+        if entries is None:
+            known = ", ".join(sorted(presets)) or "none"
+            raise ValueError(
+                f"You have no copy preset named '{self.copy_preset}'."
+                f" Your presets: {known}."
+            )
+        if not entries:
+            raise ValueError(
+                f"Copy preset '{self.copy_preset}' has no destinations in it."
+            )
+        targets = {}
+        for entry in entries:
+            chat_id, thread_id = self._as_dump_target(entry)
+            await self._verify_copy_target(entry, chat_id)
+            targets[(chat_id, thread_id)] = {"last_sent_msg": None}
+        self.clone_dump_chats = targets
+
+    async def _verify_copy_target(self, entry, chat_id) -> None:
+        """Stop the task unless the bot can post copies into *chat_id*.
+
+        Checked as the bot, whichever session is uploading: the copies are sent
+        with ``TgClient.bot`` regardless, so its rights are the ones that decide
+        whether they will arrive.
+
+        Unlike the upload destination there is no degraded mode to fall back to
+        -- a copy target that cannot be verified has no second session to try --
+        so ``ChatLookupError`` stops the task too, and says that it was the
+        check that failed rather than the chat that is missing.
+        """
+        try:
+            chat = await get_dest_chat(TgClient.bot, chat_id)
+        except ChatLookupError as e:
+            raise ValueError(
+                f"Can't check copy destination {entry} right now: {e}."
+                " Try again in a moment."
+            ) from e
+        if chat is None:
+            raise ValueError(
+                f"Copy destination {entry} was not found. Add the bot to it first."
+            )
+        if chat.type.name not in GROUP_CHAT_TYPES:
+            await self._verify_copy_target_reachable(entry, chat_id)
+            return
+        if not chat.is_admin:
+            raise ValueError(f"Bot is not admin in copy destination {entry}!")
+        try:
+            member = await get_dest_member(TgClient.bot, chat.id, TgClient.bot.me.id)
+        except ChatLookupError as e:
+            raise ValueError(
+                f"Can't check the bot's privileges in copy destination {entry}:"
+                f" {e}. Try again in a moment."
+            ) from e
+        if not _can_manage_and_delete(member):
+            raise ValueError(
+                f"Not enough privileges in copy destination {entry}! Enable"
+                " manage chat and delete messages for this bot."
+            )
+
+    async def _verify_copy_target_reachable(self, entry, chat_id) -> None:
+        """Check a non-group copy destination has actually started the bot."""
+        try:
+            reachable = await can_reach_dest(TgClient.bot, chat_id)
+        except ChatLookupError as e:
+            raise ValueError(
+                f"Can't check copy destination {entry} right now: {e}."
+                " Try again in a moment."
+            ) from e
+        if not reachable:
+            raise ValueError(
+                f"Copy destination {entry} has not started the bot. Start it"
+                " and try again."
+            )

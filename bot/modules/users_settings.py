@@ -17,6 +17,14 @@ from ..helper.ext_utils.bot_utils import (
     new_task,
     update_user_ldata,
 )
+from ..helper.ext_utils.copy_presets import (
+    MAX_DESTS,
+    MAX_PRESETS,
+    additions_to,
+    parse_destinations,
+    presets_of,
+    valid_name,
+)
 from ..helper.ext_utils.db_handler import database
 from ..helper.ext_utils.help_messages import user_settings_text
 from ..helper.ext_utils.media_utils import create_thumb
@@ -138,6 +146,86 @@ async def get_menu(option, message, user_id):
     handler_dict[user_id] = False
     text, button = build_option_menu(option, user_id)
     await edit_message(message, text, button)
+
+
+def _stored_presets(user_id):
+    """The user's copy presets, created in place so that edits are kept.
+
+    ``presets_of`` answers with a throwaway ``{}`` when there is nothing saved,
+    which is what a reader wants and useless to a writer. Everything below edits
+    the stored mapping directly, the way ``remove_one`` does, and then asks the
+    database to write the whole user dict back.
+    """
+    user_dict = user_data.setdefault(user_id, {})
+    presets = user_dict.get("COPY_PRESETS")
+    if not isinstance(presets, dict):
+        # "Remove" leaves a "" behind, which is an opinion but not a mapping.
+        presets = user_dict["COPY_PRESETS"] = {}
+    return presets
+
+
+@new_task
+async def create_copy_preset(_, message):
+    """Name an empty copy preset. The name is what ``-c`` will be given."""
+    user_id = message.from_user.id
+    handler_dict[user_id] = False
+    name = message.text.strip()
+    presets = presets_of(user_data.get(user_id, {}))
+    if not valid_name(name):
+        await send_message(
+            message,
+            "A preset name may only hold letters, digits, <code>-</code> and"
+            " <code>_</code>, up to 24 of them. It has to survive both"
+            " <code>-c</code> and the buttons on this menu, so <b>no spaces</b>.",
+        )
+        return
+    if name in presets:
+        await send_message(message, f"You already have a preset named <b>{name}</b>.")
+        return
+    if len(presets) >= MAX_PRESETS:
+        await send_message(
+            message,
+            f"{MAX_PRESETS} presets is the most you can keep. Delete one first.",
+        )
+        return
+    _stored_presets(user_id)[name] = []
+    await delete_message(message)
+    await database.update_user_data(user_id)
+
+
+@new_task
+async def add_copy_dests(_, message, name):
+    """Add chats to one preset, as many as a single message can carry."""
+    user_id = message.from_user.id
+    handler_dict[user_id] = False
+    presets = _stored_presets(user_id)
+    if name not in presets:
+        return
+    found, error = parse_destinations(message.text)
+    if error:
+        await send_message(message, error)
+        return
+    fresh, error = additions_to(presets[name], found)
+    if error:
+        await send_message(message, f"<b>{name}</b>: {error}")
+        return
+    presets[name].extend(fresh)
+    await delete_message(message)
+    await database.update_user_data(user_id)
+
+
+@new_task
+async def remove_copy_dests(_, message, name):
+    """Drop chats from one preset, ``/``-separated as ``remove_one`` does."""
+    user_id = message.from_user.id
+    handler_dict[user_id] = False
+    presets = _stored_presets(user_id)
+    if name not in presets:
+        return
+    unwanted = {entry.strip() for entry in message.text.split("/") if entry.strip()}
+    presets[name] = [dest for dest in presets[name] if dest not in unwanted]
+    await delete_message(message)
+    await database.update_user_data(user_id)
 
 
 async def set_ffmpeg_variable(_, message, key, value, index):
@@ -308,6 +396,125 @@ async def _act_ffvar(ctx):
     )
 
 
+def _copy_preset_list(buttons, user_id, presets):
+    """Screen 1: every preset the user keeps, and room for one more."""
+    for name in presets:
+        buttons.data_button(name, f"userset {user_id} copyp {name}")
+    if len(presets) < MAX_PRESETS:
+        buttons.data_button("New Preset", f"userset {user_id} copynew")
+    buttons.data_button("Back", f"userset {user_id} menu COPY_PRESETS")
+    buttons.data_button("Close", f"userset {user_id} close")
+    if not presets:
+        return (
+            "No copy preset yet.\n\nA preset is a named set of chats that every"
+            " album a task uploads gets copied to. Pick one per task with"
+            " <code>-c name</code>; it takes the place of your Clone Dump Chats"
+            " for that task."
+        )
+    return (
+        f"Copy presets ({len(presets)}/{MAX_PRESETS}). Choose one to edit, or"
+        " use it in a task with <code>-c name</code>:"
+    )
+
+
+def _copy_preset_editor(buttons, user_id, name, dests):
+    """Screen 2: one preset's chats, and what can be done to them."""
+    if len(dests) < MAX_DESTS:
+        buttons.data_button("Add Chats", f"userset {user_id} copyp {name} add")
+    if dests:
+        buttons.data_button("Remove Chats", f"userset {user_id} copyp {name} rm")
+    buttons.data_button("Delete Preset", f"userset {user_id} copyp {name} drop")
+    buttons.data_button("Back", f"userset {user_id} copyp")
+    buttons.data_button("Close", f"userset {user_id} close")
+    listed = "\n".join(f"• <code>{dest}</code>" for dest in dests) or "nothing yet"
+    return (
+        f"Copy preset <u>{name}</u> ({len(dests)}/{MAX_DESTS})\n\n{listed}"
+        f"\n\nUse it with <code>-c {name}</code>. The bot has to be able to post"
+        " to all of them, or the task is refused before it downloads anything."
+    )
+
+
+async def _draw_copy_presets(ctx):
+    """Redraw the preset list, whichever screen the user came from."""
+    buttons = ButtonMaker()
+    presets = presets_of(user_data.get(ctx.user_id, {}))
+    text = _copy_preset_list(buttons, ctx.user_id, presets)
+    await edit_message(ctx.message, text, buttons.build_menu(2))
+
+
+async def _draw_copy_preset(ctx, name):
+    """Redraw one preset, falling back to the list once it is gone."""
+    presets = presets_of(user_data.get(ctx.user_id, {}))
+    if name not in presets:
+        await _draw_copy_presets(ctx)
+        return
+    buttons = ButtonMaker()
+    text = _copy_preset_editor(buttons, ctx.user_id, name, presets[name])
+    await edit_message(ctx.message, text, buttons.build_menu(2))
+
+
+# The two prompts a preset screen can raise, each with the collector that reads
+# the answer. Keyed by the verb the callback carries.
+_COPY_PROMPTS = {
+    "add": (
+        add_copy_dests,
+        "Send the chats to copy to: <code>chat_id</code>, or"
+        " <code>chat_id|thread_id</code> for one topic of a forum. A @username"
+        " works, and <code>pm</code> means your own chat. Several at once is"
+        " fine -- one per line, or separated by commas or spaces."
+        " Timeout: 60 sec",
+    ),
+    "rm": (
+        remove_copy_dests,
+        "Send the chats to drop, separated by <code>/</code>, exactly as they"
+        " are listed. Example: <code>-100123456|5/pm</code>. Timeout: 60 sec",
+    ),
+}
+
+
+async def _act_copyp(ctx):
+    """The copy preset screens: the list, one preset, and its two prompts.
+
+    Shaped like ``_act_ffvar``: the press that raises a prompt is also what
+    waits for the answer and then redraws the screen underneath, so the user
+    ends up back where they were instead of at the top.
+    """
+    await ctx.query.answer()
+    name = ctx.data[3] if len(ctx.data) > 3 else None
+    if name is None:
+        await _draw_copy_presets(ctx)
+        return
+    verb = ctx.data[4] if len(ctx.data) > 4 else ""
+    if verb == "drop":
+        _stored_presets(ctx.user_id).pop(name, None)
+        await database.update_user_data(ctx.user_id)
+        await _draw_copy_presets(ctx)
+        return
+    if verb in _COPY_PROMPTS:
+        func, prompt = _COPY_PROMPTS[verb]
+        await _prompt(ctx, prompt)
+        await event_handler(ctx.client, ctx.query, partial(func, name=name))
+    await _draw_copy_preset(ctx, name)
+
+
+async def _act_copynew(ctx):
+    """Ask for a name and add the empty preset it names.
+
+    A separate action from ``copyp`` so that a preset can never be mistaken for
+    a verb: both travel in the same position of the callback data, and a user is
+    free to name a preset "add".
+    """
+    await ctx.query.answer()
+    await _prompt(
+        ctx,
+        "Send a name for the new copy preset. Letters, digits, <code>-</code>"
+        " and <code>_</code> only, no spaces -- it is what you will pass to"
+        " <code>-c</code>. Timeout: 60 sec",
+    )
+    await event_handler(ctx.client, ctx.query, create_copy_preset)
+    await _draw_copy_presets(ctx)
+
+
 # The three actions that ask the user for a message differ only in the prompt
 # they show and the collector they hand the reply to.
 _EVENT_ACTIONS = {
@@ -390,6 +597,8 @@ _USER_ACTIONS = {
     "tog": _act_tog,
     "file": _act_file,
     "ffvar": _act_ffvar,
+    "copyp": _act_copyp,
+    "copynew": _act_copynew,
     "set": _act_event,
     "addone": _act_event,
     "rmone": _act_event,

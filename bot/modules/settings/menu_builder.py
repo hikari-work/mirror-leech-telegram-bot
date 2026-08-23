@@ -111,8 +111,13 @@ def build_option_menu(option, user_id):
 
     # A thumbnail is set by uploading a photo, so it has no stored value to
     # reset — hence "file" losing the Reset button.
-    set_action = "file" if kind == "file" else "set"
-    buttons.data_button("Set", f"userset {user_id} {set_action} {option}")
+    if kind == "copy":
+        # Nothing to type here: a preset is a name plus a list of chats, and
+        # both are built on screens of their own.
+        buttons.data_button("Manage Presets", f"userset {user_id} copyp")
+    else:
+        set_action = "file" if kind == "file" else "set"
+        buttons.data_button("Set", f"userset {user_id} {set_action} {option}")
     if option in user_dict and kind != "file":
         buttons.data_button("Reset", f"userset {user_id} reset {option}")
     buttons.data_button("Remove", f"userset {user_id} remove {option}")

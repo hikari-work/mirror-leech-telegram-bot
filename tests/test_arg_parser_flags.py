@@ -1,4 +1,4 @@
-"""Tests for the ``-ad`` CLI flag."""
+"""Tests for the ``-ad`` and ``-c`` CLI flags."""
 
 from __future__ import annotations
 
@@ -64,3 +64,36 @@ def test_unknown_flag_left_alone(arg_parser):
     args = {"-ad": False, "link": ""}
     arg_parser(["http://x", "-unknown"], args)
     assert args["-ad"] is False
+
+
+def test_copy_preset_name_is_read_as_the_flags_value(arg_parser):
+    args = {"-c": "", "link": ""}
+    arg_parser(["http://x", "-c", "anime"], args)
+    assert args["-c"] == "anime"
+    assert args["link"] == "http://x"
+
+
+def test_a_copy_preset_does_not_swallow_the_next_flag(arg_parser):
+    """A value-taking flag reads until the next known one, so a preset name
+    sitting in front of ``-doc`` must not absorb it."""
+    args = {"-c": "", "-doc": False, "link": ""}
+    arg_parser(["http://x", "-c", "anime", "-doc"], args)
+    assert args["-c"] == "anime"
+    assert args["-doc"] is True
+
+
+def test_a_repeated_copy_preset_flag_keeps_the_last_name(arg_parser):
+    """``arg_parser`` used to carry a dead ``-c`` branch that appended a repeated
+    flag into the first one's value, giving the nonsense name
+    ``anime -c music``. With it gone, ``-c`` behaves like every other
+    value-taking flag: the last one wins.
+    """
+    args = {"-c": "", "link": ""}
+    arg_parser(["http://x", "-c", "anime", "-c", "music"], args)
+    assert args["-c"] == "music"
+
+
+def test_a_copy_preset_flag_with_nothing_after_it_stays_empty(arg_parser):
+    args = {"-c": "", "link": ""}
+    arg_parser(["http://x", "-c"], args)
+    assert args["-c"] == ""
