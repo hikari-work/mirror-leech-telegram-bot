@@ -64,7 +64,6 @@ def uploader_module(monkeypatch):
 
     modules = {
         "PIL": _stub("PIL", Image=SimpleNamespace(open=lambda *_a, **_k: None)),
-        "aioshutil": _stub("aioshutil", rmtree=AsyncMock()),
         "natsort": _stub("natsort", natsorted=sorted),
         "aiofiles": _pkg("aiofiles"),
         "aiofiles.os": aiofiles_os,
@@ -118,6 +117,9 @@ def uploader_module(monkeypatch):
             get_video_thumbnail=AsyncMock(return_value=None),
             get_audio_thumbnail=AsyncMock(return_value=None),
             get_multiple_frames_thumbnail=AsyncMock(return_value=None),
+        ),
+        "bot.helper.ext_utils.shutil_helper": _stub(
+            "bot.helper.ext_utils.shutil_helper", rmtree=AsyncMock()
         ),
         # Real path, not a stub: the uploader reads a flood's wait through
         # ``telegram_helper.flood``, which needs nothing but the stubbed

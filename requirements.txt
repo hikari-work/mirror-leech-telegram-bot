@@ -1,8 +1,5 @@
-asyncio
 aiofiles
-aioshutil
 aiohttp-socks
-anytree
 apscheduler
 aioaria2
 aioqbt
@@ -28,5 +25,4 @@ tgcrypto
 urllib3
 uvicorn
 uvloop
-xattr
 yt-dlp[default,curl-cffi]

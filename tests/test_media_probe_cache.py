@@ -59,7 +59,6 @@ def media_utils(monkeypatch):
         "PIL": _stub("PIL", Image=SimpleNamespace(open=lambda *_a, **_k: None)),
         "aiofiles": _pkg("aiofiles"),
         "aiofiles.os": aiofiles_os,
-        "aioshutil": _stub("aioshutil", rmtree=AsyncMock()),
         "bot": _stub(
             "bot",
             LOGGER=logging.getLogger("test"),
@@ -81,6 +80,9 @@ def media_utils(monkeypatch):
             get_mime_type=lambda _p: "video/mp4",
             is_archive=lambda _p: False,
             is_archive_split=lambda _p: False,
+        ),
+        "bot.helper.ext_utils.shutil_helper": _stub(
+            "bot.helper.ext_utils.shutil_helper", rmtree=AsyncMock()
         ),
         "bot.helper.ext_utils.status_utils": _stub(
             "bot.helper.ext_utils.status_utils", time_to_seconds=lambda _v: 0

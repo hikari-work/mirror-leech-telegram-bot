@@ -7,7 +7,6 @@ from shlex import split
 from aiofiles import open as aiopen
 from aiofiles.os import listdir, makedirs, remove
 from aiofiles.os import path as aiopath
-from aioshutil import move, rmtree
 from natsort import natsorted
 
 from ... import (
@@ -35,6 +34,7 @@ from ..ext_utils.media_utils import (
     get_document_type,
     take_ss,
 )
+from ..ext_utils.shutil_helper import move, rmtree
 from ..mirror_leech_utils.status_utils.ffmpeg_status import FFmpegStatus
 from ..mirror_leech_utils.status_utils.sevenz_status import SevenZStatus
 from ..telegram_helper.message_utils import get_tg_link_message, temp_download

@@ -1,6 +1,5 @@
 from aiofiles.os import path as aiopath, makedirs
 from aiofiles import open as aiopen
-from aioshutil import rmtree
 from asyncio import create_subprocess_shell
 from os.path import dirname
 
@@ -16,6 +15,7 @@ from .. import (
     sudo_users,
 )
 from ..helper.ext_utils.db_handler import database
+from ..helper.ext_utils.shutil_helper import rmtree
 from ..helper.ext_utils.user_sessions import load_user_sessions
 from .config_manager import Config
 from .telegram_manager import TgClient
