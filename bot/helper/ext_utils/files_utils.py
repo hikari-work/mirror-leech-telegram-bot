@@ -1,4 +1,3 @@
-from aioshutil import rmtree as aiormtree, move
 from asyncio import create_subprocess_exec, wait_for
 from magic import Magic
 from os import walk, path as ospath, readlink
@@ -17,6 +16,7 @@ from ... import LOGGER, DOWNLOAD_DIR
 from ...core.torrent_manager import TorrentManager
 from .bot_utils import sync_to_async, cmd_exec
 from .exceptions import NotSupportedExtractionArchive
+from .shutil_helper import rmtree as aiormtree, move
 from .subproc_runner import SubprocRunner, run_subproc
 
 ARCH_EXT = [

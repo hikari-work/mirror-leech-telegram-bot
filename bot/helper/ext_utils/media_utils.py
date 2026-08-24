@@ -10,11 +10,11 @@ from os import path as ospath
 from re import search as re_search, escape
 from time import time
 from typing import Literal
-from aioshutil import rmtree
 
 from ... import LOGGER, DOWNLOAD_DIR, threads, cores
 from .bot_utils import cmd_exec, sync_to_async
 from .files_utils import get_mime_type, is_archive, is_archive_split
+from .shutil_helper import rmtree
 from .status_utils import time_to_seconds
 from .subproc_runner import SubprocRunner
 

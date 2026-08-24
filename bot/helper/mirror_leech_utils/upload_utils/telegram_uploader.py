@@ -15,7 +15,6 @@ from aiofiles.os import (
     remove,
     rename,
 )
-from aioshutil import rmtree
 from natsort import natsorted
 from PIL import Image
 from pyrogram.errors import BadRequest, FloodPremiumWait, FloodWait, RPCError
@@ -40,6 +39,7 @@ from ...ext_utils.media_utils import (
     get_multiple_frames_thumbnail,
     get_video_thumbnail,
 )
+from ...ext_utils.shutil_helper import rmtree
 from ...telegram_helper.flood import flood_seconds
 from ...telegram_helper.message_utils import chat_of, delete_message
 from .flood_pacer import FLOOD_SLACK, FloodPacer

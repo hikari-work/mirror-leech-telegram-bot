@@ -1,7 +1,38 @@
-from anytree import NodeMixin
+class _Node:
+    """The sliver of anytree.NodeMixin this file actually leaned on.
+
+    TorNode only ever set ``parent`` and read ``children`` back in insertion
+    order, so that pair is all that is reproduced here -- the setter unhooks the
+    node from any previous parent before appending it to the new one, which is
+    the one NodeMixin behaviour ``make_tree`` relies on. The rest of the mixin
+    (loop detection, ``separator``, the whole render/search surface) went unused
+    and is left out rather than carried for a dependency's sake.
+    """
+
+    def __init__(self):
+        self.__parent = None
+        self.__children = []
+
+    @property
+    def parent(self):
+        return self.__parent
+
+    @parent.setter
+    def parent(self, value):
+        if self.__parent is value:
+            return
+        if self.__parent is not None:
+            self.__parent.__children.remove(self)
+        self.__parent = value
+        if value is not None:
+            value.__children.append(self)
+
+    @property
+    def children(self):
+        return tuple(self.__children)
 
 
-class TorNode(NodeMixin):
+class TorNode(_Node):
     def __init__(
         self,
         name,
@@ -140,14 +171,6 @@ def make_tree(res, tool, root_path=""):
 
     result = create_list(parent)
     return {"files": result, "engine": tool}
-
-
-"""
-def print_tree(parent):
-    for pre, _, node in RenderTree(parent):
-        treestr = u"%s%s" % (pre, node.name)
-        print(treestr.ljust(8), node.is_folder, node.is_file)
-"""
 
 
 def create_list(parent, contents=None):
