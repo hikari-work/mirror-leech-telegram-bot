@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # Dependency Python. Nilainya masih terbatas selama `requirements.txt` belum
+  # dipin (Dependabot paling berguna kalau ada versi untuk dibandingkan), tapi
+  # ini yang akan mengangkat PR begitu lockfile ber-hash dibuat.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:17"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Ini yang menjaga SHA action di .github/workflows tetap segar. Action dipin ke
+  # full commit SHA (bukan tag) supaya tag yang dikompromikan tidak bisa mencuri
+  # token — konsekuensinya SHA tidak ikut naik sendiri, jadi Dependabot yang
+  # mengangkatnya.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:17"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(actions)"

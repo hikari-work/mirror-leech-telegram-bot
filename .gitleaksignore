@@ -1,0 +1,25 @@
+# Temuan gitleaks yang sudah ditinjau dan dinyatakan BUKAN secret.
+# Format: <commit>:<file>:<rule-id>:<line>
+#
+# Ketiga baris di bawah semuanya kecocokan yang sama di `gen_sa_accounts.py`:
+#
+#     "keyAlgorithm": "KEY_ALG_RSA_2048"
+#
+# `KEY_ALG_RSA_2048` adalah konstanta enum publik Google IAM (nama algoritma
+# kunci yang diminta saat membuat service-account key), bukan kredensial. Aturan
+# `generic-api-key` mencocokkannya semata karena polanya `key...="..."`.
+#
+# Konteks tambahan: ketiga commit ini milik upstream (anasty17, 2021-2024) dan
+# `gen_sa_accounts.py` sudah tidak ada di tree saat ini — file-nya hanya hidup di
+# history, jadi tidak ada yang bisa "dibereskan" di kode sekarang.
+#
+# Diverifikasi dengan:
+#   git show 6fe2510dcafa:gen_sa_accounts.py | grep keyAlgorithm
+#
+# Jangan tambahkan baris ke sini tanpa menuliskan alasannya. Kalau gitleaks
+# menemukan sesuatu yang benar-benar rahasia, yang benar adalah merotasi
+# kredensialnya dan membersihkan history — bukan meredamnya di file ini.
+
+6fe2510dcafa219a18c30b888d252ab128cd48db:gen_sa_accounts.py:generic-api-key:159
+634e52c4379dc15c2893940c13bdc5421ee62cdc:gen_sa_accounts.py:generic-api-key:155
+3ecb731ad1f654ce8d2dfc1804d4c9800a184b77:gen_sa_accounts.py:generic-api-key:140

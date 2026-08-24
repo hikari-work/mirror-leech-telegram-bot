@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default; jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels an in-flight run for it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Gerbang WAJIB ──────────────────────────────────────────────────────────
+  # pyrefly (baseline) + pytest berbagi satu install. Keduanya butuh dependency
+  # produksi terpasang: `tests/test_module_imports.py` mengimpor SETIAP modul
+  # `bot/` secara nyata, dan pyrefly-baseline dibuat dengan dependency ada.
+  test:
+    name: Test (pyrefly + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # `files_utils.py` melakukan `from magic import Magic` di level modul, dan
+      # sweep impor menjalankannya sungguhan — python-magic memuat libmagic.so
+      # saat impor, jadi pustaka C-nya harus ada di runner.
+      - name: Install libmagic (runtime dep python-magic)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libmagic1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # Persis perintah yang didokumentasikan sebagai "yang dijalankan CI" di
+      # pyproject.toml. Baseline menyerap 36 utang type-check yang sudah ada;
+      # temuan BARU tetap menggagalkan.
+      - name: Type-check (pyrefly, baseline)
+        run: pyrefly check --baseline pyrefly-baseline.json
+
+      # `!cancelled()` supaya kegagalan pyrefly tidak menyembunyikan hasil test —
+      # keduanya tetap terlaporkan dalam satu run.
+      - name: Run tests (pytest)
+        if: ${{ !cancelled() }}
+        run: pytest
+
+  # ── Advisory (tidak memblokir) ─────────────────────────────────────────────
+  # ruff sengaja tidak diwajibkan dulu: `ruff check .` masih 40 temuan dan
+  # `ruff format --check` 63 file. `continue-on-error` di tiap langkah membuat
+  # job tetap HIJAU; temuan muncul sebagai anotasi GitHub lewat --output-format.
+  # Promosikan jadi wajib setelah utang bersih (lihat pyproject.toml per-file-ignores).
+  lint:
+    name: Lint (ruff, advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      # Dipin ke versi yang dipakai lokal supaya CI dan lokal tidak beda temuan.
+      - name: Install ruff
+        run: pip install ruff==0.16.1
+
+      - name: ruff check
+        continue-on-error: true
+        run: ruff check --output-format=github .
+
+      - name: ruff format --check
+        continue-on-error: true
+        run: ruff format --check .
+
+  # ── Keamanan ───────────────────────────────────────────────────────────────
+  security:
+    name: Security (gitleaks + pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — gitleaks memindai SELURUH history commit, bukan cuma HEAD.
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Binari gitleaks (MIT), bukan gitleaks-action (EULA komersial). MEMBLOKIR:
+      # secret yang ter-commit selalu masalah nyata. False-positive yang sudah
+      # dikenal diredam lewat `.gitleaksignore` di root.
+      - name: Scan git history for secrets (gitleaks)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --no-banner --redact --exit-code 1 .
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      # ADVISORY: dependency belum dipin, jadi CVE baru bisa memerahkan CI tanpa
+      # ada perubahan kode. Naikkan jadi memblokir setelah requirements dikunci.
+      - name: Audit dependencies (pip-audit, advisory)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --desc

@@ -1,0 +1,49 @@
+# Analisis alur data CodeQL untuk Python. Dipisah dari ci.yml karena kadensnya
+# beda (ada jadwal mingguan) dan jauh lebih lambat dari gerbang utama.
+#
+# Gratis untuk repo publik. Hasilnya masuk tab Security > Code scanning, bukan
+# ke log job — jadi job hijau BUKAN berarti nol temuan; lihat tab itu.
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Senin 03:27 UTC. Menit non-:00 disengaja: jadwal cron GitHub menumpuk di
+    # menit 0 dan run bisa tertunda lama saat antrean padat.
+    - cron: '27 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Wajib supaya CodeQL bisa mengunggah hasil ke Code scanning.
+      security-events: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Python tidak perlu dikompilasi, jadi tanpa langkah build: CodeQL cukup
+      # mengurai sumbernya. Dependency juga tidak perlu dipasang.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@42947a340483f03ba47bb1a039b2c519aab3df85 # v3
+        with:
+          languages: python
+          # `security-and-quality` lebih luas dari default `security`; turunkan ke
+          # `security-extended` atau `security` kalau deraunya kebanyakan.
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@42947a340483f03ba47bb1a039b2c519aab3df85 # v3
+        with:
+          category: "/language:python"
