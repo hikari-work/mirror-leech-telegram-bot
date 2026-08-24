@@ -2,12 +2,16 @@
 # Format: <commit>:<file>:<rule-id>:<line>
 #
 # Ketiga baris di bawah semuanya kecocokan yang sama di `gen_sa_accounts.py`:
+# sebuah field JSON bernama keyAlgorithm yang berisi nama enum RSA-2048 milik
+# Google IAM (algoritma yang diminta saat membuat service-account key). Itu
+# konstanta publik, bukan kredensial; `generic-api-key` mencocokkannya semata
+# karena bentuknya menyerupai pasangan nama-kunci dan nilai ber-tanda-kutip.
 #
-#     "keyAlgorithm": "KEY_ALG_RSA_2048"
-#
-# `KEY_ALG_RSA_2048` adalah konstanta enum publik Google IAM (nama algoritma
-# kunci yang diminta saat membuat service-account key), bukan kredensial. Aturan
-# `generic-api-key` mencocokkannya semata karena polanya `key...="..."`.
+# CATATAN: contoh itu sengaja TIDAK ditulis verbatim di sini. File ini ikut
+# terpindai begitu ter-commit, jadi menempelkan literal aslinya membuat file
+# peredam ini sendiri jadi temuan baru — dan fingerprint-nya memuat commit hash,
+# yang berubah tiap file ini disunting, jadi tidak bisa diredam dengan stabil.
+# Untuk melihat teks aslinya, pakai perintah `git show` di bawah.
 #
 # Konteks tambahan: ketiga commit ini milik upstream (anasty17, 2021-2024) dan
 # `gen_sa_accounts.py` sudah tidak ada di tree saat ini — file-nya hanya hidup di
@@ -23,3 +27,9 @@
 6fe2510dcafa219a18c30b888d252ab128cd48db:gen_sa_accounts.py:generic-api-key:159
 634e52c4379dc15c2893940c13bdc5421ee62cdc:gen_sa_accounts.py:generic-api-key:155
 3ecb731ad1f654ce8d2dfc1804d4c9800a184b77:gen_sa_accounts.py:generic-api-key:140
+
+# Versi file ini di commit e575406 memuat contoh literal yang dibahas di atas,
+# dan commit itu sudah ter-push jadi isinya permanen di history. Berbeda dengan
+# meredam salinan di tip (fingerprint-nya bergeser tiap penyuntingan), commit
+# lampau tidak bisa berubah — jadi entri ini stabil selamanya.
+e575406d1d5b345ed0dcac08bc488f9650b3abb7:.gitleaksignore:generic-api-key:6
