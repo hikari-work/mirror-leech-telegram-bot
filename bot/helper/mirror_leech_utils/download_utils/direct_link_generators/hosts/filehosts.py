@@ -104,7 +104,9 @@ def hxfile(url):
         jar.load("hxfile.txt")
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-    cookies = {cookie.name: cookie.value for cookie in jar}
+    # A cookie with no value has nothing to send -- requests wants str values,
+    # and a name on its own is not a cookie the site set.
+    cookies = {c.name: c.value for c in jar if c.value is not None}
     try:
         if url.strip().endswith(".html"):
             url = url[:-5]
@@ -150,10 +152,16 @@ def solidfiles(url):
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/36.0.1985.125 Safari/537.36"
             }
             pageSource = session.get(url, headers=headers).text
-            mainOptions = str(
-                search(r"viewerOptions\'\,\ (.*?)\)\;", pageSource).group(1)
-            )
-            return loads(mainOptions)["downloadUrl"]
+            # The viewer options are a JSON blob in a <script>. A page without
+            # them is not a file page -- a deleted file, or a wall -- which used
+            # to reach ``.group`` on None and be reported as the bare
+            # "ERROR: AttributeError" that told the user nothing.
+            mainOptions = search(r"viewerOptions\'\,\ (.*?)\)\;", pageSource)
+            if not mainOptions:
+                raise DirectDownloadLinkException("ERROR: Direct link not found")
+            return loads(mainOptions.group(1))["downloadUrl"]
+        except DirectDownloadLinkException:
+            raise
         except Exception as e:
             raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
 

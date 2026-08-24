@@ -49,7 +49,9 @@ async def add_aria2_download(listener, dpath, header, ratio, seed_time):
         LOGGER.info(f"Aria2c Download Error: {e}")
         await listener.on_download_error(f"{e}")
         return
-    download = await TorrentManager.aria2.tellStatus(gid)
+    # Both add calls above answer with the new download's gid, as bare JSON:
+    # aioaria2 types none of its replies.
+    download = await TorrentManager.aria2_status(gid)  # pyrefly: ignore[bad-argument-type]
     if download.get("errorMessage"):
         error = str(download["errorMessage"]).replace("<", " ").replace(">", " ")
         LOGGER.info(f"Aria2c Download Error: {error}")

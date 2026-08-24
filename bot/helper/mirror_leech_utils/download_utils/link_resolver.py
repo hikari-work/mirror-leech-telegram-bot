@@ -191,11 +191,12 @@ async def resolve_alldebrid_web(listener) -> bool:
     return True
 
 
-async def resolve_direct_link(listener, headers: list[str]) -> list[str]:
+async def resolve_direct_link(listener, headers: list[str]) -> list[str] | None:
     """Try to resolve ``listener.link`` via ``direct_link_generator``.
 
     Returns the (possibly updated) *headers* list.  On fatal error calls
-    ``listener.fail_task`` and returns ``None``.
+    ``listener.fail_task`` and returns ``None`` -- which is what the caller in
+    ``leech.py`` tests for, and what the annotation now says.
 
     The scrape runs behind ``resolve_gate``: a bulk that resolves every link at
     once is what earns the rate limits this used to report as dead links. Only

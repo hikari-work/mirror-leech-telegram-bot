@@ -2,6 +2,8 @@ from asyncio import sleep
 from itertools import count
 from secrets import token_urlsafe
 
+from pyrogram.types import User
+
 from ... import (
     DOWNLOAD_DIR,
     LOGGER,
@@ -17,11 +19,13 @@ from ..ext_utils.bulk_links import extract_bulk_links
 from ..ext_utils.task_args import parse_folder_name, strip_link_tokens
 from ..telegram_helper.bot_commands import BotCommands
 from ..telegram_helper.message_utils import (
+    chat_of,
     delete_message,
     edit_message,
     send_message,
     send_status_message,
 )
+from ._host import TaskConfigHost
 from .batch_tracker import new_batch
 
 BULK_SPAWN_DELAY = 0.5
@@ -50,7 +54,7 @@ def _next_bulk_mid():
             return mid
 
 
-class MultiLinkMixin:
+class MultiLinkMixin(TaskConfigHost):
     async def register_same_dir(self) -> None:
         """Book-keep ``same_dir`` when ``multi > 0`` and not bulk.
 
@@ -92,10 +96,18 @@ class MultiLinkMixin:
         if self.user:
             if username := self.user.username:
                 self.tag = f"@{username}"
-            elif hasattr(self.user, "mention"):
+            elif isinstance(self.user, User):
+                # ``mention`` is a User property and ``title`` a Chat one, which
+                # is what the old ``hasattr(self.user, "mention")`` was testing
+                # for; asking about the class says so directly.
                 self.tag = self.user.mention
             else:
-                self.tag = self.user.title
+                # A Chat gets here only as a ``sender_chat``, i.e. a group or a
+                # channel posting, and those have a title; ``Chat.title`` is
+                # optional for the private chats that never reach this branch.
+                # ``tag`` keeps the "" it started with rather than becoming the
+                # string "None" in every message that quotes it.
+                self.tag = self.user.title or self.tag
 
     async def _shrink_same_dir(self, count_: int) -> None:
         """Tell the same-dir group that ``count_`` siblings will never arrive.
@@ -134,11 +146,7 @@ class MultiLinkMixin:
             self.multi_tag = token_urlsafe(3)
             multi_tags.add(self.multi_tag)
 
-        if (
-            self.multi > 1
-            and self.multi_tag
-            and self.multi_tag not in multi_batches
-        ):
+        if self.multi > 1 and self.multi_tag and self.multi_tag not in multi_batches:
             batch_name = (
                 self.folder_name.strip("/") if self.folder_name else self.multi_tag
             )
@@ -187,11 +195,21 @@ class MultiLinkMixin:
             msg = [s.strip() for s in input_list]
             index = msg.index("-i")
             msg[index + 1] = f"{self.multi - 1}"
+            reply_id = self.message.reply_to_message_id
+            if reply_id is None:
+                # ``-i`` walks the messages that follow the one the command
+                # replies to, so a chain not started as a reply has nothing to
+                # walk. ``run_multi`` turns this into a logged dead chain --
+                # which is what the TypeError on ``None + 1`` used to do, less
+                # legibly.
+                raise ValueError("-i needs the command to be a reply")
             nextmsg = await self.client.get_messages(
-                chat_id=self.message.chat.id,
-                message_ids=self.message.reply_to_message_id + 1,
+                chat_id=chat_of(self.message).id,
+                message_ids=reply_id + 1,
             )
-            if nextmsg.empty:
+            # A single id is answered with a single message; the signature covers
+            # the list form too, which only a list of ids gets back.
+            if nextmsg.empty:  # pyrefly: ignore[missing-attribute]
                 await send_message(
                     self.message,
                     "Bot can't fetch old messages (older than 48H), forward those messages and try multi/bulk again!",

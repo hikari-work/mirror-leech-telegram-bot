@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from uvloop import install
 
 install()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from asyncio import Lock, new_event_loop, set_event_loop
+from asyncio import Lock, Task, new_event_loop, set_event_loop
 from logging import (
     getLogger,
     FileHandler,
@@ -14,6 +16,12 @@ from logging import (
 )
 from time import time
 from os import cpu_count
+from typing import TYPE_CHECKING, Literal, TypedDict
+
+if TYPE_CHECKING:
+    # For ``_Intervals`` only; importing it for real would be a cycle, since
+    # everything under ``bot.helper`` imports back from here.
+    from .helper.ext_utils.bot_utils import SetInterval
 
 getLogger("requests").setLevel(WARNING)
 getLogger("urllib3").setLevel(WARNING)
@@ -34,12 +42,34 @@ basicConfig(
 )
 
 LOGGER = getLogger(__name__)
-cpu_no = cpu_count()
+# `cpu_count()` returns None when it cannot tell, which used to make the `//`
+# below raise TypeError at import. Falling back to 1 is what the `max(1, ...)`
+# already intended.
+cpu_no = cpu_count() or 1
 threads = max(1, cpu_no // 2)
 cores = ",".join(str(i) for i in reversed(range(threads)))
 
 DOWNLOAD_DIR = "/app/downloads/"
-intervals = {"status": {}, "qb": "", "stopAll": False}
+
+
+class _Intervals(TypedDict):
+    """The background tickers, in one dict because one flag stops all of them.
+
+    ``qb`` and the values of ``status`` are the running tasks themselves, so a
+    handler can cancel them. The empty string is the "no ticker" placeholder --
+    what the dict starts with and what the qbittorrent listener puts back when
+    its loop exits -- and it stays a string rather than becoming None because
+    every reader only tests it for truth.
+    """
+
+    status: dict[int, SetInterval]
+    """Keyed by the chat (or user) id whose status message it refreshes."""
+    qb: Task | Literal[""]
+    stopAll: bool
+    """Set once on the way to a restart; the listeners check it and stop."""
+
+
+intervals: _Intervals = {"status": {}, "qb": "", "stopAll": False}
 qb_torrents = {}
 user_data = {}
 user_clients = {}

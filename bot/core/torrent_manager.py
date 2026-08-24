@@ -1,5 +1,5 @@
 from aioaria2 import Aria2WebsocketClient
-from aioqbt.client import create_client
+from aioqbt.client import APIClient, create_client
 from asyncio import gather, TimeoutError
 from aiohttp import ClientError
 from pathlib import Path
@@ -10,11 +10,17 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+from typing import Any
 
 from .. import LOGGER, aria2_options
 
 
-def wrap_with_retry(obj, max_retries=3):
+def wrap_with_retry[Client](obj: Client, max_retries: int = 3) -> Client:
+    """Retry every coroutine method of *obj*, in place.
+
+    Typed as returning what it was given -- it hands back the same object -- so
+    that ``initiate`` below keeps seeing an ``APIClient`` and not an ``object``.
+    """
     for attr_name in dir(obj):
         if attr_name.startswith("_"):
             continue
@@ -34,8 +40,12 @@ def wrap_with_retry(obj, max_retries=3):
 
 
 class TorrentManager:
-    aria2 = None
-    qbittorrent = None
+    # Both are built by ``initiate()`` during startup and never cleared, so they
+    # are annotated non-optional; the two assignments below are where that is
+    # momentarily untrue. Same trade as ``TgClient.bot``: typing them optional
+    # would push a None check onto every caller for a window none of them run in.
+    aria2: Aria2WebsocketClient = None  # pyrefly: ignore[bad-assignment]
+    qbittorrent: APIClient = None  # pyrefly: ignore[bad-assignment]
 
     @classmethod
     async def initiate(cls):
@@ -60,19 +70,43 @@ class TorrentManager:
                 pass
 
     @classmethod
+    async def aria2_status(cls, gid: str) -> dict[str, Any]:
+        """Everything aria2 reports about one download.
+
+        Same reason as ``unfinished``: the reply is typed as bare JSON, so the
+        shape is stated here instead of at each reader.
+        """
+        return await cls.aria2.tellStatus(gid)  # pyrefly: ignore[bad-return]
+
+    @classmethod
+    async def aria2_files(cls, gid: str) -> list[dict[str, Any]]:
+        """The files of one download, one dict each."""
+        return await cls.aria2.getFiles(gid)  # pyrefly: ignore[bad-return]
+
+    @classmethod
+    async def unfinished(cls) -> list[dict[str, Any]]:
+        """Every aria2 download that is running or still queued.
+
+        aioaria2 does not model the JSON-RPC replies, so both ``tell`` calls are
+        typed as bare JSON. That they answer with a list of download dicts is
+        stated here rather than at each caller below.
+        """
+        downloads: list[dict[str, Any]] = []
+        for res in await gather(cls.aria2.tellActive(), cls.aria2.tellWaiting(0, 1000)):
+            downloads.extend(res)  # pyrefly: ignore[bad-argument-type]
+        return downloads
+
+    @classmethod
     async def remove_all(cls):
         await cls.pause_all()
         await gather(
             cls.qbittorrent.torrents.delete("all", False),
             cls.aria2.purgeDownloadResult(),
         )
-        downloads = []
-        results = await gather(cls.aria2.tellActive(), cls.aria2.tellWaiting(0, 1000))
-        for res in results:
-            downloads.extend(res)
         tasks = []
         tasks.extend(
-            cls.aria2.forceRemove(download.get("gid")) for download in downloads
+            cls.aria2.forceRemove(download.get("gid", ""))
+            for download in await cls.unfinished()
         )
         try:
             await gather(*tasks)
@@ -94,14 +128,12 @@ class TorrentManager:
 
     @classmethod
     async def change_aria2_option(cls, key, value):
-        downloads = []
-        results = await gather(cls.aria2.tellActive(), cls.aria2.tellWaiting(0, 1000))
-        for res in results:
-            downloads.extend(res)
-            tasks = []
-        for download in downloads:
+        tasks = []
+        for download in await cls.unfinished():
             if download.get("status", "") != "complete":
-                tasks.append(cls.aria2.changeOption(download.get("gid"), {key: value}))
+                tasks.append(
+                    cls.aria2.changeOption(download.get("gid", ""), {key: value})
+                )
         if tasks:
             try:
                 await gather(*tasks)

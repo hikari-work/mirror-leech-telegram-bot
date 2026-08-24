@@ -32,9 +32,11 @@ What this module does about it, in order of how much it matters:
 from asyncio import Lock, sleep
 from random import uniform
 from time import monotonic
+from typing import Any
 
 from pyrogram.enums import ChatAction
 from pyrogram.errors import FloodPremiumWait, FloodWait
+from pyrogram.types import Chat, ChatMember
 
 from ... import LOGGER
 
@@ -137,7 +139,7 @@ def _fall_back(key, what, error):
     return entry["value"]
 
 
-async def _ask(key, call, what, on_definite):
+async def _ask(key, call, what, on_definite) -> Any:
     """Run *call*, retrying what a retry can fix.
 
     A definite answer -- a bad peer, a missing right -- is returned as
@@ -176,7 +178,7 @@ async def _ask(key, call, what, on_definite):
             return value
 
 
-async def _lookup(key, call, what, on_definite=_RAISE):
+async def _lookup(key, call, what, on_definite=_RAISE) -> Any:
     value = _fresh(key)
     if value is not _MISS:
         return value
@@ -192,7 +194,7 @@ async def _lookup(key, call, what, on_definite=_RAISE):
         return await _ask(key, call, what, on_definite)
 
 
-async def get_dest_chat(client, chat_id):
+async def get_dest_chat(client, chat_id) -> Chat | None:
     """The destination chat, or *None* when Telegram says it is not usable.
 
     Raises ``ChatLookupError`` when the lookup could not be completed: the
@@ -206,7 +208,7 @@ async def get_dest_chat(client, chat_id):
     )
 
 
-async def get_dest_member(client, chat_id, user_id):
+async def get_dest_member(client, chat_id, user_id) -> ChatMember:
     """*user_id*'s membership in *chat_id*, looked up with *client*.
 
     Definite errors propagate -- the caller decides what a missing membership

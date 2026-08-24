@@ -200,11 +200,14 @@ async def _gateway_get(session, path, params, context):
             return body
         if attempt == _API_ATTEMPTS:
             break
+        # Every failure comes back with a delay to go with its reason; the one
+        # None is the one that arrives with a body, and that returned above.
+        wait = delay or 0
         LOGGER.info(
             f"Mega gateway: {reason} while {context}, retrying in "
-            f"{delay:.1f}s [{attempt}/{_API_ATTEMPTS}]"
+            f"{wait:.1f}s [{attempt}/{_API_ATTEMPTS}]"
         )
-        await sleep(delay)
+        await sleep(wait)
 
     raise MegaApiError(f"{reason} after {_API_ATTEMPTS} attempts", context)
 

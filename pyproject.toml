@@ -152,7 +152,20 @@ max-complexity = 10
 "web/wserver.py"                                                          = ["C901", "E402", "E501", "I001"]
 
 [tool.pyrefly]
-project-includes = [
-    "**/*.py*",
-    "**/*.ipynb",
-]
+# `tests/` dan `tools/` sengaja di luar cakupan: keduanya nol anotasi dan
+# temuannya (121 + 43) akan menenggelamkan yang dari kode produksi. Masukkan
+# nanti kalau baseline di bawah sudah tipis.
+project-includes = ["bot", "web"]
+
+# Utang type-check dicatat di `pyrefly-baseline.json`, bukan sebagai daftar
+# kode-error yang dimatikan per file. Bedanya penting: mematikan `bad-assignment`
+# untuk satu modul juga menelan `bad-assignment` *baru* di modul itu, sementara
+# baseline mencatat temuan satu per satu — temuan baru tetap dilaporkan meskipun
+# jenis dan file-nya sama, dan entri yang sudah dibereskan hilang sendiri.
+#
+#   pyrefly check --baseline pyrefly-baseline.json    # yang dijalankan CI
+#   pyrefly check                                     # semua utang, tanpa filter
+#   pyrefly check --update-baseline --baseline pyrefly-baseline.json
+#
+# Perintah ketiga hanya untuk saat utang benar-benar dibereskan atau sengaja
+# diterima; jangan dipakai untuk membungkam temuan baru.

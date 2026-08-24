@@ -151,9 +151,15 @@ class Leech(CommandTask):
                     self.link = reply_text.split("\n", 1)[0].strip()
                 else:
                     reply_to = None
-            elif reply_to.document and (
-                file_.mime_type == "application/x-bittorrent"
-                or file_.file_name.endswith(".torrent")
+            elif (document := reply_to.document) and (
+                # ``document`` and not ``file_``: they are the same object here
+                # -- a document is first in the chain above, so a reply carrying
+                # one is what ``file_`` came from -- but only the document is
+                # known to have these two fields, and neither is guaranteed to
+                # be filled. A document sent without a name used to reach
+                # ``.endswith`` on None.
+                document.mime_type == "application/x-bittorrent"
+                or (document.file_name or "").endswith(".torrent")
             ):
                 self.link = await reply_to.download()
                 file_ = None

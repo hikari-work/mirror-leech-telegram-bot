@@ -38,6 +38,7 @@ from ..ext_utils.media_utils import (
 from ..mirror_leech_utils.status_utils.ffmpeg_status import FFmpegStatus
 from ..mirror_leech_utils.status_utils.sevenz_status import SevenZStatus
 from ..telegram_helper.message_utils import get_tg_link_message, temp_download
+from ._host import TaskConfigHost
 
 
 def is_extractable(file_):
@@ -55,7 +56,18 @@ def is_extractable(file_):
     )
 
 
-class MediaPipelineMixin:
+class MediaPipelineMixin(TaskConfigHost):
+    """The steps ``TaskListener`` runs over a finished download.
+
+    Every step takes the path it should work on and answers with the path the
+    next one should work on -- which is how ``_run_stage`` threads them together.
+    A step that gives up mid-way answers ``False`` instead, and sets
+    ``is_cancelled`` on the way out; ``_run_stage`` checks that flag right after
+    the call and drops the answer, so the sentinel never reaches a path
+    operation. It is in the signatures because it is real, not because a caller
+    is expected to do something with it.
+    """
+
     async def _ffmpeg_status(self, gid: str, status: str):
         """An ffmpeg driver, registered as what this task is doing now."""
         ffmpeg = FFMpeg(self)
@@ -82,7 +94,7 @@ class MediaPipelineMixin:
         await cpu_eater_lock.acquire()
         self.progress = True
 
-    async def proceed_extract(self, dl_path: str, gid: str) -> str:
+    async def proceed_extract(self, dl_path: str, gid: str) -> str | bool:
         pswd = self.extract if isinstance(self.extract, str) else ""
         self.files_to_proceed = []
         if self.is_file and is_archive(dl_path):
@@ -95,6 +107,9 @@ class MediaPipelineMixin:
         if not self.files_to_proceed:
             return dl_path
         t_path = dl_path
+        # `code` feeds the `return` at the end of the method; it is reset per
+        # directory inside the loop, which never runs if the tree is empty.
+        code = 0
         LOGGER.info(f"Extracting: {self.name}")
         sevenz = await self._sevenz_status(gid, "Extract")
         walk_data = await sync_to_async(
@@ -113,7 +128,7 @@ class MediaPipelineMixin:
                         self.subname = file_
                     code = await sevenz.extract(f_path, t_path, pswd)
             if self.is_cancelled:
-                return code
+                return False
             if code == 0:
                 for file_ in files:
                     if is_archive_split(file_) or is_archive(file_):
@@ -126,12 +141,12 @@ class MediaPipelineMixin:
             LOGGER.info("No files able to extract!")
         return t_path if self.is_file and code == 0 else dl_path
 
-    async def proceed_ffmpeg(self, dl_path: str, gid: str) -> str:
+    async def proceed_ffmpeg(self, dl_path: str, gid: str) -> str | bool:
         checked = False
         inputs = {}
         cmds = [
             [part.strip() for part in split(item) if part.strip()]
-            for item in self.ffmpeg_cmds
+            for item in self.ffmpeg_cmds or []
         ]
         try:
             ffmpeg = FFMpeg(self)
@@ -205,7 +220,9 @@ class MediaPipelineMixin:
                         if cmd[index + 1].startswith("mltb"):
                             var_cmd[index + 1] = file_path
                         elif is_telegram_link(cmd[index + 1]):
-                            msg = (await get_tg_link_message(cmd[index + 1], self.user_id))[0]
+                            msg = (
+                                await get_tg_link_message(cmd[index + 1], self.user_id)
+                            )[0]
                             file_dir = await temp_download(msg)
                             inputs[index + 1] = file_dir
                             var_cmd[index + 1] = file_dir
@@ -277,9 +294,22 @@ class MediaPipelineMixin:
                                             await f.write(txt)
                                         var_cmd[index + 1] = f"{dirpath}/mltb.txt"
                                     else:
-                                        var_cmd[index + 1] = f_path
+                                        # The one file this iteration is for.
+                                        # ``f_path`` holds two things by design
+                                        # -- that path, or the list of files a
+                                        # concat folded together, which the
+                                        # cleanup below tells apart with an
+                                        # ``isinstance``. Only the path form
+                                        # belongs in a command line, and a
+                                        # concat names its input as mltb.txt,
+                                        # which is the branch above.
+                                        var_cmd[index + 1] = f_path  # pyrefly: ignore[unsupported-operation]
                                 elif is_telegram_link(cmd[index + 1]):
-                                    msg = (await get_tg_link_message(cmd[index + 1], self.user_id))[0]
+                                    msg = (
+                                        await get_tg_link_message(
+                                            cmd[index + 1], self.user_id
+                                        )
+                                    )[0]
                                     file_dir = await temp_download(msg)
                                     inputs[index + 1] = file_dir
                                     var_cmd[index + 1] = file_dir
@@ -356,15 +386,15 @@ class MediaPipelineMixin:
             return new_path
         else:
             for f_path in await walk_files(dl_path):
-                new_name = perform_substitution(
-                    ospath.basename(f_path), self.name_sub
-                )
+                new_name = perform_substitution(ospath.basename(f_path), self.name_sub)
                 if not new_name:
                     continue
                 await move(f_path, ospath.join(ospath.dirname(f_path), new_name))
             return dl_path
 
-    async def generate_screenshots(self, dl_path: str) -> None:
+    async def generate_screenshots(self, dl_path: str) -> str:
+        """Where the file ended up: a new folder beside the screenshots, or
+        ``dl_path`` when it was left where it was."""
         ss_nb = int(self.screen_shots) if isinstance(self.screen_shots, str) else 10
         if self.is_file:
             if (await get_document_type(dl_path))[0]:
@@ -386,9 +416,9 @@ class MediaPipelineMixin:
                     await take_ss(f_path, ss_nb)
         return dl_path
 
-    async def convert_media(self, dl_path: str, gid: str) -> str:
+    async def convert_media(self, dl_path: str, gid: str) -> str | bool:
         fvext = []
-        if self.convert_video:
+        if isinstance(self.convert_video, str) and self.convert_video:
             vdata = self.convert_video.split()
             vext = vdata[0].lower()
             if len(vdata) > 2:
@@ -406,7 +436,7 @@ class MediaPipelineMixin:
             vstatus = ""
 
         faext = []
-        if self.convert_audio:
+        if isinstance(self.convert_audio, str) and self.convert_audio:
             adata = self.convert_audio.split()
             aext = adata[0].lower()
             if len(adata) > 2:
@@ -533,7 +563,7 @@ class MediaPipelineMixin:
                         return new_folder
         return dl_path
 
-    async def proceed_compress(self, dl_path: str, gid: str) -> str:
+    async def proceed_compress(self, dl_path: str, gid: str) -> str | bool:
         pswd = self.compress if isinstance(self.compress, str) else ""
         if self.is_file:
             new_folder = ospath.splitext(dl_path)[0]
@@ -549,16 +579,25 @@ class MediaPipelineMixin:
         sevenz = await self._sevenz_status(gid, "Zip")
         return await sevenz.zip(dl_path, up_path, pswd)
 
-    async def proceed_split(self, dl_path: str, gid: str) -> str:
+    async def proceed_split(self, dl_path: str, gid: str) -> None:
+        """Split whatever is over the size limit, in place.
+
+        The odd one out: it replaces files under ``dl_path`` instead of moving
+        the task to a new path, so it answers with nothing and the caller keeps
+        the path it already had.
+        """
+        # ``_resolve_split_sizes`` reduced the typed "-sp 2g" to a byte count
+        # before the download started, so only the number reaches here.
+        limit: int = self.split_size  # pyrefly: ignore[bad-assignment]
         self.files_to_proceed = {}
         if self.is_file:
             f_size = await get_path_size(dl_path)
-            if f_size > self.split_size:
+            if f_size > limit:
                 self.files_to_proceed[dl_path] = [f_size, ospath.basename(dl_path)]
         else:
             for f_path in await walk_files(dl_path):
                 f_size = await get_path_size(f_path)
-                if f_size > self.split_size:
+                if f_size > limit:
                     self.files_to_proceed[f_path] = [f_size, ospath.basename(f_path)]
         if self.files_to_proceed:
             ffmpeg = await self._ffmpeg_status(gid, "Split")
@@ -570,11 +609,11 @@ class MediaPipelineMixin:
                 else:
                     self.subsize = f_size
                     self.subname = file_
-                parts = -(-f_size // self.split_size)
+                parts = -(-f_size // limit)
                 if self.equal_splits:
                     split_size = (f_size // parts) + (f_size % parts)
                 else:
-                    split_size = self.split_size
+                    split_size = limit
                 if not self.as_doc and (await get_document_type(f_path))[0]:
                     self.progress = True
                     res = await ffmpeg.split(f_path, file_, parts, split_size)
@@ -582,7 +621,7 @@ class MediaPipelineMixin:
                     self.progress = False
                     res = await split_file(f_path, split_size, self)
                 if self.is_cancelled:
-                    return False
+                    return
                 if res or f_size >= self.max_split_size:
                     try:
                         await remove(f_path)

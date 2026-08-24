@@ -9,12 +9,20 @@ and ``-i`` (multi count) into one place.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .bot_utils import arg_parser
 
+# What ``arg_parser`` leaves in its value bag. ``Any`` rather than a union
+# because the type of each entry is decided by the flag it is keyed under -- the
+# defaults tables below carry the shapes, and the readers know which one they
+# asked for -- and because the bag is also read back through ``setattr`` with a
+# flag name that is not a literal.
+RawArgs = dict[str, Any]
+
 # ── shared arg-default dicts ────────────────────────────────────────
 
-COMMON_ARG_DEFAULTS: dict[str, object] = {
+COMMON_ARG_DEFAULTS: RawArgs = {
     "-doc": False,
     "-med": False,
     "-s": False,
@@ -47,7 +55,7 @@ Kept in one dict because the two commands only differ by a handful of flags, and
 the copies drifted: an option added to one was silently ignored by the other.
 """
 
-LEECH_ARG_DEFAULTS: dict[str, object] = {
+LEECH_ARG_DEFAULTS: RawArgs = {
     **COMMON_ARG_DEFAULTS,
     "-d": False,
     "-j": False,
@@ -60,7 +68,7 @@ LEECH_ARG_DEFAULTS: dict[str, object] = {
     "-h": [],
 }
 
-YTDLP_ARG_DEFAULTS: dict[str, object] = {
+YTDLP_ARG_DEFAULTS: RawArgs = {
     **COMMON_ARG_DEFAULTS,
     "-opt": {},
 }
@@ -94,6 +102,7 @@ COMMON_ARG_FIELDS: dict[str, str] = {
 
 # ── dataclasses ─────────────────────────────────────────────────────
 
+
 @dataclass
 class CommonArgs:
     """What a ``/leech`` and a ``/ytdl`` command have in common.
@@ -107,9 +116,12 @@ class CommonArgs:
     as_med: bool = False
     select: bool = False
     is_bulk: bool = False
-    compress: bool = False
-    sample_video: bool = False
-    screen_shots: bool = False
+    # Value-carrying: bare ``-z`` parses to True, ``-z secret`` to the string.
+    # ``TaskConfigHost`` spells the same three as unions, and the pipeline guards
+    # each one with ``isinstance(..., str)`` before using it as a value.
+    compress: str | bool = False
+    sample_video: str | bool = False
+    screen_shots: str | bool = False
     force_run: bool = False
     force_download: bool = False
     force_upload: bool = False
@@ -119,7 +131,9 @@ class CommonArgs:
 
     # int
     multi: int = 0
-    split_size: int = 0
+    # The text the user typed after ``-sp`` ("2g"), until the settings resolver
+    # reduces it to a byte count.
+    split_size: int | str = 0
 
     # str
     link: str = ""
@@ -147,7 +161,8 @@ class LeechArgs(CommonArgs):
     # bool flags
     seed: bool = False
     join: bool = False
-    extract: bool = False
+    # Value-carrying, like ``compress``: ``-e`` alone, or ``-e password``.
+    extract: str | bool = False
     is_alldebrid: bool = False
     is_torbox: bool = False
     stream_upload: bool = False
@@ -173,6 +188,7 @@ class YtdlpArgs(CommonArgs):
 
 
 # ── parsing functions ───────────────────────────────────────────────
+
 
 def parse_leech_args(input_list: list[str]) -> LeechArgs:
     """Parse *input_list* (message tokens minus the command) into a
@@ -230,14 +246,15 @@ def parse_ytdlp_args(input_list: list[str]) -> YtdlpArgs:
 
 # ── internal helpers ────────────────────────────────────────────────
 
-def _parse_raw(defaults: dict[str, object], input_list: list[str]) -> dict[str, object]:
+
+def _parse_raw(defaults: RawArgs, input_list: list[str]) -> RawArgs:
     """Run :func:`arg_parser` over a fresh copy of *defaults*."""
-    raw: dict[str, object] = {k: _copy_default(v) for k, v in defaults.items()}
+    raw: RawArgs = {k: _copy_default(v) for k, v in defaults.items()}
     arg_parser(input_list, raw)
     return raw
 
 
-def _apply_common(args: CommonArgs, raw: dict[str, object]) -> None:
+def _apply_common(args: CommonArgs, raw: RawArgs) -> None:
     """Copy everything both commands parse alike from *raw* onto *args*."""
     for key, attr in COMMON_ARG_FIELDS.items():
         setattr(args, attr, raw[key])
@@ -249,7 +266,7 @@ def _apply_common(args: CommonArgs, raw: dict[str, object]) -> None:
     # -i (multi) – tolerant parse
     try:
         args.multi = int(raw["-i"])
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         args.multi = 0
 
     # -b: a bare flag, or the ``start:end`` slice of the replied-to list. The
@@ -306,4 +323,3 @@ def strip_link_tokens(input_list: list[str], *, ytdlp: bool = False) -> list[str
         if token in defaults:
             return input_list[index:]
     return []
-

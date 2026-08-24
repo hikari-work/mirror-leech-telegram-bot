@@ -34,9 +34,14 @@ class _FoldAllowedCalls(ast.NodeTransformer):
 
     def visit_Call(self, node):
         self.generic_visit(node)
-        func = _ALLOWED_CALLS.get(getattr(node.func, "id", None))
+        # Only a bare name has an ``id``; ``os.system(...)`` puts an
+        # ``ast.Attribute`` there, and "" is a key the whitelist does not have,
+        # so it lands in the reject below with the call spelled out by
+        # ``unparse``.
+        called = getattr(node.func, "id", "")
+        func = _ALLOWED_CALLS.get(called)
         if func is None:
-            name = getattr(node.func, "id", None) or ast.unparse(node.func)
+            name = called or ast.unparse(node.func)
             allowed = ", ".join(f"{n}()" for n in _ALLOWED_CALLS)
             raise ValueError(f"{name}() is not allowed here. Allowed: {allowed}")
         if node.keywords or len(node.args) != 1:

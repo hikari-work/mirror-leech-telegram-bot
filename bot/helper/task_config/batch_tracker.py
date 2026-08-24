@@ -9,6 +9,7 @@ from ..telegram_helper.message_utils import (
     edit_message,
     send_message,
 )
+from ._host import TaskConfigHost
 
 BATCH_EDIT_INTERVAL = 5.0
 """Minimum seconds between two edits of the batch anchor message.
@@ -46,8 +47,8 @@ def new_batch(anchor, total, name):
     }
 
 
-class BatchTrackerMixin:
-    async def fail_task(self, error: str, *, notify: bool = True) -> None:
+class BatchTrackerMixin(TaskConfigHost):
+    async def fail_task(self, error: str | Exception, *, notify: bool = True) -> None:
         """Report a task that died before the download/upload listeners ran.
 
         Replaces the 13x / 5x duplicated triple in ``leech.py`` / ``ytdlp.py``.

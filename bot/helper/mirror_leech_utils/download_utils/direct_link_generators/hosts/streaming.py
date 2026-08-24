@@ -142,6 +142,10 @@ def filelions_and_streamwish(url):
     parsed_url = urlparse(url)
     hostname = parsed_url.hostname
     scheme = parsed_url.scheme
+    # Left empty for a hostname neither list below claims, so such a host takes
+    # the "API is not provided" path instead of raising NameError.
+    apiKey = ""
+    apiUrl = ""
     if any(
         x in hostname
         for x in [

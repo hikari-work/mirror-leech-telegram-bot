@@ -42,7 +42,7 @@ async def _handle_cancel(query, data, key):
     if task is None:
         await query.answer("Task not found or already finished!", show_alert=True)
         return
-    if task.listener.user_id != user_id and not await CustomFilters.sudo("", query):
+    if task.listener.user_id != user_id and not await CustomFilters.is_sudo(query):
         await query.answer("Not Yours!", show_alert=True)
         return
     await query.answer()
@@ -79,8 +79,16 @@ async def task_status(_, message):
 
 
 async def get_download_status(download):
+    """One task's status and, for the tools that report one, its speed.
+
+    The "no speed" placeholder is the empty string rather than 0 so that it can
+    go straight to ``speed_string_to_bytes``, which lowercases what it is given.
+    The upload branch of the caller passes it unguarded, so an rclone or gDrive
+    upload -- neither of which is asked for a speed here -- used to raise
+    ``AttributeError`` out of the whole stats page.
+    """
     tool = download.tool
-    speed = download.speed() if tool in ["telegram", "yt-dlp"] else 0
+    speed = download.speed() if tool in ["telegram", "yt-dlp"] else ""
     return (
         await download.status()
         if iscoroutinefunction(download.status)
@@ -173,10 +181,10 @@ async def status_pages(_, query):
                     case _:
                         tasks["Download"] += 1
 
-        msg = f"""<b>DL:</b> {tasks['Download']} | <b>UP:</b> {tasks['Upload']} | <b>SD:</b> {tasks['Seed']} | <b>AR:</b> {tasks['Archive']}
-<b>EX:</b> {tasks['Extract']} | <b>SP:</b> {tasks['Split']} | <b>QD:</b> {tasks['QueueDl']} | <b>QU:</b> {tasks['QueueUp']}
-<b>CK:</b> {tasks['CheckUp']} | <b>PA:</b> {tasks['Pause']} | <b>SV:</b> {tasks['SamVid']}
-<b>CM:</b> {tasks['ConvertMedia']} | <b>FF:</b> {tasks['FFmpeg']}
+        msg = f"""<b>DL:</b> {tasks["Download"]} | <b>UP:</b> {tasks["Upload"]} | <b>SD:</b> {tasks["Seed"]} | <b>AR:</b> {tasks["Archive"]}
+<b>EX:</b> {tasks["Extract"]} | <b>SP:</b> {tasks["Split"]} | <b>QD:</b> {tasks["QueueDl"]} | <b>QU:</b> {tasks["QueueUp"]}
+<b>CK:</b> {tasks["CheckUp"]} | <b>PA:</b> {tasks["Pause"]} | <b>SV:</b> {tasks["SamVid"]}
+<b>CM:</b> {tasks["ConvertMedia"]} | <b>FF:</b> {tasks["FFmpeg"]}
 
 <b>ODLS:</b> {get_readable_file_size(dl_speed)}/s
 <b>OULS:</b> {get_readable_file_size(up_speed)}/s

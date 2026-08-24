@@ -5,6 +5,7 @@ from .task_config import (
     MultiLinkMixin,
     SettingsResolverMixin,
 )
+from .telegram_helper.message_utils import chat_of
 
 
 class TaskConfig(
@@ -30,8 +31,15 @@ class TaskConfig(
         self.cmd_text = getattr(self, "_cmd_text", "") or (
             self.message.text or self.message.caption or ""
         )
-        self.user = self.message.from_user or self.message.sender_chat
-        self.user_id = self.user.id
+        # A command reaching a handler was sent by someone: a user, or the chat
+        # itself for a channel post or an anonymous admin. ``user_id`` on the
+        # next line has always assumed that, so it is stated here instead.
+        #
+        # The second suppression is pyrogram's ``Chat.id``, which it declares
+        # optional for the chats it builds from a partial update. A chat that
+        # posted a message is not one of those.
+        self.user = self.message.from_user or self.message.sender_chat  # pyrefly: ignore[bad-assignment]
+        self.user_id = self.user.id  # pyrefly: ignore[bad-assignment]
         self.user_dict = user_data.get(self.user_id, {})
         self.clone_dump_chats = {}
         self.copy_preset = ""
@@ -89,11 +97,18 @@ class TaskConfig(
         self.ffmpeg_cmds = None
         self.chat_thread_id = None
         self.subproc = None
-        self.thumb = None
+        # "" and not None: ``_apply_args`` overwrites this with the ``-t``
+        # argument (also "" when absent) before anything reads it, and the one
+        # reader that does not go through a truth test hands it to
+        # ``is_telegram_link``, which calls ``startswith`` on it.
+        self.thumb = ""
         self.excluded_extensions = []
         self.included_extensions = []
         self.files_to_proceed = []
-        self.is_super_chat = self.message.chat.type.name in [
+        # A chat without a type is no evidence of a super chat, so it is treated
+        # as the plain chat it looks like rather than crashing the task here.
+        chat_type = chat_of(self.message).type
+        self.is_super_chat = chat_type is not None and chat_type.name in [
             "SUPERGROUP",
             "CHANNEL",
             "FORUM",

@@ -293,7 +293,10 @@ class YtDlp(CommandTask):
         opt = opt or self.user_dict.get("YT_DLP_OPTIONS") or Config.YT_DLP_OPTIONS
 
         if not self.link and (reply_to := self.message.reply_to_message):
-            self.link = reply_to.text.split("\n", 1)[0].strip()
+            # A reply carrying no text -- a photo, a sticker, a poll -- leaves
+            # the link empty and falls into the usage message below. It used to
+            # reach ``.split`` on None instead.
+            self.link = (reply_to.text or "").split("\n", 1)[0].strip()
 
         if not is_url(self.link):
             if not self._batch():

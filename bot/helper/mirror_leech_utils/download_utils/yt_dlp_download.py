@@ -2,7 +2,9 @@ from logging import getLogger
 from os import path as ospath, listdir
 from re import search as re_search
 from secrets import token_urlsafe
-from yt_dlp import YoutubeDL, DownloadError
+from typing import Any
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 
 from .... import task_dict_lock, task_dict
@@ -54,7 +56,11 @@ class YoutubeDLHelper:
         self._ext = ""
         self.is_playlist = False
         self.keep_thumb = False
-        self.opts = {
+        # yt-dlp options are heterogeneous by design -- flags, counts, hooks,
+        # nested dicts of callables -- and the setup below adds lists and more
+        # callables to it, so the values cannot be narrowed to what this literal
+        # happens to hold.
+        self.opts: dict[str, Any] = {
             "progress_hooks": [self._on_download_progress],
             "logger": MyLogger(self, self._listener),
             "usenetrc": True,
@@ -136,7 +142,10 @@ class YoutubeDLHelper:
     def _extract_meta_data(self):
         if self._listener.link.startswith(("rtmp", "mms", "rstp", "rtmps")):
             self.opts["external_downloader"] = "ffmpeg"
-        with YoutubeDL(self.opts) as ydl:
+        # yt-dlp types ``params`` as a TypedDict naming every option it knows,
+        # and ``self.opts`` is assembled from what the user asked for: ``-opt``
+        # can set any of them, so no fixed set of keys describes it.
+        with YoutubeDL(self.opts) as ydl:  # pyrefly: ignore[bad-argument-type]
             try:
                 result = ydl.extract_info(self._listener.link, download=False)
                 if result is None:
@@ -170,7 +179,8 @@ class YoutubeDLHelper:
 
     def _download(self, path):
         try:
-            with YoutubeDL(self.opts) as ydl:
+            # Same runtime-assembled opts as in ``_extract_meta_data``.
+            with YoutubeDL(self.opts) as ydl:  # pyrefly: ignore[bad-argument-type]
                 try:
                     ydl.download([self._listener.link])
                 except DownloadError as e:

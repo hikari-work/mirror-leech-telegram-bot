@@ -1,17 +1,54 @@
 from pyrogram import Client, enums
-from pyrogram.types import LinkPreviewOptions
+from pyrogram.types import LinkPreviewOptions, User
 from asyncio import Lock
 
 from .. import LOGGER, user_data, user_clients
 from .config_manager import Config
 
 
+def own_account(client: Client) -> User:
+    """The account ``client`` is signed in as.
+
+    ``Client.me`` is filled by ``start()`` and stays set for the life of the
+    client, so every caller in the bot has one. Stating that here keeps the
+    single inaccuracy in one place instead of a None check at each call site.
+    """
+    return client.me  # pyrefly: ignore[bad-return]
+
+
+def user_session() -> Client:
+    """The USER_SESSION_STRING client, for a path that only runs when it exists.
+
+    ``TgClient.user`` is honestly optional, but the uploader and the telegram
+    downloader only reach for it once ``user_transmission`` is set, and the
+    settings resolver clears that flag when there is no user session -- so the
+    None cannot be observed from there. Code where it really can (a link a user
+    session may or may not be able to read) uses ``TgClient.user`` directly and
+    checks it.
+    """
+    return TgClient.user  # pyrefly: ignore[bad-return]
+
+
 class TgClient:
     _lock = Lock()
-    bot = None
-    user = None
+    # Both clients are built during startup, before any handler can run.
+    #
+    # ``bot`` is annotated non-optional even though it really is None between
+    # import and ``start_bot()``: ``stop()`` leans on that to be callable on a
+    # bot that never started. The alternative -- ``Client | None`` -- would make
+    # every one of the ~90 reads after startup ask about a state none of them can
+    # observe, so the inaccuracy is kept to the one assignment below instead.
+    bot: Client = None  # pyrefly: ignore[bad-assignment]
+    # ``user`` is a different case and is typed honestly: ``start_user()`` skips
+    # it entirely without a USER_SESSION_STRING and sets it back to None if the
+    # session fails to start, so reads really can find nothing here.
+    user: Client | None = None
     NAME = ""
-    ID = 0
+    # The bot half of BOT_TOKEN, i.e. a str -- this was `= 0`, which made every
+    # use of it look like an int. Nothing does arithmetic on it: it is the
+    # pyrogram session name, a mongo `_id`, and a collection name (which
+    # `AsyncCollection.__getitem__` requires be a str).
+    ID: str = ""
     IS_PREMIUM_USER = False
     MAX_SPLIT_SIZE = 2097152000
 
@@ -34,7 +71,8 @@ class TgClient:
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cls.bot.start()
-        cls.NAME = cls.bot.me.username
+        # A bot token always has a username; the `or ""` is for the annotation.
+        cls.NAME = own_account(cls.bot).username or ""
 
     @classmethod
     async def start_user(cls):
@@ -56,7 +94,7 @@ class TgClient:
                     link_preview_options=LinkPreviewOptions(is_disabled=True),
                 )
                 await cls.user.start()
-                cls.IS_PREMIUM_USER = cls.user.me.is_premium
+                cls.IS_PREMIUM_USER = bool(own_account(cls.user).is_premium)
                 if cls.IS_PREMIUM_USER:
                     cls.MAX_SPLIT_SIZE = 4194304000
             except Exception as e:

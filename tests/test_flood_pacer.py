@@ -49,6 +49,14 @@ def pacer_module(monkeypatch):
         ),
         "bot": _pkg("bot"),
         "bot.helper": _pkg("bot.helper"),
+        # Real path, not a stub: the pacer reads a flood's wait through
+        # ``telegram_helper.flood``, and these tests assert the number it comes
+        # back with, so the module under the assertions has to be the real one.
+        # It needs nothing but the stubbed ``pyrogram.errors`` to import.
+        "bot.helper.telegram_helper": _pkg(
+            "bot.helper.telegram_helper",
+            str(root / "bot" / "helper" / "telegram_helper"),
+        ),
         "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
         "bot.helper.mirror_leech_utils.upload_utils": _pkg(
             "bot.helper.mirror_leech_utils.upload_utils",
@@ -62,6 +70,9 @@ def pacer_module(monkeypatch):
     module = importlib.import_module(TARGET)
     yield module
     sys.modules.pop(TARGET, None)
+    # The real flood module imported above binds the stubbed error classes, so
+    # it is dropped with the pacer rather than handed to the next test file.
+    sys.modules.pop("bot.helper.telegram_helper.flood", None)
 
 
 def _pacer(pacer_module, monkeypatch, is_cancelled=lambda: False):

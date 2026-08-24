@@ -1,5 +1,7 @@
 from asyncio import sleep, gather
 
+from aioqbt.api.types import TorrentInfo
+
 from .... import LOGGER, qb_torrents, qb_listener_lock
 from ....core.torrent_manager import TorrentManager
 from ...ext_utils.status_utils import (
@@ -9,7 +11,7 @@ from ...ext_utils.status_utils import (
 )
 
 
-async def get_download(tag, old_info=None):
+async def get_download(tag, old_info: TorrentInfo | None = None) -> TorrentInfo | None:
     try:
         res = (await TorrentManager.qbittorrent.torrents.info(tag=tag))[0]
         return res or old_info
@@ -23,11 +25,20 @@ class QbittorrentStatus:
         self.queued = queued
         self.seeding = seeding
         self.listener = listener
-        self._info = None
+        # Every accessor below reads this unguarded, so ``update()`` has to have
+        # run first -- a precondition the status machinery already satisfies.
+        # Annotated to say so rather than to claim the None is unreachable: it
+        # is, if the very first ``get_download()`` fails and returns old_info.
+        self._info: TorrentInfo = None  # pyrefly: ignore[bad-assignment]
         self.tool = "qbittorrent"
 
     async def update(self):
-        self._info = await get_download(f"{self.listener.mid}", self._info)
+        # Keep whatever we last had when the lookup fails. ``get_download``
+        # already answers ``old_info`` for that, so the only None this refuses is
+        # a first lookup that failed before there was anything to keep -- and
+        # then holding the None over is no worse than storing it.
+        if info := await get_download(f"{self.listener.mid}", self._info):
+            self._info = info
 
     def progress(self):
         return f"{round(self._info.progress * 100, 2)}%"

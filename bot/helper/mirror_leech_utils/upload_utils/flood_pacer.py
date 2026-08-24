@@ -17,6 +17,8 @@ from logging import getLogger
 
 from pyrogram.errors import FloodPremiumWait, FloodWait
 
+from ...telegram_helper.flood import flood_seconds
+
 LOGGER = getLogger(__name__)
 
 # Telegram's own wait, plus a margin: asking again the instant it expires tends
@@ -79,4 +81,4 @@ class FloodPacer:
                 name = getattr(func, "__name__", str(func))
                 LOGGER.warning(f"Rate limited on {name}: waiting {f.value}s. {f}")
                 self.note_flood()
-                await sleep(f.value * FLOOD_SLACK)
+                await sleep(flood_seconds(f) * FLOOD_SLACK)

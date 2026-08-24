@@ -100,7 +100,12 @@ def get_readable_file_size(size_in_bytes):
     return f"{size_in_bytes:.2f}{SIZE_UNITS[index]}"
 
 
-def get_readable_time(seconds: int):
+def get_readable_time(seconds: float):
+    """ "1d2h3m4s" for *seconds*, dropping the units that would read as zero.
+
+    Floats are welcome: most callers hand over a ``time()`` difference, and the
+    parts are rounded on the way into the text anyway.
+    """
     periods = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
     result = ""
     for period_name, period_seconds in periods:
@@ -129,8 +134,14 @@ def time_to_seconds(time_duration):
         return 0
 
 
-def speed_string_to_bytes(size_text: str):
-    size = 0
+def speed_string_to_bytes(size_text: str) -> int:
+    """The byte count in a size or speed as written -- "1.5GiB", "300 kb/s".
+
+    Whole bytes: every caller either adds it to a byte total or formats it as
+    one, and two of those totals are counted in whole bytes, so the fraction
+    this used to carry had nowhere to go. Text naming no unit at all answers 0.
+    """
+    size = 0.0
     size_text = size_text.lower()
     if "k" in size_text:
         size += float(size_text.split("k")[0]) * 1024
@@ -142,7 +153,7 @@ def speed_string_to_bytes(size_text: str):
         size += float(size_text.split("t")[0]) * 1099511627776
     elif "b" in size_text:
         size += float(size_text.split("b")[0])
-    return size
+    return int(size)
 
 
 def get_progress_bar_string(pct):

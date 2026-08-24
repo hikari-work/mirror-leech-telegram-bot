@@ -103,13 +103,16 @@ async def _call_api(
     url: str,
     *,
     params: dict[str, Any] | None = None,
-    data: dict[str, Any] | None = None,
+    data: dict[str, Any] | list[tuple[str, Any]] | None = None,
     files: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Make a single AllDebrid API call and return the inner ``data`` dict.
 
     Raises ``DirectDownloadLinkException`` on HTTP/JSON/business errors so
     the existing ``mirror_leech`` flow can surface a friendly message.
+
+    ``data`` takes the list-of-pairs form too, which is how the callers below
+    emit a repeated key like ``magnets[]``; see ``_post_form``.
     """
     payload = await base.request_json(
         method,

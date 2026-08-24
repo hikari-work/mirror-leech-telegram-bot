@@ -73,7 +73,9 @@ class MegaDownloadHelper:
         self._gid = token_urlsafe(10)
         self._processed = 0
         self._lock = Lock()
-        self._speed = 0
+        # Bytes per second, so a float: ``speed`` below divides a byte delta by
+        # the seconds it took.
+        self._speed: float = 0
         self._last_time = 0.0
         self._last_bytes = 0
         proxies = _get_proxy_list()

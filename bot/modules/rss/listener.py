@@ -19,13 +19,20 @@ from collections.abc import Callable
 from functools import partial
 from typing import NamedTuple
 
+from pyrogram import Client
+from pyrogram.types import CallbackQuery, Message
+
 from ... import rss_dict, scheduler
 from ...core.config_manager import Config
 from ...helper.ext_utils.bot_utils import new_task
 from ...helper.ext_utils.db_handler import database
 from ...helper.ext_utils.help_messages import RSS_HELP_MESSAGE
 from ...helper.telegram_helper.filters import CustomFilters
-from ...helper.telegram_helper.message_utils import delete_message, edit_message
+from ...helper.telegram_helper.message_utils import (
+    chat_of,
+    delete_message,
+    edit_message,
+)
 from . import store
 from .manage import rss_delete, rss_get, rss_update
 from .menu import event_handler, nav_buttons, rss_list, update_rss_menu
@@ -36,9 +43,13 @@ from .subscribe import rss_edit, rss_sub
 class _Ctx(NamedTuple):
     """A parsed callback query. `target` is whose feeds the action is about."""
 
-    client: object
-    query: object
-    message: object
+    client: Client
+    query: CallbackQuery
+    # `query.message`, which pyrogram leaves optional for a callback on a
+    # message too old to be in its cache. Every button here comes from a menu
+    # the bot has open, so it is there; `rss_listener` is where that is
+    # assumed, and the actions below read it freely.
+    message: Message
     user_id: int
     action: str
     target: int
@@ -205,7 +216,8 @@ async def _act_setchat(ctx: _Ctx):
     thread_id = (
         message.message_thread_id if getattr(message, "topic_message", False) else None
     )
-    chat_value = f"{message.chat.id}|{thread_id}" if thread_id else str(message.chat.id)
+    chat_id = chat_of(message).id
+    chat_value = f"{chat_id}|{thread_id}" if thread_id else str(chat_id)
     old_value = Config.RSS_CHAT
     Config.set("RSS_CHAT", chat_value)
     await database.update_config({"RSS_CHAT": chat_value})
@@ -268,7 +280,7 @@ async def rss_listener(client, query):
         target=int(data[2]),
         data=data,
     )
-    if ctx.target != ctx.user_id and not await CustomFilters.sudo("", query):
+    if ctx.target != ctx.user_id and not await CustomFilters.is_sudo(query):
         await query.answer(
             text="You don't have permission to use these buttons!", show_alert=True
         )

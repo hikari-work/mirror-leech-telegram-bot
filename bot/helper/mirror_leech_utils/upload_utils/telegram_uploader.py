@@ -6,6 +6,7 @@ from os import walk
 from re import match as re_match
 from re import sub as re_sub
 from time import time
+from typing import TYPE_CHECKING, Any
 
 from aiofiles.os import (
     path as aiopath,
@@ -29,7 +30,7 @@ from tenacity import (
 
 from .... import intervals
 from ....core.config_manager import Config
-from ....core.telegram_manager import TgClient
+from ....core.telegram_manager import TgClient, user_session
 from ...ext_utils.bot_utils import sync_to_async
 from ...ext_utils.files_utils import get_base_name, is_archive
 from ...ext_utils.media_utils import (
@@ -39,9 +40,17 @@ from ...ext_utils.media_utils import (
     get_multiple_frames_thumbnail,
     get_video_thumbnail,
 )
-from ...telegram_helper.message_utils import delete_message
+from ...telegram_helper.flood import flood_seconds
+from ...telegram_helper.message_utils import chat_of, delete_message
 from .flood_pacer import FLOOD_SLACK, FloodPacer
 from .media_group_batcher import MediaGroupBatcher
+
+if TYPE_CHECKING:
+    # Names for the annotations only. Importing them for real would make this
+    # module need the pyrogram classes at import time, which it does not: it
+    # never builds a client or a message, it is handed both.
+    from pyrogram import Client
+    from pyrogram.types import Message
 
 LOGGER = getLogger(__name__)
 
@@ -79,7 +88,7 @@ class TelegramUploader:
         self._up_path = ""
         self._lprefix = ""
         self._is_private = False
-        self._sent_msg = None
+        self._sent_msg: Message | None = None
         self._user_session = self._listener.user_transmission
         self._error = ""
         self._base_msg = None
@@ -98,25 +107,31 @@ class TelegramUploader:
         self._processed_bytes += chunk_size
 
     @property
-    def _send_client(self):
+    def _send_client(self) -> Client:
         """The client that carries this file's bytes.
 
         A plain task stays on one client the whole way; hybrid leech flips per
         file on size, so this is read at every send rather than cached.
         """
-        return TgClient.user if self._user_session else self._listener.client
+        return user_session() if self._user_session else self._listener.client
 
-    def _reply_args(self):
+    def _reply_args(self) -> dict[str, Any]:
         """Where the next message goes: same chat and topic, under the anchor.
 
         This is what ``Message.reply_*`` used to fill in from the message it was
         bound to. Spelling it out means any client can send the reply, so the
         anchor no longer has to be re-fetched through the client that happens to
         need it next.
+
+        Typed loosely because it is spread into pyrogram's ``send_*``, and those
+        declare parameters like ``message_thread_id: int`` while defaulting them
+        to None. A chat without topics has no thread id, so a precise type here
+        would put the checker on pyrogram's side of a disagreement we are not
+        part of.
         """
-        anchor = self._sent_msg
+        anchor = self.anchor
         return {
-            "chat_id": anchor.chat.id,
+            "chat_id": chat_of(anchor).id,
             "reply_parameters": ReplyParameters(message_id=anchor.id),
             "message_thread_id": anchor.message_thread_id,
         }
@@ -155,7 +170,7 @@ class TelegramUploader:
             try:
                 if self._user_session:
                     self._sent_msg = await self._pacer.guard(
-                        TgClient.user.send_message,
+                        user_session().send_message,
                         chat_id=self._listener.up_dest,
                         text=msg,
                         message_thread_id=self._listener.chat_thread_id,
@@ -181,7 +196,7 @@ class TelegramUploader:
                 self._base_msg = self._sent_msg
         elif self._user_session:
             self._sent_msg = await self._pacer.guard(
-                TgClient.user.get_messages,
+                user_session().get_messages,
                 chat_id=self._listener.message.chat.id,
                 message_ids=self._listener.cmd_msg_id,
             )
@@ -189,7 +204,7 @@ class TelegramUploader:
                 if self._listener.is_cancelled:
                     return False
                 self._sent_msg = await self._pacer.guard(
-                    TgClient.user.send_message,
+                    user_session().send_message,
                     chat_id=self._listener.message.chat.id,
                     text="Deleted Cmd Message! Don't delete the cmd message again!",
                     disable_notification=True,
@@ -248,17 +263,22 @@ class TelegramUploader:
             self._sent_msg = sent[-1]
 
     @property
-    def _group_client(self):
+    def _group_client(self) -> Client:
         if self._listener.hybrid_leech or not self._user_session:
             return self._listener.client
-        return TgClient.user
+        return user_session()
 
     # --- what the media group batcher asks of the uploader ---
 
     @property
-    def anchor(self):
-        """The message the next send replies under."""
-        return self._sent_msg
+    def anchor(self) -> Message:
+        """The message the next send replies under.
+
+        ``_msg_to_reply`` leaves it behind and stops the upload when it cannot,
+        and every send -- the batcher's included -- happens after that, so the
+        None it starts out as is not reachable from here.
+        """
+        return self._sent_msg  # pyrefly: ignore[bad-return]
 
     @property
     def is_cancelled(self):
@@ -391,7 +411,7 @@ class TelegramUploader:
                 and (self._listener.is_super_chat or self._listener.up_dest)
                 and not self._is_private
             ):
-                self._msgs_dict[self._sent_msg.link] = file_
+                self._msgs_dict[self.anchor.link] = file_
             await self._pacer.pace()
         except Exception as err:
             if isinstance(err, RetryError):
@@ -629,7 +649,8 @@ class TelegramUploader:
             # Booked before the filing, because filing can ship an album that
             # takes this message with it: ``retire_group`` strikes off whatever
             # an album carried, and what survives is copied at the end.
-            self._uncopied.append((self._sent_msg.chat.id, self._sent_msg.id))
+            sent = self.anchor
+            self._uncopied.append((chat_of(sent).id, sent.id))
         await self._batcher.track(o_path)
         return True
 
@@ -659,9 +680,9 @@ class TelegramUploader:
                 except (FloodWait, FloodPremiumWait) as f:
                     LOGGER.warning(str(f))
                     self._pacer.note_flood()
-                    await sleep(f.value * FLOOD_SLACK)
+                    await sleep(flood_seconds(f) * FLOOD_SLACK)
                     raise
-        except (FloodWait, FloodPremiumWait):
+        except FloodWait, FloodPremiumWait:
             return await self._upload_file(cap_mono, file, o_path)
         except Exception as err:
             err_type = "RPCError: " if isinstance(err, RPCError) else ""

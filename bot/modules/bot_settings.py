@@ -190,8 +190,12 @@ class _Screen:
     action: str
     """Callback verb for tapping one option, e.g. `botset botvar <NAME>`."""
     options: Callable
-    hidden: Callable = None
-    """Keys that still consume a slot on the page but grow no button."""
+    hidden: Callable | None = None
+    """Keys that still consume a slot on the page but grow no button.
+
+    None for a screen that hides nothing, which is what the default says and
+    what the caller tests for before asking.
+    """
     extra: tuple = field(default_factory=tuple)
     """Screen-specific buttons, shown between Edit/View and Back."""
 

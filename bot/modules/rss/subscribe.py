@@ -116,7 +116,7 @@ async def _subscribe_one(message, index, item, user_id, tag) -> str:
         last_link = ""
         last_title = ""
         size = 0
-        feed_title = rss_d.feed.get("title", "Unknown")
+        feed_title = feed.feed_title(rss_d)
         if rss_d.entries:
             last_title = rss_d.entries[0]["title"]
             size = feed.item_size(rss_d.entries[0])
@@ -174,7 +174,7 @@ async def rss_sub(_, message, pre_event):
     if msg:
         await save_user(user_id)
         await send_message(message, msg)
-        resume_or_start(await CustomFilters.sudo("", message))
+        resume_or_start(await CustomFilters.is_sudo(message))
     await update_rss_menu(pre_event)
 
 

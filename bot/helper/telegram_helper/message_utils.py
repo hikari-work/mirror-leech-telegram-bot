@@ -2,6 +2,7 @@ from asyncio import sleep
 from pyrogram.errors import FloodWait, FloodPremiumWait
 from re import match as re_match
 from time import time
+from typing import TYPE_CHECKING
 
 from ... import LOGGER, status_dict, task_dict_lock, intervals, DOWNLOAD_DIR
 from ...core.config_manager import Config
@@ -9,6 +10,11 @@ from ...core.telegram_manager import TgClient, get_user_client
 from ..ext_utils.bot_utils import SetInterval
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
+from .flood import flood_seconds
+
+if TYPE_CHECKING:
+    # For ``chat_of``'s signature only; nothing here builds either one.
+    from pyrogram.types import Chat, Message
 
 STATUS_RESEND_INTERVAL = 8
 """Seconds before the status message may be re-sent to the bottom of the chat.
@@ -16,6 +22,18 @@ STATUS_RESEND_INTERVAL = 8
 Inside the window it is edited in place instead. ``/status`` passes
 ``force=True`` because a user asking for it expects a fresh message.
 """
+
+
+def chat_of(message: Message) -> Chat:
+    """The chat *message* was sent in.
+
+    pyrogram leaves ``Message.chat`` optional -- the empty placeholder it
+    answers with for a message it could not fetch has no chat -- but a command
+    the bot is handling and a message the bot just sent both came from one. The
+    eight ``message.chat.id`` reads around the bot are not the place to argue
+    about that, so the assumption is stated here.
+    """
+    return message.chat  # pyrefly: ignore[bad-return]
 
 
 async def send_message(message, text, buttons=None, block=True):
@@ -29,7 +47,7 @@ async def send_message(message, text, buttons=None, block=True):
         LOGGER.warning(str(f))
         if not block:
             return str(f)
-        await sleep(f.value * 1.2)
+        await sleep(flood_seconds(f) * 1.2)
         return await send_message(message, text, buttons, block)
     except Exception as e:
         LOGGER.error(str(e))
@@ -46,7 +64,7 @@ async def edit_message(message, text, buttons=None, block=True):
         LOGGER.warning(str(f))
         if not block:
             return str(f)
-        await sleep(f.value * 1.2)
+        await sleep(flood_seconds(f) * 1.2)
         return await edit_message(message, text, buttons, block)
     except Exception as e:
         LOGGER.error(str(e))
@@ -60,7 +78,7 @@ async def send_file(message, file, caption=""):
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
-        await sleep(f.value * 1.2)
+        await sleep(flood_seconds(f) * 1.2)
         return await send_file(message, file, caption)
     except Exception as e:
         LOGGER.error(str(e))
@@ -77,7 +95,7 @@ async def send_rss(text, chat_id, thread_id):
         )
     except (FloodWait, FloodPremiumWait) as f:
         LOGGER.warning(str(f))
-        await sleep(f.value * 1.2)
+        await sleep(flood_seconds(f) * 1.2)
         return await send_rss(text, chat_id, thread_id)
     except Exception as e:
         LOGGER.error(str(e))
@@ -156,7 +174,9 @@ async def get_tg_link_message(link, user_id=None):
     if not private:
         try:
             message = await TgClient.bot.get_messages(chat_id=chat, message_ids=msg_id)
-            if message.empty:
+            # No message at all counts as one the bot cannot read, same as the
+            # empty placeholder telegram answers with for a deleted one.
+            if message is None or message.empty:
                 private = True
         except Exception as e:
             private = True
@@ -174,7 +194,7 @@ async def get_tg_link_message(link, user_id=None):
             raise TgLinkException(
                 f"You don't have access to this chat!. ERROR: {e}"
             ) from e
-        if not user_message.empty:
+        if user_message is not None and not user_message.empty:
             return (links, "user") if links else (user_message, "user")
         else:
             raise TgLinkException("Private: Can't get this message!")
@@ -273,8 +293,7 @@ async def send_status_message(msg, user_id=0, force=False):
             # existing message is edited in place instead of being replaced.
             if (
                 not force
-                and time() - status_dict[sid].get("sent_at", 0)
-                < STATUS_RESEND_INTERVAL
+                and time() - status_dict[sid].get("sent_at", 0) < STATUS_RESEND_INTERVAL
             ):
                 throttled = True
             else:

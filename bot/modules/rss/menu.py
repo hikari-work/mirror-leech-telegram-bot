@@ -75,7 +75,7 @@ def _chat_display(event) -> str:
 
 async def rss_menu(event):
     """The root menu: header text plus button matrix."""
-    button = _root_buttons(event.from_user.id, await CustomFilters.sudo("", event))
+    button = _root_buttons(event.from_user.id, await CustomFilters.is_sudo(event))
     msg = (
         f"Rss Menu | Users: {len(rss_dict)} | Running: {scheduler.running}\n"
         f"RSS Chat: {_chat_display(event)}"

@@ -9,6 +9,7 @@ from asyncio import (
     run_coroutine_threadsafe,
     sleep,
 )
+from typing import Any
 
 from ... import user_data, bot_loop
 from ...core.config_manager import Config
@@ -171,7 +172,7 @@ def arg_parser(items, arg_base):
                         else:
                             try:
                                 arg_base[part].add(tuple(literal_eval(value)))
-                            except (ValueError, SyntaxError):
+                            except ValueError, SyntaxError:
                                 pass
                     else:
                         arg_base[part] = value
@@ -199,9 +200,27 @@ def get_size_bytes(size):
 
 
 async def get_content_type(url):
+    """What the server says *url* serves, or None if it will not say.
+
+    Redirects are followed: a share link that 302s to the file is the case this
+    exists for. The two keyword arguments this used to pass were aiohttp's --
+    ``allow_redirects``, and ``verify`` on the request rather than the client --
+    and httpx rejects both with a TypeError, which the ``except`` below caught.
+    So it answered None for every url, and its one caller scraped every link
+    rather than taking an already-direct one as direct.
+
+    ``stream`` rather than a plain get, because the answer is in the headers: a
+    get would pull the whole body into memory to read one of them, and the urls
+    reaching here are the ones about to be downloaded as files.
+
+    Verification is left on, unlike the ``verify=False`` that never reached
+    httpx: nothing has been relying on it, so there is nothing to preserve.
+    """
     try:
-        async with AsyncClient() as client:
-            response = await client.get(url, allow_redirects=True, verify=False)
+        async with (
+            AsyncClient(follow_redirects=True) as client,
+            client.stream("GET", url) as response,
+        ):
             return response.headers.get("Content-Type")
     except Exception:
         return None
@@ -238,7 +257,13 @@ def new_task(func):
     return wrapper
 
 
-async def sync_to_async(func, *args, wait=True, **kwargs):
+async def sync_to_async(func, *args, wait=True, **kwargs) -> Any:
+    """Run blocking *func* on the thread pool.
+
+    ``Any`` because *func* is untyped: the answer is whatever it answers, or the
+    pending future when ``wait`` is off. Spelling that union out instead would
+    put a ``Future`` in front of every caller, none of which asks for one.
+    """
     pfunc = partial(func, *args, **kwargs)
     future = bot_loop.run_in_executor(THREAD_POOL, pfunc)
     return await future if wait else future

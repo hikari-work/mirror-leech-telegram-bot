@@ -1,4 +1,5 @@
 from time import time
+from typing import Any
 
 from .... import LOGGER
 from ....core.torrent_manager import TorrentManager, aria2_name
@@ -9,19 +10,25 @@ from ...ext_utils.status_utils import (
 )
 
 
-async def get_download(gid, old_info=None):
+async def get_download(gid, old_info=None) -> dict[str, Any]:
+    """What aria2 says about *gid* now, or the last thing it said.
+
+    An empty blob when it has said nothing yet -- the caller below asked for a
+    gid it had no previous info for, and every reader of this dict goes through
+    ``.get`` with a default, so "nothing known" is a shape they already handle.
+    """
     try:
-        res = await TorrentManager.aria2.tellStatus(gid)
-        return res or old_info
+        res = await TorrentManager.aria2_status(gid)
+        return res or old_info or {}
     except Exception as e:
         LOGGER.error(f"{e}: Aria2c, Error while getting torrent info")
-        return old_info
+        return old_info or {}
 
 
 class Aria2Status:
     def __init__(self, listener, gid, seeding=False, queued=False):
         self._gid = gid
-        self._download = {}
+        self._download: dict[str, Any] = {}
         self.listener = listener
         self.queued = queued
         self.start_time = 0
@@ -36,7 +43,7 @@ class Aria2Status:
 
     def progress(self):
         try:
-            return f"{round(int(self._download.get("completedLength", "0")) / int(self._download.get("totalLength", "0")) * 100, 2)}%"
+            return f"{round(int(self._download.get('completedLength', '0')) / int(self._download.get('totalLength', '0')) * 100, 2)}%"
         except Exception:
             return "0%"
 
@@ -45,7 +52,7 @@ class Aria2Status:
 
     def speed(self):
         return (
-            f"{get_readable_file_size(int(self._download.get("downloadSpeed", "0")))}/s"
+            f"{get_readable_file_size(int(self._download.get('downloadSpeed', '0')))}/s"
         )
 
     def name(self):
@@ -91,7 +98,7 @@ class Aria2Status:
 
     def seed_speed(self):
         return (
-            f"{get_readable_file_size(int(self._download.get("uploadSpeed", "0")))}/s"
+            f"{get_readable_file_size(int(self._download.get('uploadSpeed', '0')))}/s"
         )
 
     def ratio(self):

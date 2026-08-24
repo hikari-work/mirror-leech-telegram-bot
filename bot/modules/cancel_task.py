@@ -43,7 +43,7 @@ async def cancel(_, message):
 async def cancel_multi(_, query):
     data = query.data.split()
     user_id = query.from_user.id
-    if user_id != int(data[1]) and not await CustomFilters.sudo("", query):
+    if user_id != int(data[1]) and not await CustomFilters.is_sudo(query):
         await query.answer("Not Yours!", show_alert=True)
         return
     tag = int(data[2])
@@ -114,7 +114,7 @@ async def cancel_all_buttons(_, message):
     if count == 0:
         await send_message(message, "No active tasks!")
         return
-    is_sudo = await CustomFilters.sudo("", message)
+    is_sudo = await CustomFilters.is_sudo(message)
     button = create_cancel_buttons(is_sudo, message.from_user.id)
     can_msg = await send_message(message, "Choose tasks to cancel!", button)
     await auto_delete_message(message, can_msg)
@@ -126,7 +126,7 @@ async def cancel_all_update(_, query):
     message = query.message
     reply_to = message.reply_to_message
     user_id = int(data[3]) if len(data) > 3 else ""
-    is_sudo = await CustomFilters.sudo("", query)
+    is_sudo = await CustomFilters.is_sudo(query)
     if not is_sudo and user_id and user_id != query.from_user.id:
         await query.answer("Not Yours!", show_alert=True)
     else:

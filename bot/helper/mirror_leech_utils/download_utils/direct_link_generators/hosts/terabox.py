@@ -2,7 +2,7 @@
 
 Key optimizations:
 1. Reduced probe timeout from 30s to 10s
-2. Reduced sleep between retries from 3s to 1s  
+2. Reduced sleep between retries from 3s to 1s
 3. Added early success detection to skip unnecessary retries
 4. Better error handling for credential vs network issues
 """
@@ -43,7 +43,7 @@ def _probe_with_proxy(link, headers, proxy_index=0):
     result_url, reason = _probe(link, headers)
     if result_url:
         return result_url, None
-    
+
     # If direct fails with 403/auth error, try through proxy
     if "403" in reason or "error" in reason.lower():
         try:
@@ -55,9 +55,8 @@ def _probe_with_proxy(link, headers, proxy_index=0):
             return None, f"direct:{reason}, proxy:{proxy_reason}"
         except Exception as e:
             return None, f"direct:{reason}, proxy:{e}"
-    
-    return None, reason
 
+    return None, reason
 
 
 # Domains the dispatcher routes here.
@@ -106,8 +105,8 @@ _TERABOX_MIRRORS = (
 _MAX_PROBE = 50
 _MAX_ATTEMPTS = 2  # Reduced from 3 to 2
 _PROBE_TIMEOUT = 10  # Reduced from 30 to 10 seconds
-_API_TIMEOUT = 30    # Reduced from 60 to 30 seconds
-_RETRY_DELAY = 1     # Reduced from 3 to 1 second
+_API_TIMEOUT = 30  # Reduced from 60 to 30 seconds
+_RETRY_DELAY = 1  # Reduced from 3 to 1 second
 
 
 def _sanitize_url(url):
@@ -164,13 +163,16 @@ def _probe(link, headers):
     """Return (final_url, None) when the link serves the file itself,
     otherwise (None, reason)."""
     try:
-        with Session() as session, session.get(
-            link,
-            headers={**headers, "Range": "bytes=0-511"},
-            allow_redirects=True,
-            stream=True,
-            timeout=_PROBE_TIMEOUT,  # Use optimized timeout
-        ) as resp:
+        with (
+            Session() as session,
+            session.get(
+                link,
+                headers={**headers, "Range": "bytes=0-511"},
+                allow_redirects=True,
+                stream=True,
+                timeout=_PROBE_TIMEOUT,  # Use optimized timeout
+            ) as resp,
+        ):
             if resp.status_code >= 400:
                 return None, f"HTTP {resp.status_code}"
             chunk = next(resp.iter_content(512), b"")
@@ -202,7 +204,9 @@ def _probe_files(files, headers):
         futures = {}
         for i, file in enumerate(files):
             if _links(file):
-                futures[executor.submit(_probe_with_proxy, _links(file)[0], headers, i % 5)] = _key(file)
+                futures[
+                    executor.submit(_probe_with_proxy, _links(file)[0], headers, i % 5)
+                ] = _key(file)
 
         for future in as_completed(futures):
             file_key = futures[future]
@@ -245,7 +249,9 @@ def _scrape(session, sanitized_url):
     files = [file for file in (response.get("files") or []) if _links(file)]
     if not files:
         if warning:
-            raise DirectDownloadLinkException(f"ERROR: No download links found. {warning.split(';')[0]}")
+            raise DirectDownloadLinkException(
+                f"ERROR: No download links found. {warning.split(';')[0]}"
+            )
         raise DirectDownloadLinkException("ERROR: No download links found")
 
     return (
@@ -259,16 +265,24 @@ def _resolve_links(session, sanitized_url):
     """Scrape and re-scrape until every probed link works or the attempts run
     out. Returns (contents, resolved, failed, header, title)."""
     contents = None
+    # Both are replaced by the first scrape, which the loop below always makes:
+    # ``contents is None`` on the first attempt sends it down that branch. They
+    # start as the empty values a caller can still use rather than as None,
+    # which the ``"\n".join`` and the title format below cannot.
+    header: list[str] = []
+    title = ""
     last_header = None
     resolved, failed = {}, {}
     probeable = pending = set()
-    
+
     # Track success rate to make smarter retry decisions
     total_files = 0
-    
+
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         # Only call API if we need fresh data or credentials changed
-        if contents is None or (last_header and header_dict(header) != header_dict(last_header)):
+        if contents is None or (
+            last_header and header_dict(header) != header_dict(last_header)
+        ):
             files, header, title = _scrape(session, sanitized_url)
             headers = header_dict(header)
             LOGGER.info(f"Terabox: API call #{attempt} - got {len(files)} files")
@@ -301,28 +315,35 @@ def _resolve_links(session, sanitized_url):
         good, failed_probe = _probe_files(retry, headers)
         resolved.update(good)
         pending = set(failed_probe)
-        
+
         # Early success detection - if we got most files working, don't retry
         success_rate = len(resolved) / len(probeable) if probeable else 0
         if success_rate >= 0.8:  # 80% success rate
-            LOGGER.info(f"Terabox: {success_rate:.1%} success rate, skipping further retries")
+            LOGGER.info(
+                f"Terabox: {success_rate:.1%} success rate, skipping further retries"
+            )
             break
-        
+
         if not pending:
             break
 
         # Check if failures are due to expired credentials vs network issues
-        credential_errors = sum(1 for reason in failed_probe.values() 
-                              if any(keyword in reason.lower() for keyword in 
-                                   ["expired", "error", "403", "401", "unauthorized"]))
-        
+        credential_errors = sum(
+            1
+            for reason in failed_probe.values()
+            if any(
+                keyword in reason.lower()
+                for keyword in ["expired", "error", "403", "401", "unauthorized"]
+            )
+        )
+
         LOGGER.info(
             f"Terabox: {len(pending)} link(s) rejected "
             f"({', '.join(sorted(set(failed_probe.values())))}), "
             f"{'credential issue' if credential_errors > len(failed_probe) * 0.5 else 'network issue'} "
             f"[{attempt}/{_MAX_ATTEMPTS}]"
         )
-        
+
         if attempt < _MAX_ATTEMPTS:
             sleep(_RETRY_DELAY)  # Shorter delay
 
@@ -352,7 +373,7 @@ def _collect(contents, resolved, failed, title):
         )
         try:
             details["total_size"] += int(file.get("size") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
 
     if not details["contents"]:

@@ -14,6 +14,7 @@ bulk of folders from hitting the gateway once per video all at once.
 from __future__ import annotations
 
 from os import path as ospath
+from typing import Any
 
 from aiofiles.os import makedirs
 from aiofiles.os import path as aiopath
@@ -41,7 +42,7 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
         lands as "clip.mp4.mp4". A ``%`` in a title is escaped -- ``outtmpl`` is
         a template, and "100%(real)" would otherwise expand to something else.
         """
-        opts = {
+        opts: dict[str, Any] = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
             "outtmpl": f"{stem.replace('%', '%%')}.%(ext)s",
@@ -56,7 +57,9 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
         }
         if headers:
             opts["http_headers"] = headers
-        with YoutubeDL(opts) as ydl:
+        # yt-dlp declares ``params`` as a TypedDict of every option it knows;
+        # this one is built per download, headers included.
+        with YoutubeDL(opts) as ydl:  # pyrefly: ignore[bad-argument-type]
             ydl.download([url])
 
     async def _resolve_entry(self, entry):

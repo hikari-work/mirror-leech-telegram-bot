@@ -7,6 +7,7 @@ from os import execl as osexecl
 from .. import intervals, scheduler, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.telegram_helper.message_utils import (
+    chat_of,
     send_message,
     delete_message,
 )
@@ -105,8 +106,15 @@ async def confirm_restart(_, query):
         )
         proc2 = await create_subprocess_exec("python3", "update.py")
         await gather(proc1.wait(), proc2.wait())
-        async with aiopen(".restartmsg", "w") as f:
-            await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
+        # ``send_message`` answers with the error text instead of a message when
+        # the reply fails -- a ``reply_to`` deleted in the meantime, for one. The
+        # restart goes ahead either way, so the note telling
+        # ``restart_notification`` which message to edit is left unwritten
+        # instead of raising out of the handler here, which used to skip
+        # ``osexecl`` and leave the bot stopped with nothing to bring it back.
+        if not isinstance(restart_message, str):
+            async with aiopen(".restartmsg", "w") as f:
+                await f.write(f"{chat_of(restart_message).id}\n{restart_message.id}\n")
         osexecl(executable, executable, "-m", "bot")
     else:
         await delete_message(message)

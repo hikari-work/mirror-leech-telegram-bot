@@ -7,6 +7,7 @@ and aria2 for direct MP4 files.  Modelled after ``mega_download.py``.
 from __future__ import annotations
 
 from os import path as ospath
+from typing import Any
 
 from aiofiles.os import makedirs
 from aiofiles.os import path as aiopath
@@ -27,7 +28,7 @@ class PornHubDownloadHelper(MultiVideoDownloadHelper):
 
     def _download_one(self, url: str, dest: str, headers: dict):
         """Download a single video with yt-dlp (blocking)."""
-        opts = {
+        opts: dict[str, Any] = {
             "format": "best",
             "outtmpl": dest,
             "noprogress": True,
@@ -40,7 +41,9 @@ class PornHubDownloadHelper(MultiVideoDownloadHelper):
         }
         if headers:
             opts["http_headers"] = headers
-        with YoutubeDL(opts) as ydl:
+        # yt-dlp declares ``params`` as a TypedDict of every option it knows;
+        # this one is built per download, headers included.
+        with YoutubeDL(opts) as ydl:  # pyrefly: ignore[bad-argument-type]
             ydl.download([url])
 
     async def add_download(self, path: str):

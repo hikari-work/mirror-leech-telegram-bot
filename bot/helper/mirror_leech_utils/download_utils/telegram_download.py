@@ -1,5 +1,7 @@
 from asyncio import Lock, sleep
 from time import time
+from typing import TYPE_CHECKING
+
 from pyrogram.errors import FloodWait, FloodPremiumWait
 
 from .... import (
@@ -7,11 +9,16 @@ from .... import (
     task_dict,
     task_dict_lock,
 )
-from ....core.telegram_manager import TgClient, get_user_client
+from ....core.telegram_manager import TgClient, get_user_client, user_session
 from ...ext_utils.task_manager import check_running_tasks
 from ...mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ...mirror_leech_utils.status_utils.telegram_status import TelegramStatus
+from ...telegram_helper.flood import flood_seconds
 from ...telegram_helper.message_utils import send_status_message
+
+if TYPE_CHECKING:
+    # For the annotation only: the client is always handed to this module.
+    from pyrogram import Client
 
 global_lock = Lock()
 GLOBAL_GID = set()
@@ -20,10 +27,10 @@ GLOBAL_GID = set()
 class TelegramDownloadHelper:
     def __init__(self, listener):
         self._processed_bytes = 0
-        self._start_time = 1
+        self._start_time: float = 1
         self._listener = listener
         self._id = ""
-        self._client = None
+        self._client: Client | None = None
         self.session = ""
 
     @property
@@ -55,7 +62,7 @@ class TelegramDownloadHelper:
             if self._client is not None:
                 self._client.stop_transmission()
             elif self.session == "user":
-                TgClient.user.stop_transmission()
+                user_session().stop_transmission()
             else:
                 TgClient.bot.stop_transmission()
         self._processed_bytes = current
@@ -81,7 +88,7 @@ class TelegramDownloadHelper:
                 return
         except (FloodWait, FloodPremiumWait) as f:
             LOGGER.warning(str(f))
-            await sleep(f.value)
+            await sleep(flood_seconds(f))
             await self._download(message, path)
             return
         except Exception as e:
@@ -98,22 +105,24 @@ class TelegramDownloadHelper:
         if not self.session:
             if self._listener.user_transmission and self._listener.is_super_chat:
                 self.session = "user"
-                self._client = TgClient.user
-                message = await self._client.get_messages(
+                client = user_session()
+                message = await client.get_messages(
                     chat_id=message.chat.id, message_ids=message.id
                 )
             else:
                 self.session = "bot"
-                self._client = self._listener.client
+                client = self._listener.client
         elif self.session == "user":
-            self._client = (
-                await get_user_client(self._listener.user_id) or TgClient.user
-            )
-            if self._client is None:
+            # The requester's own session first, the bot's spare one after it;
+            # either may be gone by now, which is the one case this file has to
+            # answer for rather than assume away.
+            client = await get_user_client(self._listener.user_id) or TgClient.user
+            if client is None:
                 await self._on_download_error("User session is not available anymore!")
                 return
         else:
-            self._client = self._listener.client
+            client = self._listener.client
+        self._client = client
         media = (
             message.document
             or message.photo
@@ -156,7 +165,7 @@ class TelegramDownloadHelper:
                     if self._listener.multi <= 1:
                         await send_status_message(self._listener.message)
                     await event.wait()
-                    message = await self._client.get_messages(
+                    message = await client.get_messages(
                         chat_id=message.chat.id, message_ids=message.id
                     )
                     if self._listener.is_cancelled:

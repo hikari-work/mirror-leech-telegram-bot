@@ -52,6 +52,10 @@ def uploader_module(monkeypatch):
     def _passthrough(*_args, **_kwargs):
         return lambda func: func
 
+    # Kept in a local so the module stub and ``user_session`` below hand out the
+    # same object; a test that swaps a client on it swaps it for both.
+    tg_client = SimpleNamespace(user=AsyncMock(), bot=AsyncMock())
+
     aiofiles_os = _stub(
         "aiofiles.os",
         remove=AsyncMock(),
@@ -97,7 +101,10 @@ def uploader_module(monkeypatch):
         "bot.core.config_manager": _stub("bot.core.config_manager", Config=object()),
         "bot.core.telegram_manager": _stub(
             "bot.core.telegram_manager",
-            TgClient=SimpleNamespace(user=AsyncMock(), bot=AsyncMock()),
+            TgClient=tg_client,
+            # The real one stands for "the user session, which exists on this
+            # path"; here it always does.
+            user_session=lambda: tg_client.user,
         ),
         "bot.helper": _pkg("bot.helper"),
         "bot.helper.ext_utils": _pkg("bot.helper.ext_utils"),
@@ -117,9 +124,18 @@ def uploader_module(monkeypatch):
             get_audio_thumbnail=AsyncMock(return_value=None),
             get_multiple_frames_thumbnail=AsyncMock(return_value=None),
         ),
-        "bot.helper.telegram_helper": _pkg("bot.helper.telegram_helper"),
+        # Real path, not a stub: the uploader reads a flood's wait through
+        # ``telegram_helper.flood``, which needs nothing but the stubbed
+        # ``pyrogram.errors`` to import. ``message_utils`` still resolves to the
+        # stub below, because sys.modules wins over the path.
+        "bot.helper.telegram_helper": _pkg(
+            "bot.helper.telegram_helper",
+            str(root / "bot" / "helper" / "telegram_helper"),
+        ),
         "bot.helper.telegram_helper.message_utils": _stub(
-            "bot.helper.telegram_helper.message_utils", delete_message=AsyncMock()
+            "bot.helper.telegram_helper.message_utils",
+            chat_of=lambda message: message.chat,
+            delete_message=AsyncMock(),
         ),
         "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
         "bot.helper.mirror_leech_utils.upload_utils": _pkg(
@@ -136,7 +152,13 @@ def uploader_module(monkeypatch):
     # The siblings are popped too: they bind the stubbed FloodWait and
     # InputMedia classes at import time, so a copy left behind would hand the
     # next test file the wrong ones.
-    siblings = (f"{pkg}.flood_pacer", f"{pkg}.media_group_batcher")
+    # ``telegram_helper.flood`` is real but imported under the stubbed errors,
+    # so it is dropped with them.
+    siblings = (
+        f"{pkg}.flood_pacer",
+        f"{pkg}.media_group_batcher",
+        "bot.helper.telegram_helper.flood",
+    )
     for name in (target, *siblings):
         sys.modules.pop(name, None)
     module = importlib.import_module(target)

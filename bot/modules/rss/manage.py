@@ -111,7 +111,7 @@ async def _update_one(message, user_id, title, state, is_sudo, updated) -> int:
 async def rss_update(_, message, pre_event, state):
     user_id = message.from_user.id
     handler_dict[user_id] = False
-    is_sudo = await CustomFilters.sudo("", message)
+    is_sudo = await CustomFilters.is_sudo(message)
     updated = []
     for raw in message.text.split():
         user_id = await _update_one(
@@ -138,7 +138,7 @@ async def _items_text(link, count) -> str:
     item_info = ""
     for item_num in range(count):
         entry = rss_d.entries[item_num]
-        clean = entry["title"].replace(">", "").replace("<", "")
+        clean = (feed.item_title(entry) or "").replace(">", "").replace("<", "")
         item_info += f"<b>Name: </b><code>{clean}</code>\n"
         item_info += f"<b>Link: </b><code>{feed.item_url(entry)}</code>\n\n"
     return item_info
@@ -174,10 +174,13 @@ async def rss_get(_, message, pre_event):
         count = int(args[1])
         data = rss_dict[user_id].get(title, False)
         if data and count > 0:
+            # Sent outside the try: the handlers below edit this message, so a
+            # failure to send it has to fall through to the outer handler rather
+            # than land in one that needs it.
+            status = await send_message(
+                message, f"Getting the last <b>{count}</b> item(s) from {title}"
+            )
             try:
-                status = await send_message(
-                    message, f"Getting the last <b>{count}</b> item(s) from {title}"
-                )
                 item_info = await _items_text(data["link"], count)
                 await _deliver_items(message, status, title, count, item_info)
             except IndexError as e:

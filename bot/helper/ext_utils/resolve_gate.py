@@ -15,10 +15,15 @@ effect on the next task without a restart.
 
 from asyncio import Semaphore
 from contextlib import asynccontextmanager
+from typing import Any
 
 from ...core.config_manager import Config
 
-_gate = {"limit": 0, "sem": None}
+# The live gate: the limit it was built for, and the semaphore itself. One dict
+# rather than two module globals so ``_semaphore`` can swap both without a
+# ``global`` statement. Loose values because the two keys hold different things
+# and the semaphore only exists after the first acquire.
+_gate: dict[str, Any] = {"limit": 0, "sem": None}
 
 
 def _limit() -> int:

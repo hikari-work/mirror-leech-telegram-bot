@@ -51,11 +51,12 @@ async def select(_, message):
         return
 
     try:
+        await task.update()
+        id_ = task.hash() if task.listener.is_qbit else task.gid()
+        # A task still sitting in the bot's own queue has nothing to pause; it
+        # only needs the id, for the selection buttons below.
         if not task.queued:
-            await task.update()
-            id_ = task.gid()
             if task.listener.is_qbit:
-                id_ = task.hash()
                 await TorrentManager.qbittorrent.torrents.stop([id_])
             else:
                 try:
@@ -110,7 +111,7 @@ async def confirm_selection(_, query):
                 if not task.queued:
                     await TorrentManager.qbittorrent.torrents.start([id_])
             else:
-                res = await TorrentManager.aria2.getFiles(id_)
+                res = await TorrentManager.aria2_files(id_)
                 for f in res:
                     if f["selected"] == "false" and await aiopath.exists(f["path"]):
                         try:

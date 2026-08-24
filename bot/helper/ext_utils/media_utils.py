@@ -9,6 +9,7 @@ from json import loads as json_loads
 from os import path as ospath
 from re import search as re_search, escape
 from time import time
+from typing import Literal
 from aioshutil import rmtree
 
 from ... import LOGGER, DOWNLOAD_DIR, threads, cores
@@ -135,7 +136,12 @@ async def get_document_type(path):
     return is_video, is_audio, is_image
 
 
-async def take_ss(video_file, ss_nb) -> bool:
+async def take_ss(video_file, ss_nb) -> str | Literal[False]:
+    """The directory the screenshots landed in, or False if none were taken.
+
+    ``False`` rather than None because both callers only ask whether there is a
+    directory; spelling it as a literal is what lets that check narrow.
+    """
     duration = (await get_media_info(video_file))[0]
     if duration != 0:
         dirpath, name = video_file.rsplit("/", 1)
@@ -323,19 +329,21 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots):
 
 
 class FFMpeg(SubprocRunner):
-
     def __init__(self, listener):
         self._listener = listener
         self._processed_bytes = 0
         self._last_processed_bytes = 0
-        self._processed_time = 0
-        self._last_processed_time = 0
-        self._speed_raw = 0
-        self._progress_raw = 0
-        self._total_time = 0
-        self._eta_raw = 0
+        # Everything ffmpeg reports about its own progress arrives as a fraction
+        # of a second, so these start at zero as floats rather than being
+        # widened to one on the first line of output.
+        self._processed_time: float = 0
+        self._last_processed_time: float = 0
+        self._speed_raw: float = 0
+        self._progress_raw: float = 0
+        self._total_time: float = 0
+        self._eta_raw: float = 0
         self._time_rate = 0.1
-        self._start_time = 0
+        self._start_time: float = 0
 
     @property
     def processed_bytes(self):
@@ -365,14 +373,23 @@ class FFMpeg(SubprocRunner):
         self._last_processed_bytes = 0
 
     async def _read_progress(self):
+        # ``run_subproc`` puts the process on the listener before it calls this,
+        # so it is there. Read once rather than through the listener on every
+        # line: the same object for the whole loop, and a task that clears the
+        # attribute while this is mid-read ends the loop instead of raising out
+        # of it. No stdout means nothing to read -- ``-progress pipe:1`` is on
+        # every command this runs for, so that is the "not our process" case.
+        subproc = self._listener.subproc
+        if subproc is None or subproc.stdout is None:
+            return
         while not (
-            self._listener.subproc.returncode is not None
+            subproc.returncode is not None
             or self._listener.is_cancelled
-            or self._listener.subproc.stdout.at_eof()
+            or subproc.stdout.at_eof()
         ):
             try:
-                line = await wait_for(self._listener.subproc.stdout.readline(), 60)
-            except (TimeoutError, Exception):
+                line = await wait_for(subproc.stdout.readline(), 60)
+            except TimeoutError, Exception:
                 break
             line = line.decode().strip()
             if not line:
@@ -398,11 +415,11 @@ class FFMpeg(SubprocRunner):
                             self._eta_raw = (
                                 self._total_time - self._processed_time
                             ) / self._time_rate
-                        except (ZeroDivisionError, ValueError):
+                        except ZeroDivisionError, ValueError:
                             self._progress_raw = 0
                             self._eta_raw = 0
 
-    async def ffmpeg_cmds(self, ffmpeg, f_path):
+    async def ffmpeg_cmds(self, ffmpeg, f_path: str | list[str]):
         self.clear()
         if isinstance(f_path, list):
             self._total_time = 0
@@ -434,7 +451,7 @@ class FFMpeg(SubprocRunner):
                     prefix = ""
             else:
                 prefix = f"ffmpeg{index}."
-            output = f"{dir}/{prefix}{output_file.replace("mltb", base_name)}{ext}"
+            output = f"{dir}/{prefix}{output_file.replace('mltb', base_name)}{ext}"
             outputs.append(output)
             ffmpeg[index] = output
         code, stderr = await self._run_cmd(ffmpeg)

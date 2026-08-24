@@ -2,6 +2,7 @@ from aiofiles.os import remove, path as aiopath
 from aiofiles import open as aiopen
 from asyncio import sleep, TimeoutError
 from aioqbt.api import AddFormBuilder
+from aioqbt.chrono import Minutes
 from aioqbt.exc import AQError
 from aiohttp.client_exceptions import ClientError
 
@@ -58,7 +59,10 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
         if ratio:
             form = form.ratio_limit(ratio)
         if seed_time:
-            form = form.seeding_time_limit(int(seed_time))
+            # Minutes, which is what ``-d ratio:time`` documents and what qbit
+            # means by ``seedingTimeLimit``. Naming the unit is the whole of the
+            # change: ``Minutes`` is a NewType over int, so nothing converts.
+            form = form.seeding_time_limit(Minutes(int(seed_time)))
         try:
             await TorrentManager.qbittorrent.torrents.add(form.build())
         except (ClientError, TimeoutError, Exception, AQError) as e:

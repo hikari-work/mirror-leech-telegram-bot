@@ -2,8 +2,15 @@
 
 from logging import getLogger
 from re import match as re_match
+from typing import TYPE_CHECKING
 
 from pyrogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+
+if TYPE_CHECKING:
+    # Annotation only. The three concrete classes above are what this module
+    # builds; their shared base is imported separately so the runtime import
+    # list stays the set of names actually used.
+    from pyrogram.types import InputMedia
 
 LOGGER = getLogger(__name__)
 
@@ -88,7 +95,11 @@ class MediaGroupBatcher:
         """
         bucket = self.classify(o_path)
         if bucket == "videos":
-            await self._queue("videos", re_match(SPLIT_NAME_RE, o_path).group(0))
+            # ``classify`` only answers "videos" for a name that matches, so this
+            # match is there; asking again keeps that local instead of threading
+            # it out of a function whose answer is just the bucket.
+            if match := re_match(SPLIT_NAME_RE, o_path):
+                await self._queue("videos", match.group(0))
             return
         if bucket == "documents":
             if match := re_match(SPLIT_NAME_RE, o_path):
@@ -113,7 +124,7 @@ class MediaGroupBatcher:
         self._album_msgs = []
         if len(msgs) < 2:
             return None
-        media = []
+        media: list[InputMedia] = []
         for index, msg in enumerate(msgs):
             msgs[index] = msg = await self._sender.resolve_message(msg[0], msg[1])
             if msg.photo:
@@ -201,7 +212,7 @@ class MediaGroupBatcher:
     @staticmethod
     def _input_media(msgs, key):
         """The album payload for a split group, reusing what was uploaded."""
-        media = []
+        media: list[InputMedia] = []
         for msg in msgs:
             if key == "videos":
                 media.append(

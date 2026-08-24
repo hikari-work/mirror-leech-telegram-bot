@@ -22,9 +22,11 @@ from ...helper.ext_utils.bot_utils import get_size_bytes
 __all__ = [
     "HEADERS",
     "SIZE_REGEX",
+    "feed_title",
     "fetch_text",
     "item_blocked",
     "item_size",
+    "item_title",
     "item_url",
     "latest_url",
     "parse",
@@ -72,6 +74,24 @@ def item_url(entry) -> str:
         return entry["links"][1]["href"]
     except IndexError:
         return entry["link"]
+
+
+def item_title(entry) -> str | None:
+    """The title of an entry, or None when it carries none.
+
+    Reading it through here rather than off the entry is what makes it a `str`.
+    feedparser ships no annotations, and its `FeedParserDict.__getitem__` is a
+    chain of special cases -- an `enclosures` read answers a list, a `license`
+    read answers whatever the link held -- so a checker sees every read of an
+    entry as that whole union. A title is a title; that is said once, here.
+    """
+    title = entry.get("title")
+    return None if title is None else str(title)
+
+
+def feed_title(rss_d) -> str:
+    """The feed's own title, or "Unknown" for a feed that omits it."""
+    return str(rss_d.feed.get("title", "Unknown"))
 
 
 def latest_url(entry) -> str | None:

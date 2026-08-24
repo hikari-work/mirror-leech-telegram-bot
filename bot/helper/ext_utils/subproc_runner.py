@@ -11,10 +11,19 @@ the two errors a ``bytes.decode()`` can actually raise -- so it lives here once.
 
 from asyncio import create_subprocess_exec
 from asyncio.subprocess import PIPE
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..listeners.task_listener import TaskListener
 
 
 class SubprocRunner:
     """Runs one command against ``self._listener`` and reports how it ended."""
+
+    # Assigned by the subclass -- ``FFMpeg`` and ``SevenZ`` each take the
+    # listener in their own ``__init__`` -- and declared here because
+    # ``_run_cmd`` below is the only thing in this class that reads it.
+    _listener: TaskListener
 
     async def _read_progress(self):
         """Drain the child's stdout into this tool's counters.

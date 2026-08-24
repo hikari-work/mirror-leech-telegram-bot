@@ -40,6 +40,7 @@ from ..mirror_leech_utils.status_utils.queue_status import QueueStatus
 from ..mirror_leech_utils.status_utils.telegram_status import TelegramStatus
 from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
 from ..telegram_helper.message_utils import (
+    chat_of,
     delete_message,
     delete_status,
     send_message,
@@ -160,7 +161,7 @@ class TaskListener(TaskConfig):
             and not self.bulk_child
         ):
             await database.add_incomplete_task(
-                self.message.chat.id, self.message.link, self.tag
+                chat_of(self.message).id, self.message.link, self.tag
             )
 
     async def on_download_complete(self):
@@ -175,6 +176,7 @@ class TaskListener(TaskConfig):
         if multi_links is None:
             return
 
+        gid = ""
         async with task_dict_lock:
             bail = self.is_cancelled or self.mid not in task_dict
             if not bail:
@@ -231,11 +233,8 @@ class TaskListener(TaskConfig):
         staging directory when it is the last member), and None when it was
         dropped from the group while waiting -- the caller must then return.
         """
-        if not (
-            self.folder_name
-            and self.same_dir
-            and self.mid in self.same_dir.get(self.folder_name, {}).get("tasks", ())
-        ):
+        group = self.same_dir.get(self.folder_name) if self.folder_name else None
+        if not group or self.mid not in group["tasks"]:
             return False
 
         deadline = monotonic() + SAME_DIR_WAIT_TIMEOUT
@@ -276,7 +275,9 @@ class TaskListener(TaskConfig):
                 if not await aiopath.exists(dpath):
                     # sole member of the group, nothing was staged for us
                     return False
-                LOGGER.info(f"Collecting staged files of {self.folder_name} into {self.mid}")
+                LOGGER.info(
+                    f"Collecting staged files of {self.folder_name} into {self.mid}"
+                )
             try:
                 await move_and_merge(spath, dpath, self.mid)
             except Exception as e:
@@ -430,7 +431,7 @@ class TaskListener(TaskConfig):
         async with task_dict_lock:
             task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
         await gather(
-            update_status_message(self.message.chat.id),
+            update_status_message(chat_of(self.message).id),
             tg.upload(),
         )
         del tg
@@ -449,15 +450,17 @@ class TaskListener(TaskConfig):
         if batch:
             if self.message != batch["anchor"]:
                 await delete_message(self.message)
-            await self.record_batch_result({
-                "name": self.name,
-                "size": self.size,
-                "folders": folders,
-                "corrupted": mime_type,
-                "files": files,
-                "link": link,
-                "mime_type": "",
-            })
+            await self.record_batch_result(
+                {
+                    "name": self.name,
+                    "size": self.size,
+                    "folders": folders,
+                    "corrupted": mime_type,
+                    "files": files,
+                    "link": link,
+                    "mime_type": "",
+                }
+            )
         else:
             msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
             msg += f"\n<b>Total Files: </b>{folders}"
@@ -493,7 +496,7 @@ class TaskListener(TaskConfig):
         if count == 0:
             await self.clean()
         else:
-            await update_status_message(self.message.chat.id)
+            await update_status_message(chat_of(self.message).id)
 
         async with queue_dict_lock:
             if self.mid in non_queued_up:
@@ -564,7 +567,7 @@ class TaskListener(TaskConfig):
         if count == 0:
             await self.clean()
         else:
-            await update_status_message(self.message.chat.id)
+            await update_status_message(chat_of(self.message).id)
 
         if (
             self.is_super_chat

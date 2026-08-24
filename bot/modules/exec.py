@@ -4,13 +4,18 @@ from io import StringIO, BytesIO
 from os import path as ospath, getcwd, chdir
 from textwrap import indent
 from traceback import format_exc
+from typing import Any
 
 from .. import LOGGER
 from ..core.telegram_manager import TgClient
 from ..helper.ext_utils.bot_utils import sync_to_async, new_task
 from ..helper.telegram_helper.message_utils import send_file, send_message
 
-namespaces = {}
+# One globals dict per chat, kept between /exec calls so a session can build on
+# what the last one defined. Loose values on purpose: ``do`` below hands this to
+# ``exec``, which defines whatever the user typed into it -- the ``func`` it then
+# reads back is a name this file never wrote.
+namespaces: dict[int, dict[str, Any]] = {}
 
 
 def namespace_of(message):

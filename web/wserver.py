@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 from logging import getLogger, FileHandler, StreamHandler, INFO, basicConfig, WARNING
 from asyncio import sleep
 from aioaria2 import Aria2HttpClient
-from aioqbt.client import create_client
+from aioqbt.client import APIClient, create_client
 from aiohttp.client_exceptions import ClientError
 from aioqbt.exc import AQError
 
@@ -17,8 +17,11 @@ from web.nodes import extract_file_ids, make_tree
 getLogger("httpx").setLevel(WARNING)
 getLogger("aiohttp").setLevel(WARNING)
 
-aria2 = None
-qbittorrent = None
+# Built by the FastAPI ``lifespan`` handler below, before the app serves its
+# first request, and closed when it shuts down. Annotated non-optional so the
+# route handlers don't each have to ask about a window they never run in.
+aria2: Aria2HttpClient = None  # pyrefly: ignore[bad-assignment]
+qbittorrent: APIClient = None  # pyrefly: ignore[bad-assignment]
 
 
 @asynccontextmanager

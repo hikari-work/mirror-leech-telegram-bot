@@ -100,7 +100,7 @@ async def _latest(data) -> _Head | None:
     if not rss_d.entries:
         return None
     entry0 = rss_d.entries[0]
-    return _Head(rss_d.entries, feed.latest_url(entry0), entry0.get("title"))
+    return _Head(rss_d.entries, feed.latest_url(entry0), feed.item_title(entry0))
 
 
 async def _dispatch_item(user, data, target, item: _Item) -> None:

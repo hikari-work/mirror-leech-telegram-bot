@@ -20,7 +20,14 @@ def _chat_up_count(chat_id):
     return sum(1 for mid in non_queued_up if upload_chat_of.get(mid) == chat_id)
 
 
-async def check_running_tasks(listener, state="dl"):
+async def check_running_tasks(listener, state="dl") -> tuple[bool, Event]:
+    """Whether *listener* has to queue, and the event that will release it.
+
+    The two answers come together: there is an event exactly when the first
+    element is true, and every caller waits on it under that flag. Saying so in
+    the signature keeps the eight ``await event.wait()`` sites from asking about
+    a None none of them can reach.
+    """
     all_limit = Config.QUEUE_ALL
     state_limit = Config.QUEUE_DOWNLOAD if state == "dl" else Config.QUEUE_UPLOAD
     event = None
@@ -58,7 +65,7 @@ async def check_running_tasks(listener, state="dl"):
             else:
                 non_queued_dl.add(listener.mid)
 
-    return is_over_limit, event
+    return is_over_limit, event  # pyrefly: ignore[bad-return]
 
 
 async def start_dl_from_queued(mid: int):

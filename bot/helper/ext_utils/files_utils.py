@@ -361,7 +361,9 @@ async def split_file(f_path, split_size, listener):
 class SevenZ(SubprocRunner):
     def __init__(self, listener):
         self._listener = listener
-        self._processed_bytes = 0
+        # A fraction of the archive, so a float: both readers below get a
+        # percentage off 7z and multiply the subtask's size by it.
+        self._processed_bytes: float = 0
         self._percentage = "0%"
 
     @property
@@ -376,13 +378,21 @@ class SevenZ(SubprocRunner):
         pattern = (
             r"(\d+)\s+bytes|Total Physical Size\s*=\s*(\d+)|Physical Size\s*=\s*(\d+)"
         )
+        # ``run_subproc`` puts the process on the listener before it calls this,
+        # so it is there. Read once rather than through the listener on every
+        # line: the same object for both loops, and a task that clears the
+        # attribute while this is mid-read ends the loop instead of raising out
+        # of it. Nothing to read from a command whose stdout was not a pipe.
+        subproc = self._listener.subproc
+        if subproc is None or subproc.stdout is None:
+            return
         while not (
-            self._listener.subproc.returncode is not None
+            subproc.returncode is not None
             or self._listener.is_cancelled
-            or self._listener.subproc.stdout.at_eof()
+            or subproc.stdout.at_eof()
         ):
             try:
-                line = await wait_for(self._listener.subproc.stdout.readline(), 2)
+                line = await wait_for(subproc.stdout.readline(), 2)
             except OSError:
                 break
             line = line.decode().strip()
@@ -399,11 +409,11 @@ class SevenZ(SubprocRunner):
         s = b""
         while not (
             self._listener.is_cancelled
-            or self._listener.subproc.returncode is not None
-            or self._listener.subproc.stdout.at_eof()
+            or subproc.returncode is not None
+            or subproc.stdout.at_eof()
         ):
             try:
-                char = await wait_for(self._listener.subproc.stdout.read(1), 60)
+                char = await wait_for(subproc.stdout.read(1), 60)
             except (TimeoutError, Exception):
                 break
             if not char:
@@ -447,11 +457,16 @@ class SevenZ(SubprocRunner):
 
     async def zip(self, dl_path, up_path, pswd):
         size = await get_path_size(dl_path)
+        # A byte count by the time a zip runs: ``-sp`` arrives as the text the
+        # user typed ("2g") and ``_resolve_split_sizes`` has already reduced it,
+        # which is the shape shift ``TaskConfigHost`` describes. Read once so
+        # that assumption is stated here and not three times below.
+        limit: int = self._listener.split_size  # pyrefly: ignore[bad-assignment]
         if self._listener.equal_splits:
-            parts = -(-size // self._listener.split_size)
+            parts = -(-size // limit)
             split_size = (size // parts) + (size % parts)
         else:
-            split_size = self._listener.split_size
+            split_size = limit
         cmd = [
             "7z",
             f"-v{split_size}b",
@@ -464,7 +479,7 @@ class SevenZ(SubprocRunner):
             "-bse1",
             "-bb3",
         ]
-        if int(size) > self._listener.split_size:
+        if int(size) > limit:
             if not pswd:
                 del cmd[4]
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}.0*")

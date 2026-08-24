@@ -12,8 +12,19 @@ from ..helper.telegram_helper.button_build import ButtonMaker
 from ..helper.telegram_helper.message_utils import edit_message, send_message
 
 PLUGINS = []
-SITES = None
+SITES: dict[str, str] | None = None
 TELEGRAPH_LIMIT = 300
+
+
+def api_sites() -> dict[str, str]:
+    """The API's site list, on the paths that are reached only when it has one.
+
+    ``SITES`` stays None while SEARCH_API_LINK is unset or its fetch failed --
+    which is exactly when ``torrent_search`` offers no api button, so none of
+    the seven reads below is reachable. They are not the place to argue about
+    that, so the assumption is stated here.
+    """
+    return SITES  # pyrefly: ignore[bad-return]
 
 
 async def initiate_search_tools():
@@ -44,24 +55,22 @@ async def initiate_search_tools():
 
 async def search(key, site, message, method):
     if method.startswith("api"):
+        # "all" is a path segment rather than a query parameter, so the two
+        # halves vary together; every endpoint below takes the same pair.
+        scope = "all/" if site == "all" else ""
+        site_q = "" if site == "all" else f"site={site}&"
+        limit = Config.SEARCH_LIMIT
         if method == "apisearch":
             LOGGER.info(f"API Searching: {key} from {site}")
-            if site == "all":
-                api = f"{Config.SEARCH_API_LINK}/api/v1/all/search?query={key}&limit={Config.SEARCH_LIMIT}"
-            else:
-                api = f"{Config.SEARCH_API_LINK}/api/v1/search?site={site}&query={key}&limit={Config.SEARCH_LIMIT}"
+            api = f"{Config.SEARCH_API_LINK}/api/v1/{scope}search?{site_q}query={key}&limit={limit}"
         elif method == "apitrend":
             LOGGER.info(f"API Trending from {site}")
-            if site == "all":
-                api = f"{Config.SEARCH_API_LINK}/api/v1/all/trending?limit={Config.SEARCH_LIMIT}"
-            else:
-                api = f"{Config.SEARCH_API_LINK}/api/v1/trending?site={site}&limit={Config.SEARCH_LIMIT}"
-        elif method == "apirecent":
+            api = (
+                f"{Config.SEARCH_API_LINK}/api/v1/{scope}trending?{site_q}limit={limit}"
+            )
+        else:
             LOGGER.info(f"API Recent from {site}")
-            if site == "all":
-                api = f"{Config.SEARCH_API_LINK}/api/v1/all/recent?limit={Config.SEARCH_LIMIT}"
-            else:
-                api = f"{Config.SEARCH_API_LINK}/api/v1/recent?site={site}&limit={Config.SEARCH_LIMIT}"
+            api = f"{Config.SEARCH_API_LINK}/api/v1/{scope}recent?{site_q}limit={limit}"
         try:
             async with AsyncClient() as client:
                 response = await client.get(api)
@@ -69,18 +78,16 @@ async def search(key, site, message, method):
             if "error" in search_results or search_results["total"] == 0:
                 await edit_message(
                     message,
-                    f"No result found for <i>{key}</i>\nTorrent Site:- <i>{SITES.get(site)}</i>",
+                    f"No result found for <i>{key}</i>\nTorrent Site:- <i>{api_sites().get(site)}</i>",
                 )
                 return
             msg = f"<b>Found {min(search_results['total'], TELEGRAPH_LIMIT)}</b>"
             if method == "apitrend":
-                msg += f" <b>trending result(s)\nTorrent Site:- <i>{SITES.get(site)}</i></b>"
+                msg += f" <b>trending result(s)\nTorrent Site:- <i>{api_sites().get(site)}</i></b>"
             elif method == "apirecent":
-                msg += (
-                    f" <b>recent result(s)\nTorrent Site:- <i>{SITES.get(site)}</i></b>"
-                )
+                msg += f" <b>recent result(s)\nTorrent Site:- <i>{api_sites().get(site)}</i></b>"
             else:
-                msg += f" <b>result(s) for <i>{key}</i>\nTorrent Site:- <i>{SITES.get(site)}</i></b>"
+                msg += f" <b>result(s) for <i>{key}</i>\nTorrent Site:- <i>{api_sites().get(site)}</i></b>"
             search_results = search_results["data"]
         except Exception as e:
             await edit_message(message, str(e))
@@ -198,7 +205,7 @@ async def get_result(search_results, key, message, method):
 
 def api_buttons(user_id, method):
     buttons = ButtonMaker()
-    for data, name in SITES.items():
+    for data, name in api_sites().items():
         buttons.data_button(name, f"torser {user_id} {data} {method}")
     buttons.data_button("Cancel", f"torser {user_id} cancel")
     return buttons.build_menu(2)
@@ -273,18 +280,15 @@ async def torrent_search_update(_, query):
         method = data[3]
         if method.startswith("api"):
             if key is None:
-                if method == "apirecent":
-                    endpoint = "Recent"
-                elif method == "apitrend":
-                    endpoint = "Trending"
+                endpoint = "Recent" if method == "apirecent" else "Trending"
                 await edit_message(
                     message,
-                    f"<b>Listing {endpoint} Items...\nTorrent Site:- <i>{SITES.get(site)}</i></b>",
+                    f"<b>Listing {endpoint} Items...\nTorrent Site:- <i>{api_sites().get(site)}</i></b>",
                 )
             else:
                 await edit_message(
                     message,
-                    f"<b>Searching for <i>{key}</i>\nTorrent Site:- <i>{SITES.get(site)}</i></b>",
+                    f"<b>Searching for <i>{key}</i>\nTorrent Site:- <i>{api_sites().get(site)}</i></b>",
                 )
         else:
             await edit_message(

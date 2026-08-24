@@ -3,6 +3,7 @@ from aiofiles.os import path as aiopath
 from gridfs.asynchronous import AsyncGridFSBucket
 from importlib import import_module
 from pymongo import AsyncMongoClient
+from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError
 
@@ -18,10 +19,21 @@ USER_DOC_KEYS = ("THUMBNAIL",)
 
 class DbManager:
     def __init__(self):
+        # ``_return`` is the guard for the three below: every method here opens
+        # with ``if self._return: return``, and it is only False between a
+        # successful ``connect()`` and the next ``disconnect()``/failure. So the
+        # dereferences further down never see the None these start as, which is
+        # why they are annotated non-optional.
+        #
+        # Note the two are *not* interchangeable, and a checker can follow
+        # neither: ``disconnect()`` sets ``_return = True`` without clearing
+        # ``db``, so "``_return`` is True" is strictly wider than "``db`` is
+        # None". Swapping the guard for ``if self.db is None`` would let calls
+        # through onto a closed connection.
         self._return = True
-        self._conn = None
-        self.db = None
-        self._bucket = None
+        self._conn: AsyncMongoClient = None  # pyrefly: ignore[bad-assignment]
+        self.db: AsyncDatabase = None  # pyrefly: ignore[bad-assignment]
+        self._bucket: AsyncGridFSBucket = None  # pyrefly: ignore[bad-assignment]
 
     async def connect(self):
         try:
@@ -38,17 +50,19 @@ class DbManager:
             self._return = False
         except PyMongoError as e:
             LOGGER.error(f"Error in DB connection: {e}")
-            self.db = None
-            self._bucket = None
+            # Back to the disconnected state; `_return` is what keeps the
+            # dereferences below from ever seeing these Nones.
+            self.db = None  # pyrefly: ignore[bad-assignment]
+            self._bucket = None  # pyrefly: ignore[bad-assignment]
             self._return = True
-            self._conn = None
+            self._conn = None  # pyrefly: ignore[bad-assignment]
 
     async def disconnect(self):
         self._return = True
         if self._conn is not None:
             await self._conn.close()
-        self._conn = None
-        self._bucket = None
+        self._conn = None  # pyrefly: ignore[bad-assignment]
+        self._bucket = None  # pyrefly: ignore[bad-assignment]
 
     # ---------------------------------------------------------------- GridFS
 
@@ -96,9 +110,7 @@ class DbManager:
         names = set()
         # Range scan rather than a regex so that dots and slashes in the path
         # need no escaping. ￿ sorts above any character a name may hold.
-        cursor = self._bucket.find(
-            {"filename": {"$gte": root, "$lt": root + "￿"}}
-        )
+        cursor = self._bucket.find({"filename": {"$gte": root, "$lt": root + "￿"}})
         for doc in await cursor.to_list(None):
             names.add(doc.filename.split("/", 1)[1])
         return sorted(names)

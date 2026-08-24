@@ -57,3 +57,16 @@ class CustomFilters:
         )
 
     sudo = create(sudo_user)
+
+    @staticmethod
+    async def is_sudo(update) -> bool:
+        """Whether *update* came from a sudo user or the owner.
+
+        The filters above are pyrogram Filter objects, so calling one takes the
+        client as its first argument -- and every one of them ignores it, which
+        is why that parameter is named ``_``. Eight places ask this question
+        outside a handler, with no client in reach, and each of them used to
+        pass an empty string for it.
+        """
+        # pyrefly: ignore[bad-argument-type]
+        return await CustomFilters.sudo("", update)

@@ -9,7 +9,7 @@ from ... import (
     included_extensions,
 )
 from ...core.config_manager import Config
-from ...core.telegram_manager import TgClient
+from ...core.telegram_manager import TgClient, own_account
 from ..ext_utils.bot_utils import get_size_bytes
 from ..ext_utils.copy_presets import presets_of
 from ..ext_utils.links_utils import is_telegram_link
@@ -21,6 +21,7 @@ from ..telegram_helper.dest_chat import (
     get_dest_member,
 )
 from ..telegram_helper.message_utils import get_tg_link_message
+from ._host import TaskConfigHost
 
 # A destination the bot can post many files into and clean up after; anything
 # else (a PM, most of all) is handled as a plain chat.
@@ -47,6 +48,16 @@ def _is_enabled(user_dict, key, global_value) -> bool:
     return bool(user_dict.get(key) or (global_value and key not in user_dict))
 
 
+def _is_group_chat(chat) -> bool:
+    """Whether a destination is a group or channel rather than a plain chat.
+
+    ``Chat.type`` is optional in pyrogram, and an answer without one is no
+    evidence that the destination is a group, so it takes the same path a PM
+    does.
+    """
+    return chat.type is not None and chat.type.name in GROUP_CHAT_TYPES
+
+
 def _as_chat_id(value):
     """A chat or thread id as an int when it looks numeric, else untouched."""
     return int(value) if value.lstrip("-").isdigit() else value
@@ -54,9 +65,7 @@ def _as_chat_id(value):
 
 def _can_manage_and_delete(member) -> bool:
     """Whether an account can both manage the chat and delete messages in it."""
-    return (
-        member.privileges.can_manage_chat and member.privileges.can_delete_messages
-    )
+    return member.privileges.can_manage_chat and member.privileges.can_delete_messages
 
 
 def _as_dump_entries(chats):
@@ -70,7 +79,7 @@ def _as_dump_entries(chats):
     return chats
 
 
-class SettingsResolverMixin:
+class SettingsResolverMixin(TaskConfigHost):
     def _dest_unverified(self, what, error) -> None:
         """Handle a destination check that could not be completed.
 
@@ -111,11 +120,14 @@ class SettingsResolverMixin:
 
     def _resolve_name_substitutions(self) -> None:
         """Parse the rename rules from ``old/new | old/new`` into pairs."""
-        self.name_sub = self.name_sub or _setting_for(
+        spec = self.name_sub or _setting_for(
             self.user_dict, "NAME_SUBSTITUTE", Config.NAME_SUBSTITUTE
         )
-        if self.name_sub:
-            self.name_sub = [x.split("/") for x in self.name_sub.split(" | ")]
+        # No rules stays the empty string rather than becoming ``[[""]]``: the
+        # stage list in TaskListener gates on this being falsy.
+        if isinstance(spec, str) and spec:
+            spec = [x.split("/") for x in spec.split(" | ")]
+        self.name_sub = spec
 
     def _resolve_extension_filters(self) -> None:
         """Decide which file extensions this task keeps and which it drops."""
@@ -234,7 +246,7 @@ class SettingsResolverMixin:
         """Reduce the destination the user typed to a chat id and thread id."""
         if isinstance(self.up_dest, int):
             return
-        self._apply_transmission_prefix()
+        self.up_dest = self._apply_transmission_prefix(self.up_dest)
         if "|" in self.up_dest:
             chat, thread = self.up_dest.split("|", 1)
             self.up_dest = _as_chat_id(chat)
@@ -244,12 +256,15 @@ class SettingsResolverMixin:
         elif self.up_dest.lower() == "pm":
             self.up_dest = self.user_id
 
-    def _apply_transmission_prefix(self) -> None:
-        """Let a ``b:``/``u:``/``h:`` prefix override the uploading session."""
-        prefix = self.up_dest[:2]
+    def _apply_transmission_prefix(self, up_dest: str) -> str:
+        """Let a ``b:``/``u:``/``h:`` prefix override the uploading session.
+
+        Returns the destination with the prefix stripped, or unchanged if there
+        was none.
+        """
+        prefix = up_dest[:2]
         if prefix not in TRANSMISSION_PREFIXES:
-            return
-        self.up_dest = self.up_dest[2:]
+            return up_dest
         if prefix == "b:":
             self._downgrade_to_bot_session()
         elif prefix == "u:":
@@ -257,6 +272,7 @@ class SettingsResolverMixin:
         else:
             self.user_transmission = True
             self.hybrid_leech = bool(TgClient.IS_PREMIUM_USER)
+        return up_dest[2:]
 
     async def _verify_dest_for_user_session(self) -> None:
         """Downgrade to the bot unless the user session can manage the chat.
@@ -279,7 +295,7 @@ class SettingsResolverMixin:
                 "Account of user session can't find the the destination chat!"
             )
             self._downgrade_to_bot_session()
-        elif chat.type.name not in GROUP_CHAT_TYPES:
+        elif not _is_group_chat(chat):
             self._downgrade_to_bot_session()
         elif not chat.is_admin:
             LOGGER.warning(
@@ -292,10 +308,13 @@ class SettingsResolverMixin:
 
     async def _verify_user_session_privileges(self, chat) -> None:
         """Check the user session may manage the chat and delete its messages."""
+        user = TgClient.user
+        if user is None:
+            # No user session to verify -- nothing to hand the upload to.
+            self._downgrade_to_bot_session()
+            return
         try:
-            member = await get_dest_member(
-                TgClient.user, chat.id, TgClient.user.me.id
-            )
+            member = await get_dest_member(user, chat.id, own_account(user).id)
         except ChatLookupError as e:
             LOGGER.warning(
                 "Can't check the privileges of the user session in "
@@ -324,7 +343,7 @@ class SettingsResolverMixin:
             if not self.user_transmission:
                 raise ValueError("Chat not found!")
             self.hybrid_leech = False
-        elif chat.type.name in GROUP_CHAT_TYPES:
+        elif _is_group_chat(chat):
             await self._verify_bot_privileges(chat)
         else:
             await self._verify_bot_can_reach_dest()
@@ -335,7 +354,9 @@ class SettingsResolverMixin:
             raise ValueError("Bot is not admin in the destination chat!")
         member = None
         try:
-            member = await get_dest_member(self.client, chat.id, self.client.me.id)
+            member = await get_dest_member(
+                self.client, chat.id, own_account(self.client).id
+            )
         except ChatLookupError as e:
             self._dest_unverified("the bot's privileges", e)
         if member is not None and not _can_manage_and_delete(member):
@@ -362,17 +383,12 @@ class SettingsResolverMixin:
 
     def _resolve_split_sizes(self) -> None:
         """Fix the split size and the ceiling telegram will accept for it."""
-        if self.split_size:
-            self.split_size = (
-                int(self.split_size)
-                if self.split_size.isdigit()
-                else get_size_bytes(self.split_size)
-            )
-        self.split_size = (
-            self.split_size
-            or self.user_dict.get("LEECH_SPLIT_SIZE")
-            or Config.LEECH_SPLIT_SIZE
-        )
+        # ``-sp`` arrives as the text the user typed ("2g"); the two fallbacks
+        # below are byte counts already, so only the typed form needs parsing.
+        size = self.split_size
+        if isinstance(size, str):
+            size = int(size) if size.isdigit() else get_size_bytes(size) if size else 0
+        size = size or self.user_dict.get("LEECH_SPLIT_SIZE") or Config.LEECH_SPLIT_SIZE
         self.equal_splits = _is_enabled(
             self.user_dict, "EQUAL_SPLITS", Config.EQUAL_SPLITS
         )
@@ -381,7 +397,7 @@ class SettingsResolverMixin:
             if self.user_transmission and TgClient.IS_PREMIUM_USER
             else BOT_MAX_SPLIT_SIZE
         )
-        self.split_size = min(self.split_size, self.max_split_size)
+        self.split_size = min(size, self.max_split_size)
 
     # ── clone dump chats ────────────────────────────────────────────────
 
@@ -475,13 +491,15 @@ class SettingsResolverMixin:
             raise ValueError(
                 f"Copy destination {entry} was not found. Add the bot to it first."
             )
-        if chat.type.name not in GROUP_CHAT_TYPES:
+        if not _is_group_chat(chat):
             await self._verify_copy_target_reachable(entry, chat_id)
             return
         if not chat.is_admin:
             raise ValueError(f"Bot is not admin in copy destination {entry}!")
         try:
-            member = await get_dest_member(TgClient.bot, chat.id, TgClient.bot.me.id)
+            member = await get_dest_member(
+                TgClient.bot, chat.id, own_account(TgClient.bot).id
+            )
         except ChatLookupError as e:
             raise ValueError(
                 f"Can't check the bot's privileges in copy destination {entry}:"

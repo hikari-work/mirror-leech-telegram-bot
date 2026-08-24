@@ -14,6 +14,7 @@ lazily: at import time `add_handlers()` has not run yet.
 from __future__ import annotations
 
 from pyrogram.handlers import MessageHandler
+from pyrogram.types.messages_and_media.message import Str
 
 from ... import LOGGER
 from ...core.config_manager import Config
@@ -109,8 +110,16 @@ async def start_rss_download(
     # The handler reads the command off the message and attributes the task to
     # the subscriber, not to the bot; `_rss_trigger` is what `TaskConfig` reads
     # to set `is_rss` (see helper/common.py).
-    msg.text = cmd_text
-    msg.from_user = user
-    msg._rss_trigger = True
+    #
+    # `Str` rather than a plain str: it is what pyrogram puts in `text` itself,
+    # and it carries the `entities` that `.html` and `.markdown` read. A bare str
+    # behaves the same for everything the handlers do with it, and raises
+    # `AttributeError` for anything that does not.
+    msg.text = Str(cmd_text)
+    # A single user id is answered with a single user; the signature covers the
+    # list form too, which only a list of ids gets back.
+    msg.from_user = user  # pyrefly: ignore[bad-assignment]
+    # Not a pyrogram field -- the whole point is that only this bridge sets it.
+    msg._rss_trigger = True  # pyrefly: ignore[missing-attribute]
 
     await handler(TgClient.bot, msg)
