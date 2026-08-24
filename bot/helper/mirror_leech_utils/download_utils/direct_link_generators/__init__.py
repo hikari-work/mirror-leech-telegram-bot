@@ -56,6 +56,7 @@ from .hosts.bunkr import (
     is_bunkr_link,
     bunkr,
     bunkr_resolve_download,
+    bunkr_resolve_many,
 )
 from .hosts.imgbb import (
     IMGBB_DOMAINS,
@@ -125,6 +126,7 @@ __all__ = [
     "is_bunkr_link",
     "bunkr",
     "bunkr_resolve_download",
+    "bunkr_resolve_many",
     "IMGBB_DOMAINS",
     "is_imgbb_link",
     "imgbb",

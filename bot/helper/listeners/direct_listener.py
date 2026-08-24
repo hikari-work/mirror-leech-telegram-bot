@@ -1,4 +1,4 @@
-from asyncio import create_task, gather, sleep, TimeoutError
+from asyncio import create_task, sleep, TimeoutError
 from aiohttp.client_exceptions import ClientError
 from os import path as ospath
 
@@ -82,6 +82,7 @@ class DirectListener:
 
     async def _download_batch(self, contents):
         """Original behavior: download all, then on_download_complete."""
+        total = len(contents)
         if self._bunkr_lazy:
             contents = await self._resolve_all_bunkr(contents)
             if not contents:
@@ -95,7 +96,10 @@ class DirectListener:
             await self._download_one(content)
         if self.listener.is_cancelled:
             return
-        if self._failed == len(contents):
+        # Counted against the album, not against what survived resolving: the
+        # files dropped there are failures too, and comparing with the shrunken
+        # list reported a whole album of failures as a completed download.
+        if self._failed == total:
             await self.listener.on_download_error("All files are failed to download!")
             return
         await self.listener.on_download_complete()
@@ -167,23 +171,29 @@ class DirectListener:
         return None
 
     async def _resolve_all_bunkr(self, contents):
-        """Resolve all bunkr file URLs concurrently, return resolved contents."""
+        """Resolve all bunkr file URLs, return the ones that resolved.
+
+        The resolves share one connection pool and run a few at a time: an
+        album is hundreds of files, and asking for all of them at once is what
+        made the gateway answer a large album with errors on every file.
+        """
         from ..mirror_leech_utils.download_utils.direct_link_generators.hosts.bunkr import (
-            bunkr_resolve_download,
+            bunkr_resolve_many,
         )
 
-        async def _resolve_one(content):
-            dl_url, filename, file_size = await bunkr_resolve_download(content["url"])
-            if dl_url:
-                content["url"] = dl_url
-                if filename:
-                    content["filename"] = filename
-                return content
-            LOGGER.error(f"Bunkr: failed to resolve {content['filename']}")
-            return None
+        results = await bunkr_resolve_many([c["url"] for c in contents])
 
-        results = await gather(*[_resolve_one(c) for c in contents])
-        resolved = [r for r in results if r is not None]
+        resolved = []
+        for content, (dl_url, filename, _size) in zip(contents, results):
+            if not dl_url:
+                self._failed += 1
+                LOGGER.error(f"Bunkr: failed to resolve {content['filename']}")
+                continue
+            content["url"] = dl_url
+            if filename:
+                content["filename"] = filename
+            resolved.append(content)
+
         failed = len(contents) - len(resolved)
         if failed:
             LOGGER.warning(f"Bunkr: {failed}/{len(contents)} files failed to resolve")

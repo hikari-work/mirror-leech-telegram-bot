@@ -7,12 +7,13 @@ than the signed CDN link.  ``DirectListener.download`` resolves them
 just-in-time via ``bunkr_resolve_download`` so the task appears instantly.
 """
 
-from asyncio import sleep as asleep
+from asyncio import Semaphore, gather, sleep as asleep
 from os import path as ospath
+from random import uniform
 from time import sleep
 from urllib.parse import urlparse
 
-from aiohttp import ClientSession as AioSession, ClientTimeout
+from aiohttp import ClientSession as AioSession, ClientTimeout, TCPConnector
 from requests import Session
 
 from .._common import (
@@ -25,6 +26,18 @@ from ..registry import register
 
 BUNKR_HOST = "bunkr.cr"
 BUNKR_ATTEMPTS = 3
+BUNKR_MAX_RETRY_DELAY = 30
+# An album is resolved one file at a time, and a 458-file album used to ask for
+# all 458 at once -- a session per file, every connection opened in the same
+# tick. The gateway answered that burst with 5xx and HTML error pages, and the
+# container ran out of sockets before most requests left it, which is the
+# "ClientConnectorError on every file" a large album reported.
+BUNKR_MAX_CONCURRENCY = 8
+
+# "Come back later" statuses, as opposed to a file that is actually gone.
+BUNKR_RETRY_STATUSES = (408, 425, 429)
+BUNKR_RATE_LIMIT_HINTS = ("rate limit", "rate-limit", "too many request", "slow down")
+
 BUNKR_DOMAINS = (
     "bunkr.cr",
     "bunkr.si",
@@ -51,6 +64,31 @@ def is_bunkr_link(url):
     """Match bunkr domains (exact or subdomain)."""
     domain = (urlparse(url).hostname or "").lower()
     return any(domain == d or domain.endswith(f".{d}") for d in BUNKR_DOMAINS)
+
+
+def bunkr_retryable_status(status):
+    """A gateway hiccup or a rate limit; not a deleted file."""
+    return status >= 500 or status in BUNKR_RETRY_STATUSES
+
+
+def bunkr_rate_limited(reason):
+    """The gateway also reports a rate limit as HTTP 200 + success: false."""
+    text = str(reason).lower()
+    return any(hint in text for hint in BUNKR_RATE_LIMIT_HINTS)
+
+
+def bunkr_retry_delay(attempt, retry_after=None):
+    """Seconds to wait before attempt+1, jittered.
+
+    The jitter is the point: an album resolves in lockstep, so a fixed sleep
+    only reschedules the same burst.
+    """
+    if retry_after:
+        try:
+            return min(float(retry_after), BUNKR_MAX_RETRY_DELAY) + uniform(0, 1.5)
+        except (TypeError, ValueError):
+            pass
+    return min(2**attempt, BUNKR_MAX_RETRY_DELAY) + uniform(0, 1.5)
 
 
 def _parse_size(size_str):
@@ -146,42 +184,114 @@ def _fetch_with_retries(fetch, failed, exhausted):
 
 # ── async resolver (called by DirectListener at download time) ──────
 
-async def bunkr_resolve_download(file_url):
+async def _resolve_once(session, file_url):
+    """One resolve attempt -> (result, reason, retryable, retry_after).
+
+    *result* is the ``(download_url, filename, file_size)`` triple on success.
+    Under load the gateway answers with an HTML error page rather than JSON, so
+    the body is parsed with ``content_type=None`` and a decode failure is read
+    off the status instead of raising past the classification.
+    """
+    try:
+        async with session.get(
+            gateway_url("/api/v1/scrape/bunkr/download"),
+            params={"q": file_url},
+            headers=gateway_headers(),
+        ) as resp:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                return (
+                    None,
+                    f"HTTP {resp.status} (non-JSON)",
+                    bunkr_retryable_status(resp.status),
+                    retry_after,
+                )
+            status = resp.status
+    except Exception as exc:
+        return None, exc.__class__.__name__, True, None
+
+    if not isinstance(data, dict):
+        return (
+            None,
+            f"HTTP {status} (unexpected body)",
+            bunkr_retryable_status(status),
+            retry_after,
+        )
+
+    if not data.get("success"):
+        reason = data.get("error") or f"HTTP {status}"
+        # No reason at all is the gateway shedding load, not a missing file.
+        retryable = (
+            bunkr_retryable_status(status)
+            or bunkr_rate_limited(reason)
+            or not data.get("error")
+        )
+        return None, reason, retryable, retry_after
+
+    dl_url = data.get("download_url") or ""
+    if not dl_url.startswith("http"):
+        return None, "no download URL in response", False, retry_after
+
+    return (
+        (dl_url, data.get("filename", ""), data.get("file_size", 0)),
+        None,
+        False,
+        retry_after,
+    )
+
+
+async def _resolve_with_retries(session, file_url):
+    """Resolve one file over *session*, backing off on the answers worth it."""
+    for attempt in range(1, BUNKR_ATTEMPTS + 1):
+        result, reason, retryable, retry_after = await _resolve_once(session, file_url)
+        if result:
+            return result
+        LOGGER.info(
+            f"Bunkr async resolve {file_url}: {reason} [{attempt}/{BUNKR_ATTEMPTS}]"
+        )
+        if not retryable or attempt == BUNKR_ATTEMPTS:
+            break
+        await asleep(bunkr_retry_delay(attempt, retry_after))
+    return None, "", 0
+
+
+async def bunkr_resolve_download(file_url, session=None):
     """Async resolve a single bunkr file_url -> signed CDN download_url.
 
     Returns (download_url, filename, file_size) on success,
-    or (None, "", 0) on failure.
+    or (None, "", 0) on failure.  Pass *session* to reuse one connection pool
+    across an album; without it a private session is opened for this call.
     """
-    api = gateway_url("/api/v1/scrape/bunkr/download")
-    headers = gateway_headers()
-    timeout = ClientTimeout(total=60)
+    if session is not None:
+        return await _resolve_with_retries(session, file_url)
+    async with AioSession(timeout=ClientTimeout(total=60)) as own:
+        return await _resolve_with_retries(own, file_url)
 
-    for attempt in range(1, BUNKR_ATTEMPTS + 1):
-        try:
-            async with AioSession(timeout=timeout) as session:
-                async with session.get(api, params={"q": file_url}, headers=headers) as resp:
-                    data = await resp.json()
-        except Exception as exc:
-            LOGGER.info(f"Bunkr async resolve {file_url}: {exc.__class__.__name__}")
-            if attempt < BUNKR_ATTEMPTS:
-                await asleep(2)
-            continue
 
-        if not data.get("success"):
-            reason = data.get("error") or f"HTTP {resp.status}"
-            LOGGER.info(f"Bunkr async resolve {file_url}: {reason}")
-            if resp.status < 500:
-                break
-            if attempt < BUNKR_ATTEMPTS:
-                await asleep(2)
-            continue
+async def bunkr_resolve_many(file_urls, limit=BUNKR_MAX_CONCURRENCY):
+    """Resolve *file_urls* over one connection pool, ``limit`` at a time.
 
-        dl_url = data.get("download_url", "")
-        if dl_url.startswith("http"):
-            return dl_url, data.get("filename", ""), data.get("file_size", 0)
-        break
+    Returns a list of ``(download_url, filename, file_size)`` triples, in the
+    order asked for, with ``(None, "", 0)`` where a file could not be resolved.
+    """
+    urls = list(file_urls)
+    if not urls:
+        return []
 
-    return None, "", 0
+    limit = max(1, min(limit, len(urls)))
+    gate = Semaphore(limit)
+
+    async with AioSession(
+        timeout=ClientTimeout(total=60), connector=TCPConnector(limit=limit)
+    ) as session:
+
+        async def one(file_url):
+            async with gate:
+                return await _resolve_with_retries(session, file_url)
+
+        return await gather(*[one(url) for url in urls])
 
 
 # ── @register handler ──────────────────────────────────────────────

@@ -17,6 +17,59 @@ if str(_ROOT) not in sys.path:
 
 
 @pytest.fixture
+def bunkr(monkeypatch):
+    """Load ``hosts/bunkr.py`` with its package stubbed out.
+
+    Same reason as the ``vidara`` fixture: the real package pulls in the whole
+    generator chain, and bunkr only needs LOGGER, the exception and the two
+    gateway helpers.
+    """
+    path = (
+        _ROOT
+        / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
+        / "direct_link_generators" / "hosts" / "bunkr.py"
+    )
+
+    pkg = ModuleType("bunkr_stub")
+    pkg.__path__ = []
+    hosts_pkg = ModuleType("bunkr_stub.hosts")
+    hosts_pkg.__path__ = []
+
+    class _Logger:
+        @staticmethod
+        def info(msg):
+            pass
+
+        error = warning = debug = info
+
+    class DirectDownloadLinkException(Exception):
+        pass
+
+    common = ModuleType("bunkr_stub._common")
+    common.LOGGER = _Logger()
+    common.DirectDownloadLinkException = DirectDownloadLinkException
+    common.gateway_url = lambda path="": f"https://gateway.test{path}"
+    common.gateway_headers = lambda accept_json=True: {"accept": "application/json"}
+
+    registry = ModuleType("bunkr_stub.registry")
+    registry.register = lambda **kwargs: (lambda func: func)
+
+    for name, mod in {
+        "bunkr_stub": pkg,
+        "bunkr_stub.hosts": hosts_pkg,
+        "bunkr_stub._common": common,
+        "bunkr_stub.registry": registry,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    spec = importlib.util.spec_from_file_location("bunkr_stub.hosts.bunkr", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "bunkr_stub.hosts.bunkr", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
 def vidara(monkeypatch):
     """Load ``hosts/vidara.py`` with its package stubbed out.
 
