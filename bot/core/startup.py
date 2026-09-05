@@ -14,9 +14,9 @@ from .. import (
     auth_chats,
     sudo_users,
 )
-from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.shutil_helper import rmtree
-from ..helper.ext_utils.user_sessions import load_user_sessions
+from ..helper.storage.db_handler import database
+from ..helper.util.shutil_helper import rmtree
+from ..helper.util.user_sessions import load_user_sessions
 from .config_manager import Config
 from .telegram_manager import TgClient
 from .torrent_manager import TorrentManager

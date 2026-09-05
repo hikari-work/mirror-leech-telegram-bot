@@ -26,21 +26,21 @@ from ..core.config_manager import Config
 from ..core.startup import update_qb_options, update_variables
 from ..core.telegram_manager import TgClient
 from ..core.torrent_manager import TorrentManager
-from ..helper.ext_utils.bot_utils import (
-    SetInterval,
-    new_task,
-)
-from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.task_manager import start_from_queued
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.conversation import wait_for_message
-from ..helper.telegram_helper.message_utils import (
+from ..helper.storage.db_handler import database
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.conversation import wait_for_message
+from ..helper.telegram.message_utils import (
     delete_message,
     edit_message,
     send_file,
     send_message,
     update_status_message,
 )
+from ..helper.util.bot_utils import (
+    SetInterval,
+    new_task,
+)
+from ..helper.util.task_manager import start_from_queued
 from .rss import add_job
 from .search import initiate_search_tools
 from .settings import parse_literal

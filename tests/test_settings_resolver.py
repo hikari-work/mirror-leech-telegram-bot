@@ -23,8 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import bot.helper.task_config.settings_resolver as sr
-from bot.helper.task_config.settings_resolver import SettingsResolverMixin
+import bot.helper.task.settings_resolver as sr
+from bot.helper.task.settings_resolver import SettingsResolverMixin
 
 DEST = -1001234567890
 USER = 42

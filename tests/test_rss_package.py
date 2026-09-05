@@ -40,11 +40,11 @@ def _rss_stubs(monkeypatch):
 
     helper = ModuleType("bot.helper")
     helper.__path__ = []
-    ext = ModuleType("bot.helper.ext_utils")
+    ext = ModuleType("bot.helper.util")
     ext.__path__ = []
 
     # bot_utils — only get_size_bytes is needed by feed.item_size
-    bot_utils = ModuleType("bot.helper.ext_utils.bot_utils")
+    bot_utils = ModuleType("bot.helper.util.bot_utils")
     def get_size_bytes(size):
         size = size.lower()
         if "k" in size:
@@ -58,7 +58,7 @@ def _rss_stubs(monkeypatch):
     bot_utils.new_task = lambda fn: fn
     bot_utils.arg_parser = lambda *a, **kw: None
 
-    db_handler = ModuleType("bot.helper.ext_utils.db_handler")
+    db_handler = ModuleType("bot.helper.storage.db_handler")
     db_handler.database = type("DB", (), {
         "rss_update": staticmethod(lambda *a: None),
         "rss_update_all": staticmethod(lambda *a: None),
@@ -66,29 +66,29 @@ def _rss_stubs(monkeypatch):
         "trunc_table": staticmethod(lambda *a: None),
     })()
 
-    exceptions = ModuleType("bot.helper.ext_utils.exceptions")
+    exceptions = ModuleType("bot.helper.util.exceptions")
     exceptions.RssShutdownException = type("RssShutdownException", (Exception,), {})
 
-    status_utils = ModuleType("bot.helper.ext_utils.status_utils")
+    status_utils = ModuleType("bot.helper.util.status_utils")
     status_utils.get_readable_file_size = lambda s: str(s)
 
-    help_messages = ModuleType("bot.helper.ext_utils.help_messages")
+    help_messages = ModuleType("bot.helper.util.help_messages")
     help_messages.RSS_HELP_MESSAGE = "help"
 
-    tg_helper = ModuleType("bot.helper.telegram_helper")
+    tg_helper = ModuleType("bot.helper.telegram")
     tg_helper.__path__ = []
-    msg_utils = ModuleType("bot.helper.telegram_helper.message_utils")
+    msg_utils = ModuleType("bot.helper.telegram.message_utils")
     msg_utils.send_rss = lambda *a, **kw: None
     msg_utils.send_message = lambda *a, **kw: None
     msg_utils.edit_message = lambda *a, **kw: None
     msg_utils.delete_message = lambda *a, **kw: None
     msg_utils.send_file = lambda *a, **kw: None
-    btn_build = ModuleType("bot.helper.telegram_helper.button_build")
+    btn_build = ModuleType("bot.helper.telegram.button_build")
     btn_build.ButtonMaker = type("ButtonMaker", (), {
         "data_button": lambda *a, **kw: None,
         "build_menu": lambda *a, **kw: None,
     })
-    filters_mod = ModuleType("bot.helper.telegram_helper.filters")
+    filters_mod = ModuleType("bot.helper.telegram.filters")
     filters_mod.CustomFilters = type("CF", (), {
         "sudo": staticmethod(lambda *a, **kw: False),
     })()
@@ -96,9 +96,7 @@ def _rss_stubs(monkeypatch):
     telegram_manager = ModuleType("bot.core.telegram_manager")
     telegram_manager.TgClient = type("TgClient", (), {"bot": None})()
 
-    mlu = ModuleType("bot.helper.mirror_leech_utils")
-    mlu.__path__ = []
-    du = ModuleType("bot.helper.mirror_leech_utils.download_utils")
+    du = ModuleType("bot.helper.download")
     du.__path__ = []
 
     modules = ModuleType("bot.modules")
@@ -113,18 +111,17 @@ def _rss_stubs(monkeypatch):
         "bot.core.config_manager": config_manager,
         "bot.core.telegram_manager": telegram_manager,
         "bot.helper": helper,
-        "bot.helper.ext_utils": ext,
-        "bot.helper.ext_utils.bot_utils": bot_utils,
-        "bot.helper.ext_utils.db_handler": db_handler,
-        "bot.helper.ext_utils.exceptions": exceptions,
-        "bot.helper.ext_utils.status_utils": status_utils,
-        "bot.helper.ext_utils.help_messages": help_messages,
-        "bot.helper.telegram_helper": tg_helper,
-        "bot.helper.telegram_helper.message_utils": msg_utils,
-        "bot.helper.telegram_helper.button_build": btn_build,
-        "bot.helper.telegram_helper.filters": filters_mod,
-        "bot.helper.mirror_leech_utils": mlu,
-        "bot.helper.mirror_leech_utils.download_utils": du,
+        "bot.helper.util": ext,
+        "bot.helper.util.bot_utils": bot_utils,
+        "bot.helper.storage.db_handler": db_handler,
+        "bot.helper.util.exceptions": exceptions,
+        "bot.helper.util.status_utils": status_utils,
+        "bot.helper.util.help_messages": help_messages,
+        "bot.helper.telegram": tg_helper,
+        "bot.helper.telegram.message_utils": msg_utils,
+        "bot.helper.telegram.button_build": btn_build,
+        "bot.helper.telegram.filters": filters_mod,
+        "bot.helper.download": du,
         "bot.modules": modules,
         "bot.modules.rss": rss_pkg,
     }

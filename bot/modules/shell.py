@@ -1,8 +1,8 @@
 from io import BytesIO
 
 from .. import LOGGER
-from ..helper.ext_utils.bot_utils import cmd_exec, new_task
-from ..helper.telegram_helper.message_utils import send_message, send_file
+from ..helper.util.bot_utils import cmd_exec, new_task
+from ..helper.telegram.message_utils import send_message, send_file
 
 
 @new_task

@@ -1,11 +1,11 @@
-from ..helper.ext_utils.bot_utils import COMMAND_USAGE, new_task
-from ..helper.ext_utils.help_messages import (
+from ..helper.util.bot_utils import COMMAND_USAGE, new_task
+from ..helper.util.help_messages import (
     YT_HELP_DICT,
     LEECH_HELP_DICT,
 )
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.message_utils import edit_message, delete_message, send_message
-from ..helper.ext_utils.help_messages import help_string
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.message_utils import edit_message, delete_message, send_message
+from ..helper.util.help_messages import help_string
 
 
 @new_task

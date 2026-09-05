@@ -4,13 +4,13 @@ from asyncio import iscoroutinefunction
 from .. import LOGGER
 from ..core.config_manager import Config
 from ..core.torrent_manager import TorrentManager
-from ..helper.ext_utils.bot_utils import (
+from ..helper.util.bot_utils import (
     bt_selection_buttons,
     new_task,
 )
-from ..helper.ext_utils.status_utils import get_task_by_gid, MirrorStatus
-from ..helper.ext_utils.task_lookup import task_from_command, task_is_yours
-from ..helper.telegram_helper.message_utils import (
+from ..helper.util.status_utils import get_task_by_gid, MirrorStatus
+from ..helper.util.task_lookup import task_from_command, task_is_yours
+from ..helper.telegram.message_utils import (
     send_message,
     send_status_message,
     delete_message,

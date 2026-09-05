@@ -17,7 +17,7 @@ from re import I, compile
 from feedparser import parse
 from httpx import AsyncClient
 
-from ...helper.ext_utils.bot_utils import get_size_bytes
+from ...helper.util.bot_utils import get_size_bytes
 
 __all__ = [
     "HEADERS",

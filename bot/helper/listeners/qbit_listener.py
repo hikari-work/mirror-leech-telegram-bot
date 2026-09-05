@@ -14,11 +14,11 @@ from ... import (
 )
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
-from ..ext_utils.bot_utils import new_task
-from ..ext_utils.files_utils import clean_unwanted
-from ..ext_utils.status_utils import get_readable_time, get_task_by_gid
-from ..mirror_leech_utils.status_utils.qbit_status import QbittorrentStatus
-from ..telegram_helper.message_utils import update_status_message
+from ..util.bot_utils import new_task
+from ..util.files_utils import clean_unwanted
+from ..util.status_utils import get_readable_time, get_task_by_gid
+from ..progress.qbit_status import QbittorrentStatus
+from ..telegram.message_utils import update_status_message
 
 
 async def _remove_torrent(hash_, tag):

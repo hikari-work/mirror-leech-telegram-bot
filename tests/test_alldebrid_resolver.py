@@ -45,55 +45,42 @@ def alldebrid_module(monkeypatch):
 
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = []
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    util_pkg = ModuleType("bot.helper.util")
+    util_pkg.__path__ = []
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
 
     class DirectDownloadLinkException(Exception):
         pass
 
     exceptions_mod.DirectDownloadLinkException = DirectDownloadLinkException
 
-    mlu_pkg = ModuleType("bot.helper.mirror_leech_utils")
-    mlu_pkg.__path__ = []
-    download_utils_pkg = ModuleType(
-        "bot.helper.mirror_leech_utils.download_utils"
-    )
-    download_utils_pkg.__path__ = [
-        str(
-            project_root
-            / "bot"
-            / "helper"
-            / "mirror_leech_utils"
-            / "download_utils"
-        )
+    download_pkg = ModuleType("bot.helper.download")
+    download_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "download")
     ]
 
     monkeypatch.setitem(sys.modules, "bot", bot_pkg)
     monkeypatch.setitem(sys.modules, "bot.core", config_pkg)
     monkeypatch.setitem(sys.modules, "bot.core.config_manager", config_manager)
     monkeypatch.setitem(sys.modules, "bot.helper", helper_pkg)
-    monkeypatch.setitem(sys.modules, "bot.helper.ext_utils", ext_utils_pkg)
+    monkeypatch.setitem(sys.modules, "bot.helper.util", util_pkg)
     monkeypatch.setitem(
         sys.modules,
-        "bot.helper.ext_utils.exceptions",
+        "bot.helper.util.exceptions",
         exceptions_mod,
     )
     monkeypatch.setitem(
-        sys.modules, "bot.helper.mirror_leech_utils", mlu_pkg
-    )
-    monkeypatch.setitem(
         sys.modules,
-        "bot.helper.mirror_leech_utils.download_utils",
-        download_utils_pkg,
+        "bot.helper.download",
+        download_pkg,
     )
 
     sys.modules.pop(
-        "bot.helper.mirror_leech_utils.download_utils.alldebrid_resolver",
+        "bot.helper.download.alldebrid_resolver",
         None,
     )
     return importlib.import_module(
-        "bot.helper.mirror_leech_utils.download_utils.alldebrid_resolver"
+        "bot.helper.download.alldebrid_resolver"
     )
 
 

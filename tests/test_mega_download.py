@@ -57,10 +57,10 @@ def mega_dl(monkeypatch, tmp_path):
 
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = [str(root / "bot" / "helper" / "ext_utils")]
+    util_pkg = ModuleType("bot.helper.util")
+    util_pkg.__path__ = [str(root / "bot" / "helper" / "util")]
 
-    task_manager = ModuleType("bot.helper.ext_utils.task_manager")
+    task_manager = ModuleType("bot.helper.util.task_manager")
 
     async def _no_duplicate(listener):
         return False, None
@@ -71,28 +71,24 @@ def mega_dl(monkeypatch, tmp_path):
     task_manager.stop_duplicate_check = _no_duplicate
     task_manager.check_running_tasks = _no_queue
 
-    mlu_pkg = ModuleType("bot.helper.mirror_leech_utils")
-    mlu_pkg.__path__ = []
-    du_pkg = ModuleType("bot.helper.mirror_leech_utils.download_utils")
-    du_pkg.__path__ = [
-        str(root / "bot" / "helper" / "mirror_leech_utils" / "download_utils")
-    ]
-    su_pkg = ModuleType("bot.helper.mirror_leech_utils.status_utils")
-    su_pkg.__path__ = [
-        str(root / "bot" / "helper" / "mirror_leech_utils" / "status_utils")
-    ]
+    du_pkg = ModuleType("bot.helper.download")
+    du_pkg.__path__ = [str(root / "bot" / "helper" / "download")]
+    su_pkg = ModuleType("bot.helper.progress")
+    su_pkg.__path__ = [str(root / "bot" / "helper" / "progress")]
+    net_pkg = ModuleType("bot.helper.net")
+    net_pkg.__path__ = [str(root / "bot" / "helper" / "net")]
 
-    status_utils = ModuleType("bot.helper.ext_utils.status_utils")
+    status_utils = ModuleType("bot.helper.util.status_utils")
     status_utils.MirrorStatus = SimpleNamespace(STATUS_DOWNLOAD="Download")
     status_utils.get_readable_file_size = lambda n: str(n)
     status_utils.get_readable_time = lambda n: str(n)
 
-    queue_status = ModuleType("bot.helper.mirror_leech_utils.status_utils.queue_status")
+    queue_status = ModuleType("bot.helper.progress.queue_status")
     queue_status.QueueStatus = object
 
-    tg_pkg = ModuleType("bot.helper.telegram_helper")
+    tg_pkg = ModuleType("bot.helper.telegram")
     tg_pkg.__path__ = []
-    message_utils = ModuleType("bot.helper.telegram_helper.message_utils")
+    message_utils = ModuleType("bot.helper.telegram.message_utils")
 
     async def send_status_message(message):
         return None
@@ -104,26 +100,26 @@ def mega_dl(monkeypatch, tmp_path):
         "bot.core": core_pkg,
         "bot.core.config_manager": config_manager,
         "bot.helper": helper_pkg,
-        "bot.helper.ext_utils": ext_utils_pkg,
-        "bot.helper.ext_utils.status_utils": status_utils,
-        "bot.helper.ext_utils.task_manager": task_manager,
-        "bot.helper.mirror_leech_utils": mlu_pkg,
-        "bot.helper.mirror_leech_utils.download_utils": du_pkg,
-        "bot.helper.mirror_leech_utils.status_utils": su_pkg,
-        "bot.helper.mirror_leech_utils.status_utils.queue_status": queue_status,
-        "bot.helper.telegram_helper": tg_pkg,
-        "bot.helper.telegram_helper.message_utils": message_utils,
+        "bot.helper.util": util_pkg,
+        "bot.helper.util.status_utils": status_utils,
+        "bot.helper.util.task_manager": task_manager,
+        "bot.helper.download": du_pkg,
+        "bot.helper.progress": su_pkg,
+        "bot.helper.progress.queue_status": queue_status,
+        "bot.helper.net": net_pkg,
+        "bot.helper.telegram": tg_pkg,
+        "bot.helper.telegram.message_utils": message_utils,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
     for name in (
-        "bot.helper.mirror_leech_utils.download_utils.mega_download",
-        "bot.helper.ext_utils.mega_client",
+        "bot.helper.download.mega_download",
+        "bot.helper.net.mega_client",
     ):
         sys.modules.pop(name, None)
 
     module = importlib.import_module(
-        "bot.helper.mirror_leech_utils.download_utils.mega_download"
+        "bot.helper.download.mega_download"
     )
     module.Config = Config
     return module
@@ -138,7 +134,7 @@ def _clean_proxy_pool(mega_dl):
     test — otherwise a gateway fetch in one test leaks into another's fallback
     assertions.
     """
-    proxy_pool = sys.modules["bot.helper.ext_utils.proxy_pool"]
+    proxy_pool = sys.modules["bot.helper.net.proxy_pool"]
     proxy_pool.Config = mega_dl.Config
     proxy_pool.reset_proxy_pool()
     yield
@@ -280,7 +276,7 @@ def mc():
 
     path = (
         Path(__file__).resolve().parent.parent
-        / "bot" / "helper" / "ext_utils" / "mega_client.py"
+        / "bot" / "helper" / "net" / "mega_client.py"
     )
     spec = importlib.util.spec_from_file_location("mega_client_vectors", path)
     module = importlib.util.module_from_spec(spec)
@@ -510,7 +506,7 @@ def test_proxied_url_format(mega_dl):
 def test_proxy_pool_fetches_from_gateway(mega_dl, monkeypatch):
     """The pool is fetched from the gateway (de-duplicated); a gateway failure
     falls back to Config.MEGA_PROXY_URL, then to the hardcoded defaults."""
-    proxy_pool = sys.modules["bot.helper.ext_utils.proxy_pool"]
+    proxy_pool = sys.modules["bot.helper.net.proxy_pool"]
 
     class _Resp:
         def raise_for_status(self):

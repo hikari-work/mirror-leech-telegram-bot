@@ -23,19 +23,19 @@ from pyrogram.types import CallbackQuery, Message
 from .. import user_data
 from ..core.config_manager import Config
 from ..core.telegram_manager import TgClient
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.copy_presets import as_dump_target, presets_of
-from ..helper.ext_utils.copy_records import MAX_TASK_RECORDS, copy_unit
-from ..helper.ext_utils.db_handler import database
-from ..helper.mirror_leech_utils.upload_utils.flood_pacer import FloodPacer
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.dest_chat import verify_copy_target
-from ..helper.telegram_helper.message_utils import (
+from ..helper.storage.copy_presets import as_dump_target, presets_of
+from ..helper.storage.copy_records import MAX_TASK_RECORDS, copy_unit
+from ..helper.storage.db_handler import database
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.dest_chat import verify_copy_target
+from ..helper.telegram.message_utils import (
     auto_delete_message,
     chat_of,
     edit_message,
     send_message,
 )
+from ..helper.upload.flood_pacer import FloodPacer
+from ..helper.util.bot_utils import new_task
 
 PENDING_TTL = 300
 """Seconds a preset prompt stays answerable.

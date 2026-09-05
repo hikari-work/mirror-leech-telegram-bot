@@ -29,8 +29,8 @@ from pyrogram.handlers import (
 )
 from pyrogram.types import BotCommand
 
-from ..helper.telegram_helper.bot_commands import BotCommands
-from ..helper.telegram_helper.filters import CustomFilters
+from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.filters import CustomFilters
 from ..modules import (
     add_sudo,
     aioexecute,

@@ -8,8 +8,8 @@ from typing import Any
 
 from .. import LOGGER
 from ..core.telegram_manager import TgClient
-from ..helper.ext_utils.bot_utils import sync_to_async, new_task
-from ..helper.telegram_helper.message_utils import send_file, send_message
+from ..helper.util.bot_utils import sync_to_async, new_task
+from ..helper.telegram.message_utils import send_file, send_message
 
 # One globals dict per chat, kept between /exec calls so a session can build on
 # what the last one defined. Loose values on purpose: ``do`` below hands this to

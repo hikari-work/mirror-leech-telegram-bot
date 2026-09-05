@@ -7,7 +7,7 @@ two places to edit whenever an option is added, which is how the lists came to
 disagree about which options each command honours.
 """
 
-from ..ext_utils.task_args import COMMON_ARG_FIELDS
+from ..util.task_args import COMMON_ARG_FIELDS
 from .task_listener import TaskListener
 
 

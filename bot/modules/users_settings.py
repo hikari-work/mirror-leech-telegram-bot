@@ -12,12 +12,7 @@ from .. import (
     user_data,
 )
 from ..core.telegram_manager import TgClient
-from ..helper.ext_utils.bot_utils import (
-    get_size_bytes,
-    new_task,
-    update_user_ldata,
-)
-from ..helper.ext_utils.copy_presets import (
+from ..helper.storage.copy_presets import (
     MAX_DESTS,
     MAX_PRESETS,
     additions_to,
@@ -25,17 +20,22 @@ from ..helper.ext_utils.copy_presets import (
     presets_of,
     valid_name,
 )
-from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.help_messages import user_settings_text
-from ..helper.ext_utils.media_utils import create_thumb
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.conversation import wait_for_message
-from ..helper.telegram_helper.message_utils import (
+from ..helper.storage.db_handler import database
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.conversation import wait_for_message
+from ..helper.telegram.message_utils import (
     delete_message,
     edit_message,
     send_file,
     send_message,
 )
+from ..helper.util.bot_utils import (
+    get_size_bytes,
+    new_task,
+    update_user_ldata,
+)
+from ..helper.util.help_messages import user_settings_text
+from ..helper.util.media_utils import create_thumb
 from .settings import (
     build_option_menu,
     build_settings,

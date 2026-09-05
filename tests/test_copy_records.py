@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 from psycopg.types.json import Jsonb
 
-from bot.helper.ext_utils.copy_records import (
+from bot.helper.storage.copy_records import (
     MAX_RECORD_UNITS,
     MAX_TASK_RECORDS,
     group_unit,
@@ -32,7 +32,7 @@ from bot.helper.ext_utils.copy_records import (
     single_unit,
     strike,
 )
-from bot.helper.ext_utils.db_handler import DbManager
+from bot.helper.storage.db_handler import DbManager
 
 
 def _stub(name, **attrs):
@@ -126,55 +126,58 @@ def uploader_module(monkeypatch):
             user_session=lambda: tg_client.user,
         ),
         "bot.helper": _pkg("bot.helper"),
-        # Real path: ``copy_records`` imports nothing stubbed.
-        "bot.helper.ext_utils": _pkg(
-            "bot.helper.ext_utils",
-            str(root / "bot" / "helper" / "ext_utils"),
+        # Real path: ``storage.copy_records`` imports nothing stubbed, so it is
+        # loaded for real from disk.
+        "bot.helper.util": _pkg("bot.helper.util"),
+        "bot.helper.storage": _pkg(
+            "bot.helper.storage",
+            str(root / "bot" / "helper" / "storage"),
         ),
-        "bot.helper.ext_utils.bot_utils": _stub(
-            "bot.helper.ext_utils.bot_utils", sync_to_async=AsyncMock()
+        "bot.helper.util.bot_utils": _stub(
+            "bot.helper.util.bot_utils", sync_to_async=AsyncMock()
         ),
-        "bot.helper.ext_utils.files_utils": _stub(
-            "bot.helper.ext_utils.files_utils",
+        "bot.helper.util.files_utils": _stub(
+            "bot.helper.util.files_utils",
             is_archive=lambda _p: False,
             get_base_name=lambda p: p,
         ),
-        "bot.helper.ext_utils.media_utils": _stub(
-            "bot.helper.ext_utils.media_utils",
+        "bot.helper.util.media_utils": _stub(
+            "bot.helper.util.media_utils",
             get_media_info=AsyncMock(return_value=(10, "artist", "title")),
             get_document_type=AsyncMock(return_value=(False, False, True)),
             get_video_thumbnail=AsyncMock(return_value=None),
             get_audio_thumbnail=AsyncMock(return_value=None),
             get_multiple_frames_thumbnail=AsyncMock(return_value=None),
         ),
-        "bot.helper.ext_utils.shutil_helper": _stub(
-            "bot.helper.ext_utils.shutil_helper", rmtree=AsyncMock()
+        "bot.helper.util.shutil_helper": _stub(
+            "bot.helper.util.shutil_helper", rmtree=AsyncMock()
         ),
-        "bot.helper.telegram_helper": _pkg(
-            "bot.helper.telegram_helper",
-            str(root / "bot" / "helper" / "telegram_helper"),
+        "bot.helper.telegram": _pkg(
+            "bot.helper.telegram",
+            str(root / "bot" / "helper" / "telegram"),
         ),
-        "bot.helper.telegram_helper.message_utils": _stub(
-            "bot.helper.telegram_helper.message_utils",
+        "bot.helper.telegram.message_utils": _stub(
+            "bot.helper.telegram.message_utils",
             chat_of=lambda message: message.chat,
             delete_message=AsyncMock(),
         ),
-        "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
-        "bot.helper.mirror_leech_utils.upload_utils": _pkg(
-            "bot.helper.mirror_leech_utils.upload_utils",
-            str(root / "bot" / "helper" / "mirror_leech_utils" / "upload_utils"),
+        # Real path: the uploader, flood pacer and media-group batcher all live
+        # in this package and load from disk.
+        "bot.helper.upload": _pkg(
+            "bot.helper.upload",
+            str(root / "bot" / "helper" / "upload"),
         ),
     }
     modules["bot"].__path__ = []
     for name, mod in modules.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    pkg = "bot.helper.mirror_leech_utils.upload_utils"
+    pkg = "bot.helper.upload"
     target = f"{pkg}.telegram_uploader"
     siblings = (
         f"{pkg}.flood_pacer",
         f"{pkg}.media_group_batcher",
-        "bot.helper.telegram_helper.flood",
+        "bot.helper.telegram.flood",
     )
     for name in (target, *siblings):
         sys.modules.pop(name, None)
@@ -415,7 +418,7 @@ async def test_split_parts_grouped_at_the_end_become_one_group_unit(
     """Parts of one split file leave as one media group, and are recorded as
     the group they became -- not as the parts they were uploaded as."""
     uploader = _recording(uploader_module, monkeypatch, _make_uploader(uploader_module))
-    media_utils = sys.modules["bot.helper.ext_utils.media_utils"]
+    media_utils = sys.modules["bot.helper.util.media_utils"]
     media_utils.get_document_type.return_value = (False, False, False)
 
     await uploader._upload_file("<code>m.rar</code>", "m.rar", "/tmp/m.rar", True)
@@ -458,7 +461,7 @@ async def test_nothing_is_recorded_without_a_database(uploader_module):
 
 async def test_units_are_recorded_in_send_order(uploader_module, monkeypatch):
     uploader = _recording(uploader_module, monkeypatch, _make_uploader(uploader_module))
-    media_utils = sys.modules["bot.helper.ext_utils.media_utils"]
+    media_utils = sys.modules["bot.helper.util.media_utils"]
 
     await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
     media_utils.get_document_type.return_value = (False, False, False)

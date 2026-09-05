@@ -6,7 +6,7 @@
 ## 1. Context — apa yang dicek, apa adanya
 
 Database bot saat ini **MongoDB**, diakses **langsung tanpa ORM** lewat
-`pymongo` async di satu modul: `bot/helper/ext_utils/db_handler.py`
+`pymongo` async di satu modul: `bot/helper/storage/db_handler.py`
 (class `DbManager`, singleton `database`), plus `gridfs.asynchronous` untuk
 penyimpanan blob. Tidak ada lapisan abstraksi penyimpanan — `DbManager`
 memakai API koleksi pymongo apa adanya (`find`, `update_one`, `replace_one`,
@@ -81,7 +81,7 @@ ketiadaan tabel. Semuanya harus direproduksi persis, bukan didekati.
 
 ## 2. Skema PostgreSQL
 
-Satu file `bot/helper/ext_utils/pg_schema.sql` (atau konstanta multi-line di
+Satu file `bot/helper/util/pg_schema.sql` (atau konstanta multi-line di
 modul adapter) berisi DDL idempotent, diterapkan saat koneksi pertama dibuka
 (`CREATE TABLE IF NOT EXISTS`). Tidak ada alembic — skema sekecil ini dan satu
 bot per deploy tidak butuh versioning migrasi skema; perubahan skema ke depan
@@ -305,7 +305,7 @@ implementasi adapter, jadi "dibuktikan gagal" berarti ImportError/AttributeError
 modul yang belum ada.
 
 1. **`feat: add a postgres-backed DbManager beside the mongodb one`**
-   - File baru: `bot/helper/ext_utils/pg_db_handler.py` (atau adapter dalam
+   - File baru: `bot/helper/util/pg_db_handler.py` (atau adapter dalam
      `db_handler.py` dengan backend terpilih via `Config.DATABASE_URL`), berisi
      koneksi psycopg + apply DDL + seluruh method `DbManager` yang diimplement
      ulang di atas PG. Belum di-wire: `database` tetap instance Mongo lama.
@@ -314,7 +314,7 @@ modul yang belum ada.
 2. **`test: add hermetic unit tests for every pg DbManager method`** — lihat
    §6.1. Hermetik murni, tanpa server.
 3. **`feat: wire the pg backend in and fold startup raw access into methods`**
-   - `bot/core/startup.py` + `bot_helper/ext_utils/user_sessions.py` berhenti
+   - `bot/core/startup.py` + `bot/helper/util/user_sessions.py` berhenti
      memegang pymongo; akses mentah `database.db.*` pindah ke method
      `DbManager` (§4.2). `database` kini backend PG. **Tidak ada perubahan
      perilaku** — ini commit terbesar, satu-satunya yang mengubah pemanggil.

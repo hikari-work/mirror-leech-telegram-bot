@@ -26,8 +26,8 @@ def bunkr(monkeypatch):
     """
     path = (
         _ROOT
-        / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
-        / "direct_link_generators" / "hosts" / "bunkr.py"
+        / "bot" / "helper" / "download" / "direct_link_generators" / "hosts"
+        / "bunkr.py"
     )
 
     pkg = ModuleType("bunkr_stub")
@@ -82,8 +82,8 @@ def vidara(monkeypatch):
     """
     path = (
         _ROOT
-        / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
-        / "direct_link_generators" / "hosts" / "vidara.py"
+        / "bot" / "helper" / "download" / "direct_link_generators" / "hosts"
+        / "vidara.py"
     )
 
     pkg = ModuleType("dlg_stub")

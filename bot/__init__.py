@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 if TYPE_CHECKING:
     # For ``_Intervals`` only; importing it for real would be a cycle, since
     # everything under ``bot.helper`` imports back from here.
-    from .helper.ext_utils.bot_utils import SetInterval
+    from .helper.util.bot_utils import SetInterval
 
 getLogger("requests").setLevel(WARNING)
 getLogger("urllib3").setLevel(WARNING)

@@ -21,8 +21,8 @@ from types import SimpleNamespace
 import pytest
 from pyrogram.errors import FloodPremiumWait, FloodWait, PeerIdInvalid
 
-import bot.helper.telegram_helper.dest_chat as dc
-from bot.helper.task_config.settings_resolver import SettingsResolverMixin
+import bot.helper.telegram.dest_chat as dc
+from bot.helper.task.settings_resolver import SettingsResolverMixin
 
 DEST = -1001234567890
 

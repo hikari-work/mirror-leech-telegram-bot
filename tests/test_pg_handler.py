@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 
 from bot import aria2_options, qbit_options, rss_dict, user_data
 from bot.core.telegram_manager import TgClient
-from bot.helper.ext_utils.db_handler import DbManager, blob_box
+from bot.helper.storage.db_handler import DbManager, blob_box
 
 
 class _Recorder:
@@ -125,7 +125,7 @@ async def test_delete_blob_targets_one_name(dbm):
 
 
 async def test_update_private_file_deletes_when_file_is_gone(dbm, monkeypatch):
-    import bot.helper.ext_utils.db_handler as handler
+    import bot.helper.storage.db_handler as handler
 
     monkeypatch.setattr(
         handler, "aiopath", SimpleNamespace(exists=AsyncMock(return_value=False))
@@ -261,7 +261,7 @@ async def test_update_user_doc_saves_or_deletes_the_blob(dbm):
 
 
 async def test_update_user_doc_with_a_path_writes_the_blob(dbm, monkeypatch):
-    import bot.helper.ext_utils.db_handler as handler
+    import bot.helper.storage.db_handler as handler
 
     class _FakeOpen:
         def __init__(self, content):

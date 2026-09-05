@@ -19,15 +19,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot.helper.ext_utils.task_args import (
+from bot.helper.util.task_args import (
     parse_folder_name,
     parse_leech_args,
     parse_ytdlp_args,
     strip_link_tokens,
 )
 import bot.helper.listeners.task_listener as tl
-import bot.helper.task_config.batch_tracker as bt
-from bot.helper.task_config.multi_link import MultiLinkMixin
+import bot.helper.task.batch_tracker as bt
+from bot.helper.task.multi_link import MultiLinkMixin
 
 FOLDER = "/bulk-tst"
 

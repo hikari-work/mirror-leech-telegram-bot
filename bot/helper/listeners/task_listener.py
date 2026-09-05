@@ -22,9 +22,19 @@ from ... import (
 )
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
-from ..common import TaskConfig
-from ..ext_utils.db_handler import database
-from ..ext_utils.files_utils import (
+from ..progress.queue_status import QueueStatus
+from ..progress.telegram_status import TelegramStatus
+from ..storage.db_handler import database
+from ..task.config import TaskConfig
+from ..telegram.message_utils import (
+    chat_of,
+    delete_message,
+    delete_status,
+    send_message,
+    update_status_message,
+)
+from ..upload.telegram_uploader import TelegramUploader
+from ..util.files_utils import (
     clean_download,
     clean_target,
     create_recursive_symlink,
@@ -34,18 +44,8 @@ from ..ext_utils.files_utils import (
     remove_excluded_files,
     remove_non_included_files,
 )
-from ..ext_utils.status_utils import get_readable_file_size
-from ..ext_utils.task_manager import check_running_tasks, start_from_queued
-from ..mirror_leech_utils.status_utils.queue_status import QueueStatus
-from ..mirror_leech_utils.status_utils.telegram_status import TelegramStatus
-from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
-from ..telegram_helper.message_utils import (
-    chat_of,
-    delete_message,
-    delete_status,
-    send_message,
-    update_status_message,
-)
+from ..util.status_utils import get_readable_file_size
+from ..util.task_manager import check_running_tasks, start_from_queued
 
 NO_FILES_ERROR = (
     "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, "
@@ -530,7 +530,7 @@ class TaskListener(TaskConfig):
         await self.remove_from_same_dir()
         if magnet_id := getattr(self, "_alldebrid_magnet_id", 0) or 0:
             try:
-                from ..mirror_leech_utils.download_utils.alldebrid_resolver import (
+                from ..download.alldebrid_resolver import (
                     delete_magnet,
                 )
 
@@ -544,7 +544,7 @@ class TaskListener(TaskConfig):
 
         if torbox_torrent_id or torbox_web_id:
             try:
-                from ..mirror_leech_utils.download_utils.torbox_resolver import (
+                from ..download.torbox_resolver import (
                     delete_torrent,
                     delete_web_download,
                 )

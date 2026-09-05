@@ -1,55 +1,55 @@
 # Baseline refactor — dibuat oleh: python tools/complexity_report.py
-# Commit: 4cd0ad4 · 2026-08-10
+# Commit: 6b100be · 2026-09-05
 # Bandingkan: python tools/complexity_report.py --diff tools/baseline.txt
 
 ## File terbesar
 
 | LOC | File |
 |-----|------|
-| 2500 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py` |
-| 1216 | `bot/helper/common.py` |
-| 961 | `bot/modules/rss.py` |
-| 767 | `bot/helper/ext_utils/media_utils.py` |
-| 737 | `bot/helper/mirror_leech_utils/download_utils/alldebrid_resolver.py` |
-| 677 | `bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py` |
-| 643 | `bot/modules/users_settings.py` |
-| 565 | `bot/modules/bot_settings.py` |
-| 525 | `bot/modules/leech.py` |
-| 508 | `bot/helper/ext_utils/files_utils.py` |
-| 506 | `bot/helper/listeners/task_listener.py` |
-| 483 | `bot/modules/ytdlp.py` |
-| 431 | `bot/helper/mirror_leech_utils/download_utils/torbox_resolver.py` |
-| 401 | `bot/helper/mirror_leech_utils/download_utils/mega_download.py` |
-| 370 | `bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py` |
+| 790 | `bot/modules/bot_settings.py` |
+| 736 | `bot/helper/upload/telegram_uploader.py` |
+| 729 | `bot/helper/util/media_utils.py` |
+| 691 | `bot/helper/download/alldebrid_resolver.py` |
+| 668 | `bot/modules/users_settings.py` |
+| 662 | `bot/helper/storage/db_handler.py` |
+| 629 | `bot/helper/listeners/task_listener.py` |
+| 629 | `bot/helper/task/media_pipeline.py` |
+| 504 | `bot/helper/download/direct_link_generators/hosts/vidara.py` |
+| 500 | `bot/helper/util/files_utils.py` |
+| 435 | `bot/helper/task/settings_resolver.py` |
+| 427 | `bot/helper/download/torbox_resolver.py` |
+| 418 | `bot/helper/download/direct_link_generators/hosts/terabox.py` |
+| 395 | `bot/helper/util/help_messages.py` |
+| 394 | `bot/helper/download/mega_download.py` |
 
 ## Fungsi terbesar
 
 | LOC | CX | Lokasi | Fungsi |
 |-----|----|--------|--------|
-| 439 | 108 | `bot/modules/leech.py:79` | `Leech.new_event()` |
-| 264 | 95 | `bot/helper/common.py:134` | `TaskConfig.before_start()` |
-| 258 | 24 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:801` | `terabox()` |
-| 246 | 1 | `bot/core/handlers.py:10` | `add_handlers()` |
-| 227 | 52 | `bot/modules/users_settings.py:48` | `get_user_settings()` |
-| 222 | 52 | `bot/helper/listeners/task_listener.py:87` | `TaskListener.on_download_complete()` |
-| 204 | 59 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:30` | `direct_link_generator()` |
-| 202 | 68 | `bot/helper/common.py:721` | `TaskConfig.proceed_ffmpeg()` |
-| 200 | 50 | `bot/modules/rss.py:585` | `rss_listener()` |
-| 197 | 39 | `bot/modules/ytdlp.py:283` | `YtDlp.new_event()` |
-| 186 | 64 | `bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py:476` | `TelegramUploader._upload_file()` |
-| 184 | 56 | `bot/modules/bot_settings.py:338` | `edit_bot_settings()` |
-| 164 | 8 | `bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py:1759` | `mediafireFolder()` |
-| 158 | 52 | `bot/modules/rss.py:787` | `rss_monitor()` |
-| 141 | 23 | `bot/helper/mirror_leech_utils/download_utils/yt_dlp_download.py:193` | `YoutubeDLHelper.add_download()` |
+| 205 | 69 | `bot/helper/task/media_pipeline.py:144` | `MediaPipelineMixin.proceed_ffmpeg()` |
+| 164 | 8 | `bot/helper/download/direct_link_generators/hosts/mediafire.py:83` | `mediafireFolder()` |
+| 145 | 22 | `bot/helper/download/yt_dlp_download.py:204` | `YoutubeDLHelper.add_download()` |
+| 133 | 25 | `bot/modules/user_login.py:41` | `user_login()` |
+| 112 | 15 | `bot/helper/download/direct_link_generators/hosts/vidoy.py:150` | `vidoy()` |
+| 108 | 28 | `bot/helper/download/qbit_download.py:46` | `add_qb_torrent()` |
+| 107 | 25 | `bot/helper/task/multi_link.py:144` | `MultiLinkMixin._run_multi()` |
+| 106 | 6 | `bot/helper/download/direct_link_generators/hosts/gofile.py:18` | `gofile()` |
+| 106 | 3 | `bot/helper/download/direct_link_generators/hosts/linkbox.py:13` | `linkBox()` |
+| 101 | 39 | `bot/helper/task/media_pipeline.py:419` | `MediaPipelineMixin.convert_media()` |
+| 101 | 17 | `web/nodes.py:73` | `make_tree()` |
+| 97 | 10 | `bot/helper/download/direct_link_generators/hosts/sendcm.py:54` | `send_cm()` |
+| 97 | 7 | `bot/helper/task/config.py:23` | `TaskConfig.__init__()` |
+| 96 | 24 | `bot/helper/util/bot_utils.py:89` | `arg_parser()` |
+| 96 | 28 | `bot/modules/status.py:100` | `status_pages()` |
 
 ## Metrik
 
-file_total      = 84
-file_gt_500_loc = 11
-func_total      = 683
-func_gt_100_loc = 29
-func_gt_50_loc  = 81
-cx_max          = 108
-func_cx_gt_10   = 110
-bare_except     = 86
-eval_calls      = 9
+file_total      = 148
+file_gt_500_loc = 9
+func_total      = 1146
+func_gt_100_loc = 11
+func_gt_50_loc  = 71
+cx_max          = 69
+func_cx_gt_10   = 98
+bare_except     = 0
+eval_calls      = 0

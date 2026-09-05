@@ -5,18 +5,18 @@ from urllib.parse import urlparse
 from aiofiles import open as aiopen
 from aiofiles.os import remove, path as aiopath
 
-from ..helper.ext_utils.bot_utils import new_task, sync_to_async
-from ..helper.ext_utils.exceptions import DirectDownloadLinkException
-from ..helper.mirror_leech_utils.download_utils.bypass_dispatcher import (
+from ..helper.util.bot_utils import new_task, sync_to_async
+from ..helper.util.exceptions import DirectDownloadLinkException
+from ..helper.download.bypass_dispatcher import (
     bypass_scrape,
     is_scrape_target,
 )
-from ..helper.mirror_leech_utils.download_utils.url_shortener_bypass import (
+from ..helper.download.url_shortener_bypass import (
     bypass_shortener,
     is_url_shortener,
 )
-from ..helper.telegram_helper.conversation import wait_for_reply
-from ..helper.telegram_helper.message_utils import (
+from ..helper.telegram.conversation import wait_for_reply
+from ..helper.telegram.message_utils import (
     delete_message,
     edit_message,
     send_file,

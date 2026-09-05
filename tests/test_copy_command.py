@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pyrogram.errors import FloodWait
 
-from bot.helper.ext_utils.copy_records import copy_unit
+from bot.helper.storage.copy_records import copy_unit
 
 _ROOT = Path(__file__).resolve().parent.parent
 DEST = -1001234567890
@@ -91,25 +91,25 @@ def copy_mod(monkeypatch):
     config = SimpleNamespace(DATABASE_URL="mongodb://test")
     config_mod = ModuleType("bot.core.config_manager")
     config_mod.Config = config
-    bot_utils = ModuleType("bot.helper.ext_utils.bot_utils")
+    bot_utils = ModuleType("bot.helper.util.bot_utils")
     # The real decorator hands the coroutine to bot_loop.create_task; the
     # test awaits the command directly instead.
     bot_utils.new_task = lambda func: func
 
-    db_handler = ModuleType("bot.helper.ext_utils.db_handler")
+    db_handler = ModuleType("bot.helper.storage.db_handler")
     db_handler.database = stubs.database
 
     tg_manager = ModuleType("bot.core.telegram_manager")
     tg_manager.TgClient = SimpleNamespace(bot=stubs.bot)
     tg_manager.own_account = lambda _bot: SimpleNamespace(id=1)
 
-    message_utils = ModuleType("bot.helper.telegram_helper.message_utils")
+    message_utils = ModuleType("bot.helper.telegram.message_utils")
     message_utils.send_message = stubs.send_message
     message_utils.edit_message = stubs.edit_message
     message_utils.auto_delete_message = stubs.auto_delete
     message_utils.chat_of = lambda message: message.chat
 
-    flood_mod = ModuleType("bot.helper.mirror_leech_utils.upload_utils.flood_pacer")
+    flood_mod = ModuleType("bot.helper.upload.flood_pacer")
     flood_mod.FloodPacer = _Pacer
 
     modules_pkg = _pkg("bot.modules", str(_ROOT / "bot" / "modules"))
@@ -122,28 +122,26 @@ def copy_mod(monkeypatch):
         "bot.helper": _pkg("bot.helper"),
         # Real path: ``copy_presets`` and ``copy_records`` import nothing
         # stubbed, so the rules under test are the real ones.
-        "bot.helper.ext_utils": _pkg(
-            "bot.helper.ext_utils", str(_ROOT / "bot" / "helper" / "ext_utils")
+        "bot.helper.util": _pkg("bot.helper.util"),
+        "bot.helper.storage": _pkg(
+            "bot.helper.storage", str(_ROOT / "bot" / "helper" / "storage")
         ),
-        "bot.helper.ext_utils.bot_utils": bot_utils,
-        "bot.helper.ext_utils.db_handler": db_handler,
-        "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
-        "bot.helper.mirror_leech_utils.upload_utils": _pkg(
-            "bot.helper.mirror_leech_utils.upload_utils"
+        "bot.helper.util.bot_utils": bot_utils,
+        "bot.helper.storage.db_handler": db_handler,
+        "bot.helper.upload": _pkg("bot.helper.upload"),
+        "bot.helper.upload.flood_pacer": flood_mod,
+        "bot.helper.telegram": _pkg(
+            "bot.helper.telegram",
+            str(_ROOT / "bot" / "helper" / "telegram"),
         ),
-        "bot.helper.mirror_leech_utils.upload_utils.flood_pacer": flood_mod,
-        "bot.helper.telegram_helper": _pkg(
-            "bot.helper.telegram_helper",
-            str(_ROOT / "bot" / "helper" / "telegram_helper"),
-        ),
-        "bot.helper.telegram_helper.message_utils": message_utils,
+        "bot.helper.telegram.message_utils": message_utils,
         "bot.modules": modules_pkg,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
     sys.modules.pop("bot.modules.copy", None)
-    sys.modules.pop("bot.helper.telegram_helper.dest_chat", None)
-    sys.modules.pop("bot.helper.telegram_helper.button_build", None)
+    sys.modules.pop("bot.helper.telegram.dest_chat", None)
+    sys.modules.pop("bot.helper.telegram.button_build", None)
     module = importlib.import_module("bot.modules.copy")
     # The checks and sends go through doubles, not telegram.
     monkeypatch.setattr(

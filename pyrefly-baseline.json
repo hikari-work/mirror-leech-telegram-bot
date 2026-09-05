@@ -1,11 +1,11 @@
 {
   "errors": [
     {
-      "line": 538,
+      "line": 530,
       "column": 19,
-      "stop_line": 538,
+      "stop_line": 530,
       "stop_column": 32,
-      "path": "bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py",
+      "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
       "name": "bad-argument-type",
       "description": "Argument `Unknown | None` is not assignable to parameter `thumb` with type `BinaryIO | str` in function `pyrogram.methods.messages.send_document.SendDocument.send_document`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
@@ -13,11 +13,11 @@
       "severity": "error"
     },
     {
-      "line": 573,
+      "line": 565,
       "column": 19,
-      "stop_line": 573,
+      "stop_line": 565,
       "stop_column": 32,
-      "path": "bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py",
+      "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
       "name": "bad-argument-type",
       "description": "Argument `str | Unknown | None` is not assignable to parameter `thumb` with type `BinaryIO | str` in function `pyrogram.methods.messages.send_video.SendVideo.send_video`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
@@ -25,11 +25,11 @@
       "severity": "error"
     },
     {
-      "line": 592,
+      "line": 584,
       "column": 23,
-      "stop_line": 592,
+      "stop_line": 584,
       "stop_column": 29,
-      "path": "bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py",
+      "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
       "name": "bad-argument-type",
       "description": "Argument `Unknown | None` is not assignable to parameter `performer` with type `str` in function `pyrogram.methods.messages.send_audio.SendAudio.send_audio`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
@@ -37,11 +37,11 @@
       "severity": "error"
     },
     {
-      "line": 593,
+      "line": 585,
       "column": 19,
-      "stop_line": 593,
+      "stop_line": 585,
       "stop_column": 24,
-      "path": "bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py",
+      "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
       "name": "bad-argument-type",
       "description": "Argument `Unknown | None` is not assignable to parameter `title` with type `str` in function `pyrogram.methods.messages.send_audio.SendAudio.send_audio`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
@@ -49,11 +49,11 @@
       "severity": "error"
     },
     {
-      "line": 594,
+      "line": 586,
       "column": 19,
-      "stop_line": 594,
+      "stop_line": 586,
       "stop_column": 32,
-      "path": "bot/helper/mirror_leech_utils/upload_utils/telegram_uploader.py",
+      "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
       "name": "bad-argument-type",
       "description": "Argument `Unknown | None` is not assignable to parameter `thumb` with type `BinaryIO | str` in function `pyrogram.methods.messages.send_audio.SendAudio.send_audio`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",

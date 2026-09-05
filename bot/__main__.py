@@ -28,8 +28,8 @@ async def main():
         update_qb_options(),
         update_aria2_options(),
     )
-    from .helper.ext_utils.files_utils import clean_all
-    from .helper.ext_utils.telegraph_helper import telegraph
+    from .helper.util.files_utils import clean_all
+    from .helper.util.telegraph_helper import telegraph
     from .modules import (
         initiate_search_tools,
         get_packages_version,
@@ -48,7 +48,7 @@ async def main():
 
 bot_loop.run_until_complete(main())
 
-from .helper.ext_utils.bot_utils import create_help_buttons
+from .helper.util.bot_utils import create_help_buttons
 from .helper.listeners.aria2_listener import add_aria2_callbacks
 from .core.handlers import add_handlers, set_commands
 

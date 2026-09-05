@@ -14,8 +14,8 @@ from types import ModuleType
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
-_BOT_UTILS_PATH = _ROOT / "bot" / "helper" / "ext_utils" / "bot_utils.py"
-_TASK_ARGS_PATH = _ROOT / "bot" / "helper" / "ext_utils" / "task_args.py"
+_BOT_UTILS_PATH = _ROOT / "bot" / "helper" / "util" / "bot_utils.py"
+_TASK_ARGS_PATH = _ROOT / "bot" / "helper" / "util" / "task_args.py"
 
 
 def _extract_arg_parser():

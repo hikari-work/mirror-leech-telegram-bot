@@ -16,7 +16,7 @@ import asyncio
 import pytest
 
 from bot.core.config_manager import Config
-from bot.helper.ext_utils import resolve_gate as rg
+from bot.helper.util import resolve_gate as rg
 
 
 @pytest.fixture(autouse=True)

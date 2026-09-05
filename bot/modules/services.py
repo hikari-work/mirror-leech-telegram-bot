@@ -1,10 +1,10 @@
 from time import time
 
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.message_utils import send_message, edit_message, send_file
-from ..helper.telegram_helper.filters import CustomFilters
-from ..helper.telegram_helper.bot_commands import BotCommands
+from ..helper.util.bot_utils import new_task
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.message_utils import send_message, edit_message, send_file
+from ..helper.telegram.filters import CustomFilters
+from ..helper.telegram.bot_commands import BotCommands
 
 
 @new_task

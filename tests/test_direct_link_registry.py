@@ -53,24 +53,24 @@ def dlg(monkeypatch):
 
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = [
-        str(project_root / "bot" / "helper" / "ext_utils")
-    ]  # real submodules (gateway) load from disk; the stubs above win in sys.modules
+    util_pkg = ModuleType("bot.helper.util")
+    util_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "util")
+    ]
 
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
 
     class DirectDownloadLinkException(Exception):
         pass
 
     exceptions_mod.DirectDownloadLinkException = DirectDownloadLinkException
 
-    help_messages_mod = ModuleType("bot.helper.ext_utils.help_messages")
+    help_messages_mod = ModuleType("bot.helper.util.help_messages")
     help_messages_mod.PASSWORD_ERROR_MESSAGE = "{}"
 
-    # The real regex, copied from bot/helper/ext_utils/links_utils.py, so the
+    # The real regex, copied from bot/helper/util/links_utils.py, so the
     # is_share_link predicate is exercised for real rather than stubbed off.
-    links_utils_mod = ModuleType("bot.helper.ext_utils.links_utils")
+    links_utils_mod = ModuleType("bot.helper.util.links_utils")
 
     def _is_share_link(url):
         from re import match
@@ -84,18 +84,23 @@ def dlg(monkeypatch):
 
     links_utils_mod.is_share_link = _is_share_link
 
-    status_utils_mod = ModuleType("bot.helper.ext_utils.status_utils")
+    status_utils_mod = ModuleType("bot.helper.util.status_utils")
     status_utils_mod.speed_string_to_bytes = lambda value: 0
 
-    mlu_pkg = ModuleType("bot.helper.mirror_leech_utils")
-    mlu_pkg.__path__ = []
-    download_utils_pkg = ModuleType("bot.helper.mirror_leech_utils.download_utils")
-    download_utils_pkg.__path__ = [
-        str(project_root / "bot" / "helper" / "mirror_leech_utils" / "download_utils")
+    # The real gateway/proxy-pool helpers live in bot/helper/net and bind
+    # Config at import time; this stub package lets them load from disk.
+    net_pkg = ModuleType("bot.helper.net")
+    net_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "net")
+    ]
+
+    download_pkg = ModuleType("bot.helper.download")
+    download_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "download")
     ]
 
     shortener_mod = ModuleType(
-        "bot.helper.mirror_leech_utils.download_utils.url_shortener_bypass"
+        "bot.helper.download.url_shortener_bypass"
     )
     shortener_mod.bypass_shortener = lambda url: url
     shortener_mod.is_url_shortener = lambda domain: False
@@ -105,24 +110,24 @@ def dlg(monkeypatch):
         "bot.core": core_pkg,
         "bot.core.config_manager": config_manager,
         "bot.helper": helper_pkg,
-        "bot.helper.ext_utils": ext_utils_pkg,
-        "bot.helper.ext_utils.exceptions": exceptions_mod,
-        "bot.helper.ext_utils.help_messages": help_messages_mod,
-        "bot.helper.ext_utils.links_utils": links_utils_mod,
-        "bot.helper.ext_utils.status_utils": status_utils_mod,
-        "bot.helper.mirror_leech_utils": mlu_pkg,
-        "bot.helper.mirror_leech_utils.download_utils": download_utils_pkg,
+        "bot.helper.util": util_pkg,
+        "bot.helper.util.exceptions": exceptions_mod,
+        "bot.helper.util.help_messages": help_messages_mod,
+        "bot.helper.util.links_utils": links_utils_mod,
+        "bot.helper.util.status_utils": status_utils_mod,
+        "bot.helper.net": net_pkg,
+        "bot.helper.download": download_pkg,
     }
-    stubs[f"{download_utils_pkg.__name__}.url_shortener_bypass"] = shortener_mod
+    stubs[f"{download_pkg.__name__}.url_shortener_bypass"] = shortener_mod
     for name, mod in stubs.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    base = "bot.helper.mirror_leech_utils.download_utils.direct_link_generators"
+    base = "bot.helper.download.direct_link_generators"
     for name in [m for m in sys.modules if m.startswith(base)]:
         sys.modules.pop(name, None)
     # the real gateway helper binds Config at import time; drop any copy an
     # earlier test left in sys.modules so it binds this fixture's stub
-    sys.modules.pop("bot.helper.ext_utils.gateway", None)
+    sys.modules.pop("bot.helper.net.gateway", None)
     return importlib.import_module(base)
 
 

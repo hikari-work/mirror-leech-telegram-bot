@@ -1,7 +1,7 @@
 """Tests for named copy presets and the ``-c`` flag that selects one.
 
 Two halves, because the feature has two halves. The rules in
-``ext_utils/copy_presets`` are shared by the ``/usetting`` editor that stores a
+``storage/copy_presets`` are shared by the ``/usetting`` editor that stores a
 preset and the resolver that reads one back, so they are pinned on their own.
 ``_resolve_copy_preset`` is the other half: it turns a name into destinations and
 refuses the task when the bot cannot post to one of them.
@@ -21,9 +21,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import bot.helper.task_config.settings_resolver as sr
-import bot.helper.telegram_helper.dest_chat as dc
-from bot.helper.ext_utils.copy_presets import (
+import bot.helper.task.settings_resolver as sr
+import bot.helper.telegram.dest_chat as dc
+from bot.helper.storage.copy_presets import (
     MAX_DESTS,
     MAX_PRESETS,
     additions_to,
@@ -32,7 +32,7 @@ from bot.helper.ext_utils.copy_presets import (
     presets_of,
     valid_name,
 )
-from bot.helper.task_config.settings_resolver import SettingsResolverMixin
+from bot.helper.task.settings_resolver import SettingsResolverMixin
 
 DEST = -1001234567890
 OTHER = -1009876543210

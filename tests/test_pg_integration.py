@@ -22,8 +22,8 @@ import pytest
 
 from bot.core.config_manager import Config
 from bot.core.telegram_manager import TgClient
-from bot.helper.ext_utils.copy_records import MAX_TASK_RECORDS
-from bot.helper.ext_utils.db_handler import DbManager
+from bot.helper.storage.copy_records import MAX_TASK_RECORDS
+from bot.helper.storage.db_handler import DbManager
 
 pytestmark = [
     pytest.mark.db,

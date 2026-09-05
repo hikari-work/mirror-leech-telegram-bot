@@ -11,10 +11,10 @@ redrawing the menu on it. The first thing each handler does is clear
 from __future__ import annotations
 
 from ... import LOGGER, rss_dict
-from ...helper.ext_utils.bot_utils import arg_parser, new_task
-from ...helper.ext_utils.status_utils import get_readable_file_size
-from ...helper.telegram_helper.filters import CustomFilters
-from ...helper.telegram_helper.message_utils import send_message
+from ...helper.telegram.filters import CustomFilters
+from ...helper.telegram.message_utils import send_message
+from ...helper.util.bot_utils import arg_parser, new_task
+from ...helper.util.status_utils import get_readable_file_size
 from . import feed
 from .menu import update_rss_menu
 from .monitor import resume_or_start

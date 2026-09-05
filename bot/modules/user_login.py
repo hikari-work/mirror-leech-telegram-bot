@@ -13,10 +13,10 @@ from pyrogram.types import User
 from .. import LOGGER, user_data, user_clients
 from ..core.config_manager import Config
 from ..core.telegram_manager import get_user_client, stop_user_client
-from ..helper.ext_utils.bot_utils import new_task, update_user_ldata
-from ..helper.ext_utils.user_sessions import save_user_session
-from ..helper.telegram_helper.conversation import wait_for_reply
-from ..helper.telegram_helper.message_utils import (
+from ..helper.util.bot_utils import new_task, update_user_ldata
+from ..helper.util.user_sessions import save_user_session
+from ..helper.telegram.conversation import wait_for_reply
+from ..helper.telegram.message_utils import (
     delete_message,
     send_message,
 )

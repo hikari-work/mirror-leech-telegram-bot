@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_MODULE = "bot.helper.mirror_leech_utils.download_utils.url_shortener_bypass"
+_MODULE = "bot.helper.download.url_shortener_bypass"
 
 
 @pytest.fixture
@@ -26,22 +26,27 @@ def shortener(monkeypatch):
     config_mod.Config = SimpleNamespace(GATEWAY_URL="", GATEWAY_TOKEN="")
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = [
-        str(project_root / "bot" / "helper" / "ext_utils")
-    ]  # real submodules (gateway) load from disk; the stubs above win in sys.modules
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    util_pkg = ModuleType("bot.helper.util")
+    util_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "util")
+    ]
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
 
     class DirectDownloadLinkException(Exception):
         pass
 
     exceptions_mod.DirectDownloadLinkException = DirectDownloadLinkException
 
-    mlu_pkg = ModuleType("bot.helper.mirror_leech_utils")
-    mlu_pkg.__path__ = []
-    download_utils_pkg = ModuleType("bot.helper.mirror_leech_utils.download_utils")
-    download_utils_pkg.__path__ = [
-        str(project_root / "bot" / "helper" / "mirror_leech_utils" / "download_utils")
+    # The real gateway helper lives in bot/helper/net and binds Config at
+    # import time; this stub package lets it load from disk.
+    net_pkg = ModuleType("bot.helper.net")
+    net_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "net")
+    ]
+
+    download_pkg = ModuleType("bot.helper.download")
+    download_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "download")
     ]
 
     for name, mod in {
@@ -49,16 +54,16 @@ def shortener(monkeypatch):
         "bot.core": core_pkg,
         "bot.core.config_manager": config_mod,
         "bot.helper": helper_pkg,
-        "bot.helper.ext_utils": ext_utils_pkg,
-        "bot.helper.ext_utils.exceptions": exceptions_mod,
-        "bot.helper.mirror_leech_utils": mlu_pkg,
-        "bot.helper.mirror_leech_utils.download_utils": download_utils_pkg,
+        "bot.helper.util": util_pkg,
+        "bot.helper.util.exceptions": exceptions_mod,
+        "bot.helper.net": net_pkg,
+        "bot.helper.download": download_pkg,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
     # the real gateway helper binds Config at import time; drop any copy an
     # earlier test left in sys.modules so it binds this fixture's stub
-    sys.modules.pop("bot.helper.ext_utils.gateway", None)
+    sys.modules.pop("bot.helper.net.gateway", None)
     sys.modules.pop(_MODULE, None)
     module = importlib.import_module(_MODULE)
     # Never actually sleep between retries.

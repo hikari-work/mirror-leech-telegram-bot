@@ -12,11 +12,11 @@ from functools import partial
 
 from ... import rss_dict, scheduler
 from ...core.config_manager import Config
-from ...helper.ext_utils.bot_utils import new_task
-from ...helper.telegram_helper.button_build import ButtonMaker
-from ...helper.telegram_helper.conversation import wait_for_message
-from ...helper.telegram_helper.filters import CustomFilters
-from ...helper.telegram_helper.message_utils import edit_message, send_message
+from ...helper.telegram.button_build import ButtonMaker
+from ...helper.telegram.conversation import wait_for_message
+from ...helper.telegram.filters import CustomFilters
+from ...helper.telegram.message_utils import edit_message, send_message
+from ...helper.util.bot_utils import new_task
 from .store import handler_dict, parse_chat_target, rss_dict_lock
 
 # (label, callback action) for the root menu, in button order.

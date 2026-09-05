@@ -3,21 +3,21 @@ from base64 import b64encode
 from secrets import token_urlsafe
 
 from .. import LOGGER, bot_loop, multi_tags, DOWNLOAD_DIR
-from ..helper.ext_utils.bot_utils import COMMAND_USAGE
-from ..helper.ext_utils.links_utils import (
+from ..helper.util.bot_utils import COMMAND_USAGE
+from ..helper.util.links_utils import (
     is_url,
     is_magnet,
     is_telegram_link,
 )
-from ..helper.ext_utils.task_args import parse_leech_args, strip_link_tokens
+from ..helper.util.task_args import parse_leech_args, strip_link_tokens
 from ..helper.listeners.command_task import CommandTask
-from ..helper.mirror_leech_utils.download_utils.aria2_download import (
+from ..helper.download.aria2_download import (
     add_aria2_download,
 )
-from ..helper.mirror_leech_utils.download_utils.direct_downloader import (
+from ..helper.download.direct_downloader import (
     add_direct_download,
 )
-from ..helper.mirror_leech_utils.download_utils.link_resolver import (
+from ..helper.download.link_resolver import (
     resolve_torbox_torrent,
     resolve_alldebrid_torrent,
     resolve_torbox_web,
@@ -25,23 +25,23 @@ from ..helper.mirror_leech_utils.download_utils.link_resolver import (
     resolve_direct_link,
     resolve_pornhub,
 )
-from ..helper.mirror_leech_utils.download_utils.mega_download import (
+from ..helper.download.mega_download import (
     add_mega_download,
 )
-from ..helper.mirror_leech_utils.download_utils.pornhub_download import (
+from ..helper.download.pornhub_download import (
     add_pornhub_download,
 )
-from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torrent
-from ..helper.mirror_leech_utils.download_utils.telegram_download import (
+from ..helper.download.qbit_download import add_qb_torrent
+from ..helper.download.telegram_download import (
     TelegramDownloadHelper,
 )
-from ..helper.mirror_leech_utils.download_utils.vidara_download import (
+from ..helper.download.vidara_download import (
     add_vidara_download,
 )
-from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import (
+from ..helper.download.yt_dlp_download import (
     add_ytdlp_download,
 )
-from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.telegram.message_utils import send_message, get_tg_link_message
 
 
 class Leech(CommandTask):

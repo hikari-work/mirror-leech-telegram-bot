@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
-_DU = "bot.helper.mirror_leech_utils.download_utils"
+_DU = "bot.helper.download"
 _DISPATCHER = f"{_DU}.bypass_dispatcher"
 
 
@@ -33,20 +33,19 @@ def dispatcher(monkeypatch):
     for name in (
         "bot",
         "bot.helper",
-        "bot.helper.ext_utils",
-        "bot.helper.mirror_leech_utils",
+        "bot.helper.util",
         _DU,
     ):
         mod = ModuleType(name)
         mod.__path__ = []
         pkgs[name] = mod
     pkgs[_DU].__path__ = [
-        str(_ROOT / "bot" / "helper" / "mirror_leech_utils" / "download_utils")
+        str(_ROOT / "bot" / "helper" / "download")
     ]
 
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
     exceptions_mod.DirectDownloadLinkException = _DirectDownloadLinkException
-    pkgs["bot.helper.ext_utils.exceptions"] = exceptions_mod
+    pkgs["bot.helper.util.exceptions"] = exceptions_mod
 
     semprot_mod = ModuleType(f"{_DU}.semprot_scraper")
     semprot_mod.scrape_pages = AsyncMock(return_value=("Title", [], 1))
@@ -87,17 +86,16 @@ def bypass_cmd(monkeypatch):
         return mod
 
     helper_pkg = _pkg("bot.helper")
-    ext_utils_pkg = _pkg("bot.helper.ext_utils")
-    mlu_pkg = _pkg("bot.helper.mirror_leech_utils")
+    util_pkg = _pkg("bot.helper.util")
     du_pkg = _pkg(_DU)
-    tg_pkg = _pkg("bot.helper.telegram_helper")
+    tg_pkg = _pkg("bot.helper.telegram")
     # the real `conversation` helper is loaded from here -- it only needs
     # bot_loop and the message_utils double below, both of which are stubbed
-    tg_pkg.__path__ = [str(_ROOT / "bot" / "helper" / "telegram_helper")]
+    tg_pkg.__path__ = [str(_ROOT / "bot" / "helper" / "telegram")]
     modules_pkg = _pkg("bot.modules")
     modules_pkg.__path__ = [str(_ROOT / "bot" / "modules")]
 
-    bot_utils = ModuleType("bot.helper.ext_utils.bot_utils")
+    bot_utils = ModuleType("bot.helper.util.bot_utils")
     # The real decorator hands the coroutine to bot_loop.create_task; the test
     # awaits the command directly instead.
     bot_utils.new_task = lambda func: func
@@ -107,7 +105,7 @@ def bypass_cmd(monkeypatch):
 
     bot_utils.sync_to_async = _sync_to_async
 
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
     exceptions_mod.DirectDownloadLinkException = _DirectDownloadLinkException
 
     dispatcher_mod = ModuleType(_DISPATCHER)
@@ -118,7 +116,7 @@ def bypass_cmd(monkeypatch):
     shortener_mod.bypass_shortener = stubs.bypass_shortener
     shortener_mod.is_url_shortener = stubs.is_url_shortener
 
-    message_utils = ModuleType("bot.helper.telegram_helper.message_utils")
+    message_utils = ModuleType("bot.helper.telegram.message_utils")
     message_utils.send_message = stubs.send_message
     message_utils.edit_message = stubs.edit_message
     message_utils.send_file = stubs.send_file
@@ -128,15 +126,14 @@ def bypass_cmd(monkeypatch):
     for name, mod in {
         "bot": bot_pkg,
         "bot.helper": helper_pkg,
-        "bot.helper.ext_utils": ext_utils_pkg,
-        "bot.helper.ext_utils.bot_utils": bot_utils,
-        "bot.helper.ext_utils.exceptions": exceptions_mod,
-        "bot.helper.mirror_leech_utils": mlu_pkg,
+        "bot.helper.util": util_pkg,
+        "bot.helper.util.bot_utils": bot_utils,
+        "bot.helper.util.exceptions": exceptions_mod,
         _DU: du_pkg,
         _DISPATCHER: dispatcher_mod,
         shortener_name: shortener_mod,
-        "bot.helper.telegram_helper": tg_pkg,
-        "bot.helper.telegram_helper.message_utils": message_utils,
+        "bot.helper.telegram": tg_pkg,
+        "bot.helper.telegram.message_utils": message_utils,
         "bot.modules": modules_pkg,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
@@ -144,7 +141,7 @@ def bypass_cmd(monkeypatch):
     sys.modules.pop("bot.modules.bypass", None)
     # `conversation` binds bot_loop and delete_message at import; drop any copy an
     # earlier test left behind so it binds this fixture's doubles
-    sys.modules.pop("bot.helper.telegram_helper.conversation", None)
+    sys.modules.pop("bot.helper.telegram.conversation", None)
     return importlib.import_module("bot.modules.bypass"), stubs
 
 

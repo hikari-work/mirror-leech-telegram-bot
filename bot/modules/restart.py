@@ -5,15 +5,15 @@ from asyncio import gather, create_subprocess_exec
 from os import execl as osexecl
 
 from .. import intervals, scheduler, LOGGER
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.telegram_helper.message_utils import (
+from ..helper.util.bot_utils import new_task
+from ..helper.telegram.message_utils import (
     chat_of,
     send_message,
     delete_message,
 )
-from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.files_utils import clean_all
-from ..helper.telegram_helper.button_build import ButtonMaker
+from ..helper.storage.db_handler import database
+from ..helper.util.files_utils import clean_all
+from ..helper.telegram.button_build import ButtonMaker
 from ..core.telegram_manager import TgClient
 from ..core.config_manager import Config
 from ..core.torrent_manager import TorrentManager

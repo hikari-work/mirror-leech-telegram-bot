@@ -19,7 +19,7 @@ from pyrogram.types.messages_and_media.message import Str
 from ... import LOGGER
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient
-from ...helper.telegram_helper.message_utils import send_rss
+from ...helper.telegram.message_utils import send_rss
 
 
 def _find_command_filters(flt):

@@ -9,6 +9,27 @@ punya target file, langkah konkret, dan cara verifikasi. Urutan fase disusun dar
 
 ---
 
+> **Catatan struktur folder (restructure `bot/helper/`, 2026-09-05).** Seluruh
+> rujukan path di dokumen ini menunjuk struktur *lama* dan sengaja dibiarkan
+> sebagai catatan sejarah. Struktur aktif sekarang:
+>
+> | Lama | Baru |
+> |---|---|
+> | `bot/helper/mirror_leech_utils/download_utils/` | `bot/helper/download/` |
+> | `bot/helper/mirror_leech_utils/upload_utils/` | `bot/helper/upload/` |
+> | `bot/helper/mirror_leech_utils/status_utils/` | `bot/helper/progress/` |
+> | `bot/helper/telegram_helper/` | `bot/helper/telegram/` |
+> | `bot/helper/task_config/` | `bot/helper/task/` |
+> | `bot/helper/common.py` | `bot/helper/task/config.py` |
+> | `bot/helper/ext_utils/{db_handler,copy_presets,copy_records,blob_crypto}.py` | `bot/helper/storage/` |
+> | `bot/helper/ext_utils/{gateway,proxy_pool,mega_client}.py` | `bot/helper/net/` |
+> | `bot/helper/ext_utils/` (sisanya) | `bot/helper/util/` |
+>
+> Harness differential & mutasi fase (`tools/_phase*.py`) pindah ke
+> `tools/archive/`.
+
+---
+
 ## 1. Temuan Baseline
 
 Diukur dengan AST walk atas seluruh `*.py` (di luar `.venv`, `__pycache__`).

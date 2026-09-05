@@ -20,7 +20,7 @@ import pytest
 
 MODULE_PATH = (
     Path(__file__).resolve().parent.parent
-    / "bot/helper/mirror_leech_utils/upload_utils/media_group_batcher.py"
+    / "bot/helper/upload/media_group_batcher.py"
 )
 _spec = importlib.util.spec_from_file_location("media_group_batcher", MODULE_PATH)
 batcher_module = importlib.util.module_from_spec(_spec)

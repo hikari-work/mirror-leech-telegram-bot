@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from bot.helper.ext_utils.bulk_links import extract_bulk_links, filter_links
+from bot.helper.util.bulk_links import extract_bulk_links, filter_links
 
 LINKS = [f"link{i}" for i in range(1, 4001)]
 

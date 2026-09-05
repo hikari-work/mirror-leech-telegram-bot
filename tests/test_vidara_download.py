@@ -152,53 +152,49 @@ def _stub_modules(resolved):
             task_dict={},
             task_dict_lock=_Lock(),
         ),
-        "bot.helper.ext_utils.bot_utils": _module(
-            "bot.helper.ext_utils.bot_utils", sync_to_async=_sync_to_async
+        "bot.helper.util.bot_utils": _module(
+            "bot.helper.util.bot_utils", sync_to_async=_sync_to_async
         ),
-        "bot.helper.ext_utils.resolve_gate": _module(
-            "bot.helper.ext_utils.resolve_gate", resolve_gate=_resolve_gate
+        "bot.helper.util.resolve_gate": _module(
+            "bot.helper.util.resolve_gate", resolve_gate=_resolve_gate
         ),
-        "bot.helper.ext_utils.task_manager": _module(
-            "bot.helper.ext_utils.task_manager",
+        "bot.helper.util.task_manager": _module(
+            "bot.helper.util.task_manager",
             check_running_tasks=_check_running_tasks,
         ),
-        "bot.helper.telegram_helper.message_utils": _module(
-            "bot.helper.telegram_helper.message_utils",
+        "bot.helper.telegram.message_utils": _module(
+            "bot.helper.telegram.message_utils",
             send_status_message=_send_status_message,
         ),
-        "bot.helper.mirror_leech_utils.status_utils.queue_status": _module(
-            "bot.helper.mirror_leech_utils.status_utils.queue_status",
+        "bot.helper.progress.queue_status": _module(
+            "bot.helper.progress.queue_status",
             QueueStatus=lambda *args, **kwargs: object(),
         ),
-        "bot.helper.mirror_leech_utils.status_utils.vidara_status": _module(
-            "bot.helper.mirror_leech_utils.status_utils.vidara_status",
+        "bot.helper.progress.vidara_status": _module(
+            "bot.helper.progress.vidara_status",
             VidaraStatus=lambda *args, **kwargs: object(),
         ),
-        "bot.helper.mirror_leech_utils.download_utils.direct_link_generators": _module(
-            "bot.helper.mirror_leech_utils.download_utils.direct_link_generators",
+        "bot.helper.download.direct_link_generators": _module(
+            "bot.helper.download.direct_link_generators",
             vidara_resolve=_vidara_resolve,
         ),
     }
     for name in (
         "bot.helper",
-        "bot.helper.ext_utils",
-        "bot.helper.telegram_helper",
-        "bot.helper.mirror_leech_utils",
-        "bot.helper.mirror_leech_utils.status_utils",
-        "bot.helper.mirror_leech_utils.download_utils",
+        "bot.helper.util",
+        "bot.helper.telegram",
+        "bot.helper.progress",
+        "bot.helper.download",
     ):
         modules[name] = _module(name, package=True)
     return modules
 
 
 def _load(monkeypatch, name):
-    """Load one real ``download_utils`` module under the stubbed package tree."""
-    path = (
-        _ROOT / "bot" / "helper" / "mirror_leech_utils" / "download_utils"
-        / f"{name}.py"
-    )
+    """Load one real ``download`` module under the stubbed package tree."""
+    path = _ROOT / "bot" / "helper" / "download" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(
-        f"bot.helper.mirror_leech_utils.download_utils.{name}", path
+        f"bot.helper.download.{name}", path
     )
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -339,7 +335,7 @@ async def test_each_video_is_resolved_when_its_turn_comes(vidara_dl):
     # the downloader imports vidara_resolve lazily, so patching the stub module
     # after load is what it will pick up
     sys.modules[
-        "bot.helper.mirror_leech_utils.download_utils.direct_link_generators"
+        "bot.helper.download.direct_link_generators"
     ].vidara_resolve = _resolve
     _FakeYoutubeDL.on_download = lambda ydl, url: order.append(("download", url))
 

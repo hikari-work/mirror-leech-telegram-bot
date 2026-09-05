@@ -1,16 +1,16 @@
 from asyncio import sleep
 
 from .. import task_dict, task_dict_lock, multi_tags
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.status_utils import (
+from ..helper.util.bot_utils import new_task
+from ..helper.util.status_utils import (
     get_all_tasks,
     MirrorStatus,
 )
-from ..helper.ext_utils.task_lookup import task_from_command, task_is_yours
-from ..helper.telegram_helper import button_build
-from ..helper.telegram_helper.bot_commands import BotCommands
-from ..helper.telegram_helper.filters import CustomFilters
-from ..helper.telegram_helper.message_utils import (
+from ..helper.util.task_lookup import task_from_command, task_is_yours
+from ..helper.telegram import button_build
+from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.filters import CustomFilters
+from ..helper.telegram.message_utils import (
     send_message,
     auto_delete_message,
     delete_message,

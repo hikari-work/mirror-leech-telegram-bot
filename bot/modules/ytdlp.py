@@ -8,23 +8,23 @@ from yt_dlp import YoutubeDL
 
 from .. import LOGGER, bot_loop, DOWNLOAD_DIR
 from ..core.config_manager import Config
-from ..helper.ext_utils.bot_utils import (
+from ..helper.util.bot_utils import (
     new_task,
     sync_to_async,
     COMMAND_USAGE,
 )
-from ..helper.ext_utils.links_utils import is_url
-from ..helper.ext_utils.resolve_gate import resolve_gate
-from ..helper.ext_utils.task_args import parse_ytdlp_args
-from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
+from ..helper.util.links_utils import is_url
+from ..helper.util.resolve_gate import resolve_gate
+from ..helper.util.task_args import parse_ytdlp_args
+from ..helper.util.status_utils import get_readable_file_size, get_readable_time
 from ..helper.listeners.command_task import CommandTask
-from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
+from ..helper.download.direct_link_generators import (
     is_vidoy_link,
     vidoy_resolve,
 )
-from ..helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.message_utils import (
+from ..helper.download.yt_dlp_download import YoutubeDLHelper
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.message_utils import (
     send_message,
     edit_message,
     delete_message,

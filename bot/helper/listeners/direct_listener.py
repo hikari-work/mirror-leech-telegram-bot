@@ -111,7 +111,7 @@ class DirectListener:
         Disk usage = max 2 files at a time.  Bunkr URLs are resolved lazily
         (one at a time) to avoid stale signed CDN links.
         """
-        from ..mirror_leech_utils.upload_utils.telegram_uploader import TelegramUploader
+        from ..upload.telegram_uploader import TelegramUploader
 
         tg = TelegramUploader(self.listener, self._path)
         if not await tg.init_stream():
@@ -157,7 +157,7 @@ class DirectListener:
 
     async def _resolve_one_bunkr(self, content):
         """Lazily resolve a single bunkr file URL just before download."""
-        from ..mirror_leech_utils.download_utils.direct_link_generators.hosts.bunkr import (
+        from ..download.direct_link_generators.hosts.bunkr import (
             bunkr_resolve_download,
         )
         dl_url, filename, file_size = await bunkr_resolve_download(content["url"])
@@ -177,7 +177,7 @@ class DirectListener:
         album is hundreds of files, and asking for all of them at once is what
         made the gateway answer a large album with errors on every file.
         """
-        from ..mirror_leech_utils.download_utils.direct_link_generators.hosts.bunkr import (
+        from ..download.direct_link_generators.hosts.bunkr import (
             bunkr_resolve_many,
         )
 

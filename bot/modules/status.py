@@ -10,17 +10,17 @@ from .. import (
     DOWNLOAD_DIR,
 )
 from ..core.torrent_manager import TorrentManager
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.status_utils import (
+from ..helper.util.bot_utils import new_task
+from ..helper.util.status_utils import (
     MirrorStatus,
     get_readable_file_size,
     get_readable_time,
     get_task_by_gid,
     speed_string_to_bytes,
 )
-from ..helper.telegram_helper.bot_commands import BotCommands
-from ..helper.telegram_helper.filters import CustomFilters
-from ..helper.telegram_helper.message_utils import (
+from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.filters import CustomFilters
+from ..helper.telegram.message_utils import (
     send_message,
     delete_message,
     auto_delete_message,
@@ -29,7 +29,7 @@ from ..helper.telegram_helper.message_utils import (
     update_status_message,
     edit_message,
 )
-from ..helper.telegram_helper.button_build import ButtonMaker
+from ..helper.telegram.button_build import ButtonMaker
 
 
 async def _handle_cancel(query, data, key):

@@ -16,7 +16,7 @@ from __future__ import annotations
 from asyncio import Lock
 
 from ... import rss_dict
-from ...helper.ext_utils.db_handler import database
+from ...helper.storage.db_handler import database
 
 rss_dict_lock = Lock()
 

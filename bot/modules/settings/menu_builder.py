@@ -12,7 +12,7 @@ from html import escape
 from ... import user_data
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient
-from ...helper.telegram_helper.button_build import ButtonMaker
+from ...helper.telegram.button_build import ButtonMaker
 from .schema import (
     MENUS,
     NOT_SET,

@@ -19,7 +19,7 @@ def mc():
     """Load mega_client directly — imports only cryptography, no bot package."""
     path = (
         Path(__file__).resolve().parent.parent
-        / "bot" / "helper" / "ext_utils" / "mega_client.py"
+        / "bot" / "helper" / "net" / "mega_client.py"
     )
     spec = importlib.util.spec_from_file_location("mega_client", path)
     module = importlib.util.module_from_spec(spec)

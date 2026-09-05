@@ -6,11 +6,11 @@ from aiohttp.client_exceptions import ClientError
 from ... import task_dict_lock, task_dict, LOGGER, intervals
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager, is_metadata, aria2_name
-from ..ext_utils.bot_utils import bt_selection_buttons
-from ..ext_utils.files_utils import clean_unwanted
-from ..ext_utils.status_utils import get_task_by_gid
-from ..mirror_leech_utils.status_utils.aria2_status import Aria2Status
-from ..telegram_helper.message_utils import (
+from ..util.bot_utils import bt_selection_buttons
+from ..util.files_utils import clean_unwanted
+from ..util.status_utils import get_task_by_gid
+from ..progress.aria2_status import Aria2Status
+from ..telegram.message_utils import (
     send_message,
     delete_message,
     update_status_message,

@@ -9,7 +9,7 @@ records and stored private files.
 
 The tables must already exist: they are created by ``DbManager.connect()`` on
 the bot's first boot against the target PG (the DDL lives in
-``bot/helper/ext_utils/db_handler.py`` as ``_SCHEMA``). Run the bot once against
+``bot/helper/storage/db_handler.py`` as ``_SCHEMA``). Run the bot once against
 an empty database first, or apply that DDL by hand.
 
 ``pymongo`` is needed only for this one-shot read and is deliberately not a

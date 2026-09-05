@@ -1,0 +1,435 @@
+import ast
+from collections import Counter
+from copy import deepcopy
+from re import findall
+
+from ... import (
+    LOGGER,
+    excluded_extensions,
+    included_extensions,
+)
+from ...core.config_manager import Config
+from ...core.telegram_manager import TgClient, own_account
+from ..storage.copy_presets import as_chat_id, as_dump_target, presets_of
+from ..telegram.dest_chat import (
+    ChatLookupError,
+    can_manage_and_delete,
+    can_reach_dest,
+    get_dest_chat,
+    get_dest_member,
+    is_group_chat,
+    verify_copy_target,
+)
+from ..telegram.message_utils import get_tg_link_message
+from ..util.bot_utils import get_size_bytes
+from ..util.links_utils import is_telegram_link
+from ..util.media_utils import create_thumb
+from ._host import TaskConfigHost
+
+# Telegram's per-file ceiling for a bot token; a premium user session raises it.
+BOT_MAX_SPLIT_SIZE = 2097152000
+
+TRANSMISSION_PREFIXES = ("b:", "u:", "h:")
+
+
+def _setting_for(user_dict, key, global_value, when_set=""):
+    """The value of ``key`` for this task, preferring the user's own setting.
+
+    A key *present* in ``user_dict`` means the user has an opinion about it --
+    even an empty one -- so the bot-wide default no longer applies and
+    ``when_set`` is used instead.
+    """
+    return user_dict.get(key) or (global_value if key not in user_dict else when_set)
+
+
+def _is_enabled(user_dict, key, global_value) -> bool:
+    """Whether a boolean setting is on, preferring the user's own choice."""
+    return bool(user_dict.get(key) or (global_value and key not in user_dict))
+
+
+def _as_dump_entries(chats):
+    """The configured clone dump chats as a list, whatever shape they came in."""
+    if isinstance(chats, int):
+        return [chats]
+    if isinstance(chats, str):
+        if chats.startswith("[") and chats.endswith("]"):
+            return ast.literal_eval(chats)
+        return [chats]
+    return chats
+
+
+class SettingsResolverMixin(TaskConfigHost):
+    def _dest_unverified(self, what, error) -> None:
+        """Handle a destination check that could not be completed.
+
+        Telegram was never answered successfully, so nothing new is known about
+        the chat -- "Chat not found!" or "not admin" would be a guess, and during
+        a bulk it is the wrong guess for every link in the batch. Hybrid leech
+        can simply stay off, the upload still goes through the user session; a
+        bot-only upload has to stop and say that the *check* failed.
+        """
+        if self.user_transmission:
+            LOGGER.warning(
+                f"Hybrid leech off for this task, can't check {what}: {error}"
+            )
+            self.hybrid_leech = False
+            return
+        raise ValueError(
+            f"Can't check {what} right now: {error}. Try again in a moment."
+        )
+
+    async def before_start(self) -> None:
+        """Settle every task setting that was left to a default.
+
+        Order matters: the destination has the last word on which session
+        uploads, and that in turn decides how large a split may be.
+        """
+        self._resolve_name_substitutions()
+        self._resolve_extension_filters()
+        self._resolve_ffmpeg_commands()
+        await self._resolve_upload_destination()
+        self._resolve_split_sizes()
+        self._resolve_upload_format()
+        self._resolve_thumbnail_layout()
+        self._resolve_clone_dump_chats()
+        await self._resolve_copy_preset()
+        await self._resolve_thumbnail()
+
+    # ── plain settings ──────────────────────────────────────────────────
+
+    def _resolve_name_substitutions(self) -> None:
+        """Parse the rename rules from ``old/new | old/new`` into pairs."""
+        spec = self.name_sub or _setting_for(
+            self.user_dict, "NAME_SUBSTITUTE", Config.NAME_SUBSTITUTE
+        )
+        # No rules stays the empty string rather than becoming ``[[""]]``: the
+        # stage list in TaskListener gates on this being falsy.
+        if isinstance(spec, str) and spec:
+            spec = [x.split("/") for x in spec.split(" | ")]
+        self.name_sub = spec
+
+    def _resolve_extension_filters(self) -> None:
+        """Decide which file extensions this task keeps and which it drops."""
+        self.excluded_extensions = _setting_for(
+            self.user_dict,
+            "EXCLUDED_EXTENSIONS",
+            excluded_extensions,
+            ["aria2", "!qB"],
+        )
+        self.included_extensions = _setting_for(
+            self.user_dict, "INCLUDED_EXTENSIONS", included_extensions, []
+        )
+
+    def _resolve_upload_format(self) -> None:
+        """Decide whether files go up as documents or as playable media."""
+        if self.as_doc:
+            return
+        self.as_doc = (
+            False
+            if self.as_med
+            else _is_enabled(self.user_dict, "AS_DOCUMENT", Config.AS_DOCUMENT)
+        )
+
+    def _resolve_thumbnail_layout(self) -> None:
+        """Settle how many thumbnails per row a grid preview gets."""
+        self.thumbnail_layout = self.thumbnail_layout or _setting_for(
+            self.user_dict, "THUMBNAIL_LAYOUT", Config.THUMBNAIL_LAYOUT
+        )
+
+    async def _resolve_thumbnail(self) -> None:
+        """Turn a telegram link thumbnail into a file on disk."""
+        if self.thumb == "none" or not is_telegram_link(self.thumb):
+            return
+        msg = (await get_tg_link_message(self.thumb, self.user_id))[0]
+        self.thumb = await create_thumb(msg) if msg.photo or msg.document else ""
+
+    # ── ffmpeg presets ──────────────────────────────────────────────────
+
+    def _resolve_ffmpeg_commands(self) -> None:
+        """Turn the requested preset names into runnable command lines."""
+        if not self.ffmpeg_cmds:
+            return
+        presets = self._ffmpeg_presets()
+        cmds = []
+        for key in list(self.ffmpeg_cmds):
+            if isinstance(key, tuple):
+                cmds.extend(key)
+            elif presets and key in presets:
+                cmds.extend(self._fill_preset(key, presets[key]))
+        self.ffmpeg_cmds = cmds
+
+    def _ffmpeg_presets(self):
+        """The named command sets this task may draw on, user's before bot's."""
+        if self.user_dict.get("FFMPEG_CMDS"):
+            return deepcopy(self.user_dict["FFMPEG_CMDS"])
+        if Config.FFMPEG_CMDS:
+            return deepcopy(Config.FFMPEG_CMDS)
+        return None
+
+    def _fill_preset(self, key, templates):
+        """The usable commands of one preset, dropping any left with holes.
+
+        A template keeps its ``{placeholders}`` only when the user supplied
+        exactly that set of variables; filling in a subset would hand ffmpeg a
+        command line with braces still in it.
+        """
+        for index, template in enumerate(templates):
+            variables = set(findall(r"\{(.*?)\}", template))
+            if not variables:
+                yield template
+                continue
+            values = (
+                self.user_dict.get("FFMPEG_VARIABLES", {})
+                .get(key, {})
+                .get(str(index), {})
+            )
+            if Counter(list(variables)) == Counter(list(values.keys())):
+                yield template.format(**values)
+
+    # ── upload destination and the session that uploads ─────────────────
+
+    async def _resolve_upload_destination(self) -> None:
+        """Settle where the files go and which session is able to send them."""
+        self._apply_transmission_defaults()
+        if self.up_dest:
+            self._normalize_up_dest()
+            if self.user_transmission:
+                await self._verify_dest_for_user_session()
+            if not self.user_transmission or self.hybrid_leech:
+                await self._verify_dest_for_bot()
+        elif (self.user_transmission or self.hybrid_leech) and not self.is_super_chat:
+            # uploading back into a PM: neither trick applies
+            self._downgrade_to_bot_session()
+
+    def _downgrade_to_bot_session(self) -> None:
+        """Give up on the user session for this task."""
+        self.user_transmission = False
+        self.hybrid_leech = False
+
+    def _apply_transmission_defaults(self) -> None:
+        """Pick the uploading session before the destination gets a say."""
+        self.user_transmission = _is_enabled(
+            self.user_dict, "USER_TRANSMISSION", Config.USER_TRANSMISSION
+        )
+        self.up_dest = self.up_dest or Config.LEECH_DUMP_CHAT
+        self.hybrid_leech = bool(
+            TgClient.IS_PREMIUM_USER
+            and _is_enabled(self.user_dict, "HYBRID_LEECH", Config.HYBRID_LEECH)
+        )
+        if self.bot_trans:
+            self._downgrade_to_bot_session()
+        if self.user_trans:
+            self.user_transmission = True
+
+    def _normalize_up_dest(self) -> None:
+        """Reduce the destination the user typed to a chat id and thread id."""
+        if isinstance(self.up_dest, int):
+            return
+        self.up_dest = self._apply_transmission_prefix(self.up_dest)
+        if "|" in self.up_dest:
+            chat, thread = self.up_dest.split("|", 1)
+            self.up_dest = as_chat_id(chat)
+            self.chat_thread_id = as_chat_id(thread)
+        elif self.up_dest.lstrip("-").isdigit():
+            self.up_dest = int(self.up_dest)
+        elif self.up_dest.lower() == "pm":
+            self.up_dest = self.user_id
+
+    def _apply_transmission_prefix(self, up_dest: str) -> str:
+        """Let a ``b:``/``u:``/``h:`` prefix override the uploading session.
+
+        Returns the destination with the prefix stripped, or unchanged if there
+        was none.
+        """
+        prefix = up_dest[:2]
+        if prefix not in TRANSMISSION_PREFIXES:
+            return up_dest
+        if prefix == "b:":
+            self._downgrade_to_bot_session()
+        elif prefix == "u:":
+            self.user_transmission = True
+        else:
+            self.user_transmission = True
+            self.hybrid_leech = bool(TgClient.IS_PREMIUM_USER)
+        return up_dest[2:]
+
+    async def _verify_dest_for_user_session(self) -> None:
+        """Downgrade to the bot unless the user session can manage the chat.
+
+        The user session is an optimisation, never a requirement, so every
+        failure here costs user transmission and hybrid leech and nothing more.
+        """
+        try:
+            chat = await get_dest_chat(TgClient.user, self.up_dest)
+        except ChatLookupError as e:
+            # a rate limit is not an answer about the chat, but the user
+            # session has nothing to fall back on here, so the task goes
+            # on through the bot rather than failing
+            LOGGER.warning(
+                f"Can't check the destination chat for the user session: {e}"
+            )
+            chat = None
+        if chat is None:
+            LOGGER.warning(
+                "Account of user session can't find the the destination chat!"
+            )
+            self._downgrade_to_bot_session()
+        elif not is_group_chat(chat):
+            self._downgrade_to_bot_session()
+        elif not chat.is_admin:
+            LOGGER.warning(
+                "Promote the account of the user session to admin in the chat"
+                " to get the benefit of user transmission!"
+            )
+            self._downgrade_to_bot_session()
+        else:
+            await self._verify_user_session_privileges(chat)
+
+    async def _verify_user_session_privileges(self, chat) -> None:
+        """Check the user session may manage the chat and delete its messages."""
+        user = TgClient.user
+        if user is None:
+            # No user session to verify -- nothing to hand the upload to.
+            self._downgrade_to_bot_session()
+            return
+        try:
+            member = await get_dest_member(user, chat.id, own_account(user).id)
+        except ChatLookupError as e:
+            LOGGER.warning(
+                "Can't check the privileges of the user session in "
+                f"the destination chat: {e}"
+            )
+            self._downgrade_to_bot_session()
+            return
+        if not can_manage_and_delete(member):
+            self._downgrade_to_bot_session()
+            LOGGER.warning(
+                "Enable manage chat and delete messages to account of the user"
+                " session from administration settings!"
+            )
+
+    async def _verify_dest_for_bot(self) -> None:
+        """Make sure the bot itself can post to the destination, or stop."""
+        chat = None
+        try:
+            chat = await get_dest_chat(self.client, self.up_dest)
+        except ChatLookupError as e:
+            # "could not ask" must not come out as "not there": that is
+            # what turned one FloodWait during a bulk into a batch of
+            # links reported dead while every one of them was fine
+            self._dest_unverified("the destination chat", e)
+        if chat is None:
+            if not self.user_transmission:
+                raise ValueError("Chat not found!")
+            self.hybrid_leech = False
+        elif is_group_chat(chat):
+            await self._verify_bot_privileges(chat)
+        else:
+            await self._verify_bot_can_reach_dest()
+
+    async def _verify_bot_privileges(self, chat) -> None:
+        """Check the bot may manage the destination and delete its messages."""
+        if not chat.is_admin:
+            raise ValueError("Bot is not admin in the destination chat!")
+        member = None
+        try:
+            member = await get_dest_member(
+                self.client, chat.id, own_account(self.client).id
+            )
+        except ChatLookupError as e:
+            self._dest_unverified("the bot's privileges", e)
+        if member is not None and not can_manage_and_delete(member):
+            if not self.user_transmission:
+                raise ValueError(
+                    "You don't have enough privileges in this chat! Enable"
+                    " manage chat and delete messages for this bot!"
+                )
+            self.hybrid_leech = False
+
+    async def _verify_bot_can_reach_dest(self) -> None:
+        """Check a non-group destination has actually started the bot."""
+        # unverified means unverified: an unanswered probe leaves this True so
+        # the task is not told to start a bot it has already started
+        reachable = True
+        try:
+            reachable = await can_reach_dest(self.client, self.up_dest)
+        except ChatLookupError as e:
+            self._dest_unverified("the destination chat", e)
+        if not reachable:
+            raise ValueError("Start the bot and try again!")
+
+    # ── splitting ───────────────────────────────────────────────────────
+
+    def _resolve_split_sizes(self) -> None:
+        """Fix the split size and the ceiling telegram will accept for it."""
+        # ``-sp`` arrives as the text the user typed ("2g"); the two fallbacks
+        # below are byte counts already, so only the typed form needs parsing.
+        size = self.split_size
+        if isinstance(size, str):
+            size = int(size) if size.isdigit() else get_size_bytes(size) if size else 0
+        size = size or self.user_dict.get("LEECH_SPLIT_SIZE") or Config.LEECH_SPLIT_SIZE
+        self.equal_splits = _is_enabled(
+            self.user_dict, "EQUAL_SPLITS", Config.EQUAL_SPLITS
+        )
+        self.max_split_size = (
+            TgClient.MAX_SPLIT_SIZE
+            if self.user_transmission and TgClient.IS_PREMIUM_USER
+            else BOT_MAX_SPLIT_SIZE
+        )
+        self.split_size = min(size, self.max_split_size)
+
+    # ── clone dump chats ────────────────────────────────────────────────
+
+    def _resolve_clone_dump_chats(self) -> None:
+        """Index every extra dump chat by id, ready to record what was sent.
+
+        Keyed by chat *and* thread: two topics of one group are two
+        destinations, and keying by chat alone silently dropped one of them.
+        """
+        self.clone_dump_chats = (
+            _setting_for(
+                self.user_dict, "CLONE_DUMP_CHATS", Config.CLONE_DUMP_CHATS, {}
+            )
+            or {}
+        )
+        if not self.clone_dump_chats:
+            return
+        self.clone_dump_chats = {
+            as_dump_target(entry, self.user_id): {"last_sent_msg": None}
+            for entry in _as_dump_entries(self.clone_dump_chats)
+        }
+
+    # ── copy presets ────────────────────────────────────────────────────
+
+    async def _resolve_copy_preset(self) -> None:
+        """Point this task's copies at the preset ``-c`` named.
+
+        The preset replaces whatever ``CLONE_DUMP_CHATS`` resolved to rather
+        than adding to it: naming a preset is how a user says where this task
+        goes, and a standing default quietly tagging along would be a surprise.
+
+        Every destination is checked before the task is allowed to start. The
+        alternative is finding out that a chat was never writable after the
+        download finished, which is the whole reason the check is here and not
+        at the point the copy is sent.
+        """
+        if not self.copy_preset:
+            return
+        presets = presets_of(self.user_dict)
+        entries = presets.get(self.copy_preset)
+        if entries is None:
+            known = ", ".join(sorted(presets)) or "none"
+            raise ValueError(
+                f"You have no copy preset named '{self.copy_preset}'."
+                f" Your presets: {known}."
+            )
+        if not entries:
+            raise ValueError(
+                f"Copy preset '{self.copy_preset}' has no destinations in it."
+            )
+        targets = {}
+        for entry in entries:
+            chat_id, thread_id = as_dump_target(entry, self.user_id)
+            await verify_copy_target(entry, chat_id)
+            targets[(chat_id, thread_id)] = {"last_sent_msg": None}
+        self.clone_dump_chats = targets

@@ -13,10 +13,10 @@ def _stub_bot_package(monkeypatch):
     bot_pkg = ModuleType("bot")
     bot_pkg.LOGGER = type("L", (), {"info": staticmethod(lambda *a, **k: None)})
     helper_pkg = ModuleType("bot.helper")
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
+    util_pkg = ModuleType("bot.helper.util")
     monkeypatch.setitem(sys.modules, "bot", bot_pkg)
     monkeypatch.setitem(sys.modules, "bot.helper", helper_pkg)
-    monkeypatch.setitem(sys.modules, "bot.helper.ext_utils", ext_utils_pkg)
+    monkeypatch.setitem(sys.modules, "bot.helper.util", util_pkg)
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def arg_parser(monkeypatch):
     """Import only ``arg_parser`` from bot_utils without firing module-level
     side effects elsewhere in the package."""
     _stub_bot_package(monkeypatch)
-    sys.modules.pop("bot.helper.ext_utils.bot_utils", None)
+    sys.modules.pop("bot.helper.util.bot_utils", None)
     # ``bot_utils`` itself imports several Telegram-only helpers, so we
     # load it from source via execfile-style trick to avoid pulling in
     # the full bot stack.
@@ -35,7 +35,7 @@ def arg_parser(monkeypatch):
         Path(__file__).resolve().parent.parent
         / "bot"
         / "helper"
-        / "ext_utils"
+        / "util"
         / "bot_utils.py"
     )
     src = file_path.read_text(encoding="utf-8")

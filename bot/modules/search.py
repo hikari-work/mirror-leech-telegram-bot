@@ -5,11 +5,11 @@ from urllib.parse import quote
 from .. import LOGGER
 from ..core.config_manager import Config
 from ..core.torrent_manager import TorrentManager
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.status_utils import get_readable_file_size
-from ..helper.ext_utils.telegraph_helper import telegraph
-from ..helper.telegram_helper.button_build import ButtonMaker
-from ..helper.telegram_helper.message_utils import edit_message, send_message
+from ..helper.util.bot_utils import new_task
+from ..helper.util.status_utils import get_readable_file_size
+from ..helper.util.telegraph_helper import telegraph
+from ..helper.telegram.button_build import ButtonMaker
+from ..helper.telegram.message_utils import edit_message, send_message
 
 PLUGINS = []
 SITES: dict[str, str] | None = None

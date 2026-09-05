@@ -13,9 +13,9 @@ from psutil import (
 )
 
 from .. import bot_start_time
-from ..helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
-from ..helper.ext_utils.bot_utils import cmd_exec, new_task
-from ..helper.telegram_helper.message_utils import send_message
+from ..helper.util.status_utils import get_readable_file_size, get_readable_time
+from ..helper.util.bot_utils import cmd_exec, new_task
+from ..helper.telegram.message_utils import send_message
 
 commands: dict[str, tuple[list[str], str]] = {
     "aria2": (["aria2c", "--version"], r"aria2 version ([\d.]+)"),

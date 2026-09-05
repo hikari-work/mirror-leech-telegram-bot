@@ -33,7 +33,7 @@ class _Err(Exception):
     pass
 
 
-TARGET = "bot.helper.mirror_leech_utils.upload_utils.flood_pacer"
+TARGET = "bot.helper.upload.flood_pacer"
 
 
 @pytest.fixture
@@ -50,17 +50,17 @@ def pacer_module(monkeypatch):
         "bot": _pkg("bot"),
         "bot.helper": _pkg("bot.helper"),
         # Real path, not a stub: the pacer reads a flood's wait through
-        # ``telegram_helper.flood``, and these tests assert the number it comes
+        # ``telegram.flood``, and these tests assert the number it comes
         # back with, so the module under the assertions has to be the real one.
         # It needs nothing but the stubbed ``pyrogram.errors`` to import.
-        "bot.helper.telegram_helper": _pkg(
-            "bot.helper.telegram_helper",
-            str(root / "bot" / "helper" / "telegram_helper"),
+        "bot.helper.telegram": _pkg(
+            "bot.helper.telegram",
+            str(root / "bot" / "helper" / "telegram"),
         ),
-        "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
-        "bot.helper.mirror_leech_utils.upload_utils": _pkg(
-            "bot.helper.mirror_leech_utils.upload_utils",
-            str(root / "bot" / "helper" / "mirror_leech_utils" / "upload_utils"),
+        # The pacer itself is loaded for real from this package.
+        "bot.helper.upload": _pkg(
+            "bot.helper.upload",
+            str(root / "bot" / "helper" / "upload"),
         ),
     }
     for name, mod in modules.items():
@@ -72,7 +72,7 @@ def pacer_module(monkeypatch):
     sys.modules.pop(TARGET, None)
     # The real flood module imported above binds the stubbed error classes, so
     # it is dropped with the pacer rather than handed to the next test file.
-    sys.modules.pop("bot.helper.telegram_helper.flood", None)
+    sys.modules.pop("bot.helper.telegram.flood", None)
 
 
 def _pacer(pacer_module, monkeypatch, is_cancelled=lambda: False):

@@ -101,7 +101,7 @@ from pyrogram.filters import AndFilter
 
 from bot.core import handlers
 from bot.core.telegram_manager import TgClient
-from bot.helper.telegram_helper.bot_commands import BotCommands
+from bot.helper.telegram.bot_commands import BotCommands
 
 recorded = []
 TgClient.bot = SimpleNamespace(add_handler=recorded.append)

@@ -52,20 +52,18 @@ def torbox(monkeypatch):
 
     helper_pkg = ModuleType("bot.helper")
     helper_pkg.__path__ = []
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    ext_utils_pkg.__path__ = []
-    exceptions_mod = ModuleType("bot.helper.ext_utils.exceptions")
+    util_pkg = ModuleType("bot.helper.util")
+    util_pkg.__path__ = []
+    exceptions_mod = ModuleType("bot.helper.util.exceptions")
 
     class DirectDownloadLinkException(Exception):
         pass
 
     exceptions_mod.DirectDownloadLinkException = DirectDownloadLinkException
 
-    mlu_pkg = ModuleType("bot.helper.mirror_leech_utils")
-    mlu_pkg.__path__ = []
-    download_utils_pkg = ModuleType("bot.helper.mirror_leech_utils.download_utils")
-    download_utils_pkg.__path__ = [
-        str(project_root / "bot" / "helper" / "mirror_leech_utils" / "download_utils")
+    download_pkg = ModuleType("bot.helper.download")
+    download_pkg.__path__ = [
+        str(project_root / "bot" / "helper" / "download")
     ]
 
     for name, mod in {
@@ -73,22 +71,21 @@ def torbox(monkeypatch):
         "bot.core": core_pkg,
         "bot.core.config_manager": config_manager,
         "bot.helper": helper_pkg,
-        "bot.helper.ext_utils": ext_utils_pkg,
-        "bot.helper.ext_utils.exceptions": exceptions_mod,
-        "bot.helper.mirror_leech_utils": mlu_pkg,
-        "bot.helper.mirror_leech_utils.download_utils": download_utils_pkg,
+        "bot.helper.util": util_pkg,
+        "bot.helper.util.exceptions": exceptions_mod,
+        "bot.helper.download": download_pkg,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
     for name in list(sys.modules):
-        if name.startswith("bot.helper.mirror_leech_utils.download_utils.debrid"):
+        if name.startswith("bot.helper.download.debrid"):
             monkeypatch.delitem(sys.modules, name, raising=False)
     sys.modules.pop(
-        "bot.helper.mirror_leech_utils.download_utils.torbox_resolver", None
+        "bot.helper.download.torbox_resolver", None
     )
 
     module = importlib.import_module(
-        "bot.helper.mirror_leech_utils.download_utils.torbox_resolver"
+        "bot.helper.download.torbox_resolver"
     )
     # Never sleep between polls in tests.
     monkeypatch.setattr(module, "_POLL_INTERVAL", 0)

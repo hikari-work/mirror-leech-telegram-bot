@@ -67,32 +67,32 @@ def media_utils(monkeypatch):
             cores="0",
         ),
         "bot.helper": _pkg("bot.helper"),
-        "bot.helper.ext_utils": _pkg(
-            "bot.helper.ext_utils", str(root / "bot" / "helper" / "ext_utils")
+        "bot.helper.util": _pkg(
+            "bot.helper.util", str(root / "bot" / "helper" / "util")
         ),
-        "bot.helper.ext_utils.bot_utils": _stub(
-            "bot.helper.ext_utils.bot_utils",
+        "bot.helper.util.bot_utils": _stub(
+            "bot.helper.util.bot_utils",
             cmd_exec=AsyncMock(return_value=(_PROBE_JSON, "", 0)),
             sync_to_async=AsyncMock(return_value="video/mp4"),
         ),
-        "bot.helper.ext_utils.files_utils": _stub(
-            "bot.helper.ext_utils.files_utils",
+        "bot.helper.util.files_utils": _stub(
+            "bot.helper.util.files_utils",
             get_mime_type=lambda _p: "video/mp4",
             is_archive=lambda _p: False,
             is_archive_split=lambda _p: False,
         ),
-        "bot.helper.ext_utils.shutil_helper": _stub(
-            "bot.helper.ext_utils.shutil_helper", rmtree=AsyncMock()
+        "bot.helper.util.shutil_helper": _stub(
+            "bot.helper.util.shutil_helper", rmtree=AsyncMock()
         ),
-        "bot.helper.ext_utils.status_utils": _stub(
-            "bot.helper.ext_utils.status_utils", time_to_seconds=lambda _v: 0
+        "bot.helper.util.status_utils": _stub(
+            "bot.helper.util.status_utils", time_to_seconds=lambda _v: 0
         ),
     }
     modules["bot"].__path__ = []
     for name, mod in modules.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    target = "bot.helper.ext_utils.media_utils"
+    target = "bot.helper.util.media_utils"
     sys.modules.pop(target, None)
     module = importlib.import_module(target)
     module._PROBE_CACHE.clear()
@@ -101,7 +101,7 @@ def media_utils(monkeypatch):
 
 
 def _cmd_exec(media_utils):
-    return sys.modules["bot.helper.ext_utils.bot_utils"].cmd_exec
+    return sys.modules["bot.helper.util.bot_utils"].cmd_exec
 
 
 @pytest.mark.asyncio

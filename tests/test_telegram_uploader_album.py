@@ -108,49 +108,51 @@ def uploader_module(monkeypatch):
         ),
         "bot.helper": _pkg("bot.helper"),
         # Real path: the uploader delegates its copy fan-out to
-        # ``ext_utils.copy_records``, which imports nothing stubbed. The
-        # individual ``bot.helper.ext_utils.*`` stubs below still win, because
-        # a sys.modules entry beats the path.
-        "bot.helper.ext_utils": _pkg(
-            "bot.helper.ext_utils",
-            str(root / "bot" / "helper" / "ext_utils"),
+        # ``storage.copy_records``, which imports nothing stubbed, so it is
+        # loaded for real from disk. The individual ``bot.helper.util.*``
+        # stubs below still win, because a sys.modules entry beats the path.
+        "bot.helper.util": _pkg("bot.helper.util"),
+        "bot.helper.storage": _pkg(
+            "bot.helper.storage",
+            str(root / "bot" / "helper" / "storage"),
         ),
-        "bot.helper.ext_utils.bot_utils": _stub(
-            "bot.helper.ext_utils.bot_utils", sync_to_async=AsyncMock()
+        "bot.helper.util.bot_utils": _stub(
+            "bot.helper.util.bot_utils", sync_to_async=AsyncMock()
         ),
-        "bot.helper.ext_utils.files_utils": _stub(
-            "bot.helper.ext_utils.files_utils",
+        "bot.helper.util.files_utils": _stub(
+            "bot.helper.util.files_utils",
             is_archive=lambda _p: False,
             get_base_name=lambda p: p,
         ),
-        "bot.helper.ext_utils.media_utils": _stub(
-            "bot.helper.ext_utils.media_utils",
+        "bot.helper.util.media_utils": _stub(
+            "bot.helper.util.media_utils",
             get_media_info=AsyncMock(return_value=(10, "artist", "title")),
             get_document_type=AsyncMock(return_value=(False, False, True)),
             get_video_thumbnail=AsyncMock(return_value=None),
             get_audio_thumbnail=AsyncMock(return_value=None),
             get_multiple_frames_thumbnail=AsyncMock(return_value=None),
         ),
-        "bot.helper.ext_utils.shutil_helper": _stub(
-            "bot.helper.ext_utils.shutil_helper", rmtree=AsyncMock()
+        "bot.helper.util.shutil_helper": _stub(
+            "bot.helper.util.shutil_helper", rmtree=AsyncMock()
         ),
         # Real path, not a stub: the uploader reads a flood's wait through
-        # ``telegram_helper.flood``, which needs nothing but the stubbed
+        # ``telegram.flood``, which needs nothing but the stubbed
         # ``pyrogram.errors`` to import. ``message_utils`` still resolves to the
         # stub below, because sys.modules wins over the path.
-        "bot.helper.telegram_helper": _pkg(
-            "bot.helper.telegram_helper",
-            str(root / "bot" / "helper" / "telegram_helper"),
+        "bot.helper.telegram": _pkg(
+            "bot.helper.telegram",
+            str(root / "bot" / "helper" / "telegram"),
         ),
-        "bot.helper.telegram_helper.message_utils": _stub(
-            "bot.helper.telegram_helper.message_utils",
+        "bot.helper.telegram.message_utils": _stub(
+            "bot.helper.telegram.message_utils",
             chat_of=lambda message: message.chat,
             delete_message=AsyncMock(),
         ),
-        "bot.helper.mirror_leech_utils": _pkg("bot.helper.mirror_leech_utils"),
-        "bot.helper.mirror_leech_utils.upload_utils": _pkg(
-            "bot.helper.mirror_leech_utils.upload_utils",
-            str(root / "bot" / "helper" / "mirror_leech_utils" / "upload_utils"),
+        # Real path: the uploader, flood pacer and media-group batcher all live
+        # in this package and load from disk.
+        "bot.helper.upload": _pkg(
+            "bot.helper.upload",
+            str(root / "bot" / "helper" / "upload"),
         ),
     }
     # bot.__path__ has to allow the stubbed submodules above to resolve.
@@ -158,17 +160,17 @@ def uploader_module(monkeypatch):
     for name, mod in modules.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    pkg = "bot.helper.mirror_leech_utils.upload_utils"
+    pkg = "bot.helper.upload"
     target = f"{pkg}.telegram_uploader"
     # The siblings are popped too: they bind the stubbed FloodWait and
     # InputMedia classes at import time, so a copy left behind would hand the
     # next test file the wrong ones.
-    # ``telegram_helper.flood`` is real but imported under the stubbed errors,
+    # ``telegram.flood`` is real but imported under the stubbed errors,
     # so it is dropped with them.
     siblings = (
         f"{pkg}.flood_pacer",
         f"{pkg}.media_group_batcher",
-        "bot.helper.telegram_helper.flood",
+        "bot.helper.telegram.flood",
     )
     for name in (target, *siblings):
         sys.modules.pop(name, None)
@@ -299,7 +301,7 @@ async def test_photos_and_videos_share_one_album_in_order(uploader_module):
     calls = []
     uploader, _ = _make_uploader(uploader_module, calls)
     types_mod = sys.modules["pyrogram.types"]
-    media_utils = sys.modules["bot.helper.ext_utils.media_utils"]
+    media_utils = sys.modules["bot.helper.util.media_utils"]
 
     await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
     media_utils.get_document_type.return_value = (True, False, False)
@@ -339,7 +341,7 @@ async def test_single_pending_media_stays_a_standalone_message(uploader_module):
 async def test_pending_album_is_flushed_before_a_document(uploader_module):
     calls = []
     uploader, _ = _make_uploader(uploader_module, calls)
-    media_utils = sys.modules["bot.helper.ext_utils.media_utils"]
+    media_utils = sys.modules["bot.helper.util.media_utils"]
 
     await uploader._upload_file("<code>a.jpg</code>", "a.jpg", "/tmp/a.jpg")
     await uploader._upload_file("<code>b.jpg</code>", "b.jpg", "/tmp/b.jpg")

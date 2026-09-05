@@ -3,11 +3,11 @@ from .. import (
     queued_dl,
     queue_dict_lock,
 )
-from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.task_lookup import task_from_command, task_is_yours
-from ..helper.telegram_helper.bot_commands import BotCommands
-from ..helper.telegram_helper.message_utils import send_message
-from ..helper.ext_utils.task_manager import start_dl_from_queued, start_up_from_queued
+from ..helper.util.bot_utils import new_task
+from ..helper.util.task_lookup import task_from_command, task_is_yours
+from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.message_utils import send_message
+from ..helper.util.task_manager import start_dl_from_queued, start_up_from_queued
 
 
 @new_task
