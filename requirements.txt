@@ -15,6 +15,7 @@ lxml
 natsort
 pillow
 psutil
+psycopg[binary]
 pymongo
 kurigram
 python-magic

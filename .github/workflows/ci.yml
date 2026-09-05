@@ -23,6 +23,24 @@ jobs:
   test:
     name: Test (pyrefly + pytest)
     runs-on: ubuntu-latest
+    # The database-backed tests (tests/test_pg_integration.py, marker `db`) skip
+    # themselves unless PG_TEST_URL is set; a throwaway Postgres makes them run.
+    env:
+      PG_TEST_URL: postgresql://mltb:mltb@localhost:55432/mltb_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mltb
+          POSTGRES_PASSWORD: mltb
+          POSTGRES_DB: mltb_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U mltb -d mltb_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

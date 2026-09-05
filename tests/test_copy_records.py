@@ -22,8 +22,8 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from psycopg.types.json import Jsonb
 
-from bot.core.telegram_manager import TgClient
 from bot.helper.ext_utils.copy_records import (
     MAX_RECORD_UNITS,
     MAX_TASK_RECORDS,
@@ -285,7 +285,7 @@ def _make_uploader(uploader_module):
 def _recording(uploader_module, monkeypatch, uploader):
     """Turn recording on the way `_user_settings` would with a database."""
     monkeypatch.setattr(
-        sys.modules["bot.core.config_manager"].Config, "DATABASE_URL", "mongodb://test"
+        sys.modules["bot.core.config_manager"].Config, "DATABASE_URL", "postgresql://test"
     )
     uploader._record_units = True
     return uploader
@@ -476,124 +476,151 @@ async def test_units_are_recorded_in_send_order(uploader_module, monkeypatch):
 
 
 # ── the database round trip ─────────────────────────────────────────
+#
+# What the copy-record methods write and read is pinned here at the SQL
+# boundary: a recorder stands in for the connection and captures every
+# statement, so a test can assert the SQL a method chose (a full-column
+# replace rather than a jsonb merge, an offset prune) and the parameters it
+# sent. The behavioural round trips -- that a saved row keeps its units, that
+# the prune leaves the newest MAX_TASK_RECORDS of one user -- need a real
+# store, so they live in ``test_pg_integration.py`` where PostgreSQL is
+# actually running.
 
 
-class FakeCursor:
-    """The slice of a pymongo cursor the copy-record methods use."""
+class _Recorder:
+    """The hermetic seam: records every query, answers from scripted rows.
 
-    def __init__(self, docs):
-        self._docs = docs
-        self._sort = None
-        self._skip = 0
+    ``*results`` is the queue a fetch answers from, in call order; an empty
+    queue answers exactly as a missing row would -- None from a fetchone, an
+    empty list from a fetchall.
+    """
 
-    def sort(self, key, direction):
-        self._sort = (key, direction)
-        return self
+    def __init__(self, *results):
+        self._results = list(results)
+        self.writes = []  # (sql, params) of every _execute
+        self.reads = []  # (sql, params) of every _fetchone/_fetchall
 
-    def skip(self, count):
-        self._skip = count
-        return self
+    async def execute(self, sql, params):
+        # the real connection adapts a Jsonb param into the column value; for a
+        # faithful trace the recorder unwraps it back to the stored python value
+        self.writes.append((sql, tuple(_plain(p) for p in params)))
 
-    async def to_list(self, length=None):
-        docs = self._docs
-        if self._sort:
-            key, direction = self._sort
-            docs = sorted(docs, key=lambda d: d[key], reverse=direction == -1)
-        return docs[self._skip :]
+    async def fetchone(self, sql, params):
+        self.reads.append((sql, params))
+        return self._results.pop(0) if self._results else None
 
-
-class FakeCopies:
-    """The slice of an AsyncCollection the copy-record methods use."""
-
-    def __init__(self, docs=()):
-        self.docs = {doc["_id"]: dict(doc) for doc in docs}
-
-    def find(self, query, projection=None):
-        hits = [
-            doc
-            for doc in self.docs.values()
-            if all(doc.get(key) == value for key, value in query.items())
-        ]
-        return FakeCursor(hits)
-
-    async def update_one(self, query, update, upsert=False):
-        _id = query["_id"]
-        if _id in self.docs:
-            self.docs[_id].update(update["$set"])
-        elif upsert:
-            self.docs[_id] = {"_id": _id, **update["$set"]}
-
-    async def delete_one(self, query):
-        self.docs.pop(query["_id"], None)
+    async def fetchall(self, sql, params):
+        self.reads.append((sql, params))
+        return self._results.pop(0) if self._results else []
 
 
-def _db(fake):
-    """A DbManager pointed at the fake collection, as if connected."""
+def _plain(value):
+    """A param as the store keeps it: a Jsonb wrapper reduced to its payload."""
+    return value.obj if isinstance(value, Jsonb) else value
+
+
+def _db(*results):
+    """A DbManager wired to a fresh recorder, as if connected."""
     dbm = DbManager()
     dbm._return = False
-    dbm.db = SimpleNamespace(copies={TgClient.ID: fake})
-    return dbm
+    recorder = _Recorder(*results)
+    dbm._execute = recorder.execute
+    dbm._fetchone = recorder.fetchone
+    dbm._fetchall = recorder.fetchall
+    return dbm, recorder
 
 
 async def test_a_saved_record_holds_the_task_and_its_units():
-    fake = FakeCopies()
     units = [
         {"mode": "single", "chat": -1001, "msg": 7, "media": [{"kind": "photo"}]}
     ]
+    dbm, recorder = _db()
+    dbm._prune_copy_records = AsyncMock()
 
-    await _db(fake).save_copy_record(-1001, 7, 42, "a folder", units)
+    await dbm.save_copy_record(-1001, 7, 42, "a folder", units)
 
-    doc = fake.docs["-1001:7"]
-    assert doc["cid"] == -1001
-    assert doc["mid"] == 7
-    assert doc["user"] == 42
-    assert doc["name"] == "a folder"
-    assert isinstance(doc["at"], int)
-    assert doc["units"] == units
+    sql, params = recorder.writes[0]
+    assert "INSERT INTO copy_records" in sql
+    assert "ON CONFLICT (bot_id, id) DO UPDATE SET" in sql
+    # one row keyed "cid:mid" under this bot, like the Mongo document was
+    assert params[1] == "-1001:7"
+    assert params[2] == -1001
+    assert params[3] == 7
+    assert params[4] == 42
+    assert params[5] == "a folder"
+    assert isinstance(params[6], int)
+    assert params[7] == units
 
 
 async def test_saving_again_replaces_the_record_of_the_same_task():
-    fake = FakeCopies()
-    dbm = _db(fake)
+    dbm, recorder = _db()
+    dbm._prune_copy_records = AsyncMock()
 
     await dbm.save_copy_record(-1001, 7, 42, "old", [])
     await dbm.save_copy_record(-1001, 7, 42, "new", [])
 
-    assert list(fake.docs) == ["-1001:7"]
-    assert fake.docs["-1001:7"]["name"] == "new"
+    # two upserts of one key -- a full-column replace, not a jsonb merge, so
+    # nothing of the earlier record survives into the new one
+    assert len(recorder.writes) == 2
+    assert all(params[1] == "-1001:7" for _, params in recorder.writes)
+    assert "|| EXCLUDED" not in recorder.writes[0][0]
+
+
+async def test_saving_also_prunes_that_user():
+    dbm, recorder = _db()  # the prune's select finds nothing stored
+
+    await dbm.save_copy_record(-1001, 7, 42, "a folder", [])
+
+    prune_sql, prune_params = recorder.reads[0]
+    assert "SELECT id FROM copy_records" in prune_sql
+    assert prune_params[1] == 42
+    # empty prune result -> only the upsert was written
+    assert len(recorder.writes) == 1
 
 
 async def test_find_returns_only_the_records_of_that_task_id():
-    fake = FakeCopies(
-        [
-            {"_id": "-1001:7", "mid": 7, "user": 42, "at": 1},
-            {"_id": "-1002:7", "mid": 7, "user": 43, "at": 2},
-            {"_id": "-1001:8", "mid": 8, "user": 42, "at": 3},
-        ]
-    )
+    rows = [
+        {"id": "-1001:7", "cid": -1001, "mid": 7, "user_id": 42,
+         "name": "a", "at": 1, "units": []},
+        {"id": "-1002:7", "cid": -1002, "mid": 7, "user_id": 43,
+         "name": "b", "at": 2, "units": []},
+    ]
+    dbm, recorder = _db(rows)
 
-    found = await _db(fake).find_copy_records(7)
+    found = await dbm.find_copy_records(7)
 
     assert sorted(doc["_id"] for doc in found) == ["-1001:7", "-1002:7"]
+    # rows are shaped like the Mongo documents /copy reads: owner is ``user``
+    assert found[0]["user"] in (42, 43)
+    sql, params = recorder.reads[0]
+    assert "WHERE bot_id = %s AND mid = %s" in sql
+    assert params[1] == 7
 
 
-async def test_prune_leaves_the_newest_records_of_one_user():
-    """Retention is per user: one heavy user never costs another theirs."""
-    docs = [
-        {"_id": f"-1001:{n}", "mid": n, "user": 42, "at": n}
-        for n in range(MAX_TASK_RECORDS + 5)
-    ]
-    docs.append({"_id": "-1009:1", "mid": 1, "user": 43, "at": 0})
-    fake = FakeCopies(docs)
+async def test_prune_issues_an_offset_select_then_deletes_what_it_found():
+    # rows exactly as dict_row returns them from the offset select
+    rows = [{"id": "-1001:0"}, {"id": "-1001:1"}]
+    dbm, recorder = _db(rows)
 
-    await _db(fake)._prune_copy_records(42)
+    await dbm._prune_copy_records(42)
 
-    assert len([d for d in fake.docs.values() if d["user"] == 42]) == MAX_TASK_RECORDS
-    # the five oldest of user 42 are gone, the newest stay, and user 43 -- whose
-    # single record is older than every survivor -- keeps it
-    assert "-1001:0" not in fake.docs
-    assert f"-1001:{MAX_TASK_RECORDS + 4}" in fake.docs
-    assert "-1009:1" in fake.docs
+    select_sql, select_params = recorder.reads[0]
+    assert "ORDER BY at DESC, id" in select_sql
+    assert "OFFSET %s" in select_sql
+    assert select_params[1] == 42
+    assert select_params[2] == MAX_TASK_RECORDS
+    delete_sql, delete_params = recorder.writes[0]
+    assert "DELETE FROM copy_records" in delete_sql
+    assert delete_params[1] == ["-1001:0", "-1001:1"]
+
+
+async def test_prune_with_nothing_stale_writes_nothing():
+    dbm, recorder = _db()  # select finds nothing past the newest MAX_TASK_RECORDS
+
+    await dbm._prune_copy_records(42)
+
+    assert len(recorder.reads) == 1
+    assert recorder.writes == []
 
 
 async def test_a_disconnected_db_does_nothing():

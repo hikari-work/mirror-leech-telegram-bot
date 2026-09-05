@@ -108,18 +108,38 @@ async def migrate_legacy_keys(bot_id):
     $unset on an absent field and a delete of an absent blob are both no-ops, so
     a restart repeats no work and logs nothing.
     """
-    if database.db is None:
+    if not database.is_connected:
         return
 
-    unset = {key: "" for key in _LEGACY_CONFIG_KEYS}
+    # The Mongo `$unset` has no SQL counterpart cleaner than "read, pop the
+    # legacy keys, write back only when something changed". Both are no-ops on
+    # a doc that holds none of them, so a restart repeats no work and logs
+    # nothing -- the property `$unset` gave for free.
     removed = 0
-    for collection in (database.db.settings.config, database.db.settings.deployConfig):
-        result = await collection.update_one({"_id": bot_id}, {"$unset": unset})
-        removed += result.modified_count
+    for reader, writer in (
+        (database.read_config, database.replace_config),
+        (database.read_deploy, database.replace_deploy),
+    ):
+        doc = await reader(bot_id)
+        if doc is None:
+            continue
+        dropped = [key for key in _LEGACY_CONFIG_KEYS if key in doc]
+        if not dropped:
+            continue
+        for key in dropped:
+            doc.pop(key)
+        await writer(doc, bot_id)
+        removed += 1
 
-    users = await database.db.users.update_many(
-        {}, {"$unset": {key: "" for key in _LEGACY_USER_KEYS}}
-    )
+    user_count = 0
+    for user_id, data in await database.read_user_rows():
+        dropped = [key for key in _LEGACY_USER_KEYS if key in data]
+        if not dropped:
+            continue
+        for key in dropped:
+            data.pop(key)
+        await database.save_user_row(user_id, data)
+        user_count += 1
 
     # Matched by name rather than by fetching each one, so a rotated
     # DB_ENCRYPTION_KEY cannot leave an undecryptable blob behind.
@@ -133,10 +153,10 @@ async def migrate_legacy_keys(bot_id):
     for name in stale:
         await database.delete_blob(name, bot_id=bot_id)
 
-    if removed or users.modified_count or stale:
+    if removed or user_count or stale:
         LOGGER.info(
             f"Removed legacy data from Database: {removed} config document(s), "
-            f"{users.modified_count} user record(s), {len(stale)} stored file(s)"
+            f"{user_count} user record(s), {len(stale)} stored file(s)"
         )
 
 
@@ -149,7 +169,7 @@ async def load_settings():
         await rmtree("thumbnails", ignore_errors=True)
 
     await database.connect()
-    if database.db is None:
+    if not database.is_connected:
         await load_user_sessions()
         return
 
@@ -159,9 +179,7 @@ async def load_settings():
     # a dead file never lands on the filesystem again.
     await migrate_legacy_keys(BOT_ID)
 
-    config_dict = await database.db.settings.config.find_one(
-        {"_id": BOT_ID}, {"_id": 0}
-    )
+    config_dict = await database.read_config(BOT_ID)
     if config_dict:
         Config.load_dict(config_dict)
 
@@ -170,31 +188,24 @@ async def load_settings():
         k: v for k, v in all_defaults.items() if k not in (config_dict or {})
     }
     if missing:
-        LOGGER.info(f"Adding {len(missing)} new config key(s) to Database: {', '.join(missing)}")
-        await database.db.settings.config.update_one(
-            {"_id": BOT_ID}, {"$set": missing}, upsert=True
+        LOGGER.info(
+            f"Adding {len(missing)} new config key(s) to Database: {', '.join(missing)}"
         )
+        await database.update_config(missing, BOT_ID)
 
     await restore_private_files(BOT_ID)
 
-    if a2c_options := await database.db.settings.aria2c.find_one(
-        {"_id": BOT_ID}, {"_id": 0}
-    ):
+    if a2c_options := await database.read_aria2(BOT_ID):
         aria2_options.update(a2c_options)
 
-    if qbit_opt := await database.db.settings.qbittorrent.find_one(
-        {"_id": BOT_ID}, {"_id": 0}
-    ):
+    if qbit_opt := await database.read_qbit(BOT_ID):
         qbit_options.update(qbit_opt)
 
     await restore_users(BOT_ID)
 
-    if await database.db.rss[BOT_ID].find_one():
-        rows = database.db.rss[BOT_ID].find({})
-        async for row in rows:
-            user_id = row["_id"]
-            del row["_id"]
-            rss_dict[user_id] = row
+    if rss_rows := await database.read_rss_rows(BOT_ID):
+        for user_id, feeds in rss_rows:
+            rss_dict[user_id] = feeds
         LOGGER.info("Rss data has been imported from Database.")
 
 
@@ -222,9 +233,7 @@ async def restore_users(bot_id):
     thumbnail only calls update_user_doc. Those ids exist solely as blob names,
     so both sources are merged here.
     """
-    rows = {}
-    async for row in database.db.users.find({}):
-        rows[row.pop("_id")] = row
+    rows = {user_id: data for user_id, data in await database.read_user_rows()}
     for name in await database.list_blobs("users/", bot_id=bot_id):
         # users/<uid>/<KEY>
         parts = name.split("/")
@@ -246,24 +255,18 @@ async def restore_users(bot_id):
 
 
 async def save_settings():
-    if database.db is None:
+    if not database.is_connected:
         return
-    config_dict = await database.db.settings.config.find_one(
-        {"_id": TgClient.ID}, {"_id": 0}
-    )
+    config_dict = await database.read_config()
     all_current = Config.get_all()
     missing = {
         k: v for k, v in all_current.items() if k not in (config_dict or {})
     }
     if missing:
-        await database.db.settings.config.update_one(
-            {"_id": TgClient.ID}, {"$set": missing}, upsert=True
-        )
-    if await database.db.settings.aria2c.find_one({"_id": TgClient.ID}) is None:
-        await database.db.settings.aria2c.update_one(
-            {"_id": TgClient.ID}, {"$set": aria2_options}, upsert=True
-        )
-    if await database.db.settings.qbittorrent.find_one({"_id": TgClient.ID}) is None:
+        await database.update_config(missing)
+    if await database.read_aria2() is None:
+        await database.save_aria2_settings()
+    if await database.read_qbit() is None:
         await database.save_qbit_settings()
 
 
