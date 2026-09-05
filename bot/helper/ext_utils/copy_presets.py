@@ -13,6 +13,7 @@ routing outright, so it is refused at the point it is typed.
 """
 
 from re import fullmatch
+from typing import Any
 
 MAX_PRESETS = 5
 """How many presets one user may keep."""
@@ -90,7 +91,7 @@ def _shape_error(entry):
 
     ``chat|thread`` addresses one topic of a forum, a bare value addresses a
     whole chat, and ``pm`` is the requester's own chat -- the three shapes
-    ``_as_dump_target`` already understands.
+    ``as_dump_target`` already understands.
     """
     chat, sep, thread = entry.partition("|")
     if entry.count("|") > 1:
@@ -107,3 +108,25 @@ def _shape_error(entry):
             " @username, or <code>pm</code>."
         )
     return ""
+
+
+def as_chat_id(value: str) -> int | str:
+    """A chat or thread id as an int when it looks numeric, else untouched."""
+    return int(value) if value.lstrip("-").isdigit() else value
+
+
+def as_dump_target(entry: Any, user_id: int) -> tuple[Any, int | str | None]:
+    """One stored destination as a ``(chat_id, thread_id)`` pair.
+
+    ``pm`` is whose chat it means that decides: the id is a parameter because
+    the reader is not always the owner -- ``/copy`` resolves a preset of one
+    user on behalf of another.
+    """
+    if not isinstance(entry, str):
+        return entry, None
+    if "|" in entry:
+        chat, thread = entry.split("|", 1)
+        return as_chat_id(chat), as_chat_id(thread)
+    if entry.lower() == "pm":
+        return user_id, None
+    return as_chat_id(entry), None

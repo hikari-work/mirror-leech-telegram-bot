@@ -22,10 +22,12 @@ from types import SimpleNamespace
 import pytest
 
 import bot.helper.task_config.settings_resolver as sr
+import bot.helper.telegram_helper.dest_chat as dc
 from bot.helper.ext_utils.copy_presets import (
     MAX_DESTS,
     MAX_PRESETS,
     additions_to,
+    as_dump_target,
     parse_destinations,
     presets_of,
     valid_name,
@@ -144,6 +146,30 @@ def test_more_destinations_than_fit_are_refused_whole():
     assert "room for 1" in error
 
 
+# ── a stored destination becomes a target ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        pytest.param(str(DEST), (DEST, None), id="chat_id"),
+        pytest.param(f"{DEST}|12", (DEST, 12), id="chat_and_thread"),
+        pytest.param("@named", ("@named", None), id="username"),
+        pytest.param("@named|8", ("@named", 8), id="username_and_thread"),
+        pytest.param(DEST, (DEST, None), id="already_an_int"),
+    ],
+)
+def test_a_destination_resolves_to_a_chat_and_thread_pair(entry, expected):
+    assert as_dump_target(entry, USER) == expected
+
+
+def test_pm_resolves_to_the_chat_of_whoever_asked():
+    """``pm`` has no id of its own; the user id is a parameter because the
+    reader of a preset is not always its owner."""
+    assert as_dump_target("pm", USER) == (USER, None)
+    assert as_dump_target("pm", 99) == (99, None)
+
+
 # ── fakes for the resolver half ─────────────────────────────────────
 
 
@@ -204,11 +230,13 @@ def dest(monkeypatch):
         return answer
 
     state = {"chat": [], "member": [], "reach": [], "calls": calls}
-    monkeypatch.setattr(sr, "get_dest_chat", get_dest_chat)
-    monkeypatch.setattr(sr, "get_dest_member", get_dest_member)
-    monkeypatch.setattr(sr, "can_reach_dest", can_reach_dest)
+    # The lookups the copy-target check makes live in ``dest_chat`` now; the
+    # resolver only calls into it, so that is the module to script.
+    monkeypatch.setattr(dc, "get_dest_chat", get_dest_chat)
+    monkeypatch.setattr(dc, "get_dest_member", get_dest_member)
+    monkeypatch.setattr(dc, "can_reach_dest", can_reach_dest)
     monkeypatch.setattr(
-        sr.TgClient, "bot", SimpleNamespace(me=SimpleNamespace(id=7)), raising=False
+        dc.TgClient, "bot", SimpleNamespace(me=SimpleNamespace(id=7)), raising=False
     )
     return state
 

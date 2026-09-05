@@ -31,6 +31,7 @@ from .... import intervals
 from ....core.config_manager import Config
 from ....core.telegram_manager import TgClient, user_session
 from ...ext_utils.bot_utils import sync_to_async
+from ...ext_utils.copy_records import fan_out
 from ...ext_utils.files_utils import get_base_name, is_archive
 from ...ext_utils.media_utils import (
     get_audio_thumbnail,
@@ -330,35 +331,14 @@ class TelegramUploader:
             self._base_msg = None
 
     async def _copy_to_clone_dumps(self, copy, from_chat_id, message_id):
-        """Copy one album, or one message, to every clone dump chat.
-
-        A topic is addressed with ``message_thread_id`` rather than by replying
-        into it: the reply only lands in the right topic by inheriting it from
-        the message it answers, which is one deletion away from being wrong.
-
-        One unreachable dump chat is not the others' problem, so a failure --
-        including a send that never reached telegram -- moves on to the next.
-        """
-        for (ch, thread_id), ch_data in list(self._listener.clone_dump_chats.items()):
-            try:
-                res = await self._pacer.guard(
-                    copy,
-                    chat_id=ch,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
-                    disable_notification=True,
-                    message_thread_id=thread_id,
-                    reply_to_message_id=ch_data["last_sent_msg"],
-                )
-                if res is None:
-                    continue
-                # An album answers with every message it became, a single copy
-                # with the one; the chain hangs off the last of them either way.
-                ch_data["last_sent_msg"] = (
-                    res[-1].id if isinstance(res, list) else res.id
-                )
-            except Exception as e:
-                LOGGER.error(f"Can't copy message to clone dump chat: {ch}. Error: {e}")
+        """Copy one album, or one message, to every clone dump chat."""
+        await fan_out(
+            self._pacer,
+            self._listener.clone_dump_chats,
+            copy,
+            from_chat_id,
+            message_id,
+        )
 
     async def _copy_uncopied_to_clone_dumps(self):
         """Copy whatever no album carried, one message at a time.

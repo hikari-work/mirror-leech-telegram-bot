@@ -95,6 +95,9 @@ class TaskConfigHost:
     # A chat id once ``_normalize_up_dest`` has run, the text the user typed
     # ("pm", "-100…|12", "b:-100…") before that.
     up_dest: str | int
+    # The topic half of a ``chat|thread`` destination: an int once
+    # ``_normalize_up_dest`` has run, None for a chat without topics.
+    chat_thread_id: int | str | None
     # Same shape shift: the ``old/new | old/new`` spec as typed, then the parsed
     # pairs ``_resolve_name_substitutions`` turns it into, which is what
     # ``perform_substitution`` wants.

@@ -106,7 +106,12 @@ def uploader_module(monkeypatch):
             user_session=lambda: tg_client.user,
         ),
         "bot.helper": _pkg("bot.helper"),
-        "bot.helper.ext_utils": _pkg("bot.helper.ext_utils"),
+        # Real path: the uploader delegates its copy fan-out to
+        # ``ext_utils.copy_records``, which imports nothing stubbed.
+        "bot.helper.ext_utils": _pkg(
+            "bot.helper.ext_utils",
+            str(root / "bot" / "helper" / "ext_utils"),
+        ),
         "bot.helper.ext_utils.bot_utils": _stub(
             "bot.helper.ext_utils.bot_utils", sync_to_async=AsyncMock()
         ),

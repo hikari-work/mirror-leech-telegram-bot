@@ -39,6 +39,7 @@ from pyrogram.errors import FloodPremiumWait, FloodWait
 from pyrogram.types import Chat, ChatMember
 
 from ... import LOGGER
+from ...core.telegram_manager import TgClient, own_account
 
 CHAT_TTL = 300
 """Seconds an answer about a chat is reused before it is looked up again.
@@ -239,3 +240,83 @@ async def can_reach_dest(client, chat_id) -> bool:
         f"access to chat {chat_id}",
         on_definite=False,
     )
+
+
+# A destination the bot can post many files into and clean up after; anything
+# else (a PM, most of all) is handled as a plain chat.
+GROUP_CHAT_TYPES = ("SUPERGROUP", "CHANNEL", "GROUP", "FORUM")
+
+
+def is_group_chat(chat: Chat) -> bool:
+    """Whether a destination is a group or channel rather than a plain chat.
+
+    ``Chat.type`` is optional in pyrogram, and an answer without one is no
+    evidence that the destination is a group, so it takes the same path a PM
+    does.
+    """
+    return chat.type is not None and chat.type.name in GROUP_CHAT_TYPES
+
+
+def can_manage_and_delete(member: ChatMember) -> bool:
+    """Whether an account can both manage the chat and delete messages in it."""
+    return member.privileges.can_manage_chat and member.privileges.can_delete_messages
+
+
+async def verify_copy_target(entry: str, chat_id: int | str) -> None:
+    """Stop the task unless the bot can post copies into *chat_id*.
+
+    Checked as the bot, whichever session is uploading: the copies are sent
+    with ``TgClient.bot`` regardless, so its rights are the ones that decide
+    whether they will arrive.
+
+    Unlike the upload destination there is no degraded mode to fall back to
+    -- a copy target that cannot be verified has no second session to try --
+    so ``ChatLookupError`` stops the task too, and says that it was the
+    check that failed rather than the chat that is missing.
+    """
+    try:
+        chat = await get_dest_chat(TgClient.bot, chat_id)
+    except ChatLookupError as e:
+        raise ValueError(
+            f"Can't check copy destination {entry} right now: {e}."
+            " Try again in a moment."
+        ) from e
+    if chat is None:
+        raise ValueError(
+            f"Copy destination {entry} was not found. Add the bot to it first."
+        )
+    if not is_group_chat(chat):
+        await verify_copy_target_reachable(entry, chat_id)
+        return
+    if not chat.is_admin:
+        raise ValueError(f"Bot is not admin in copy destination {entry}!")
+    try:
+        member = await get_dest_member(
+            TgClient.bot, chat.id, own_account(TgClient.bot).id
+        )
+    except ChatLookupError as e:
+        raise ValueError(
+            f"Can't check the bot's privileges in copy destination {entry}:"
+            f" {e}. Try again in a moment."
+        ) from e
+    if not can_manage_and_delete(member):
+        raise ValueError(
+            f"Not enough privileges in copy destination {entry}! Enable"
+            " manage chat and delete messages for this bot."
+        )
+
+
+async def verify_copy_target_reachable(entry: str, chat_id: int | str) -> None:
+    """Check a non-group copy destination has actually started the bot."""
+    try:
+        reachable = await can_reach_dest(TgClient.bot, chat_id)
+    except ChatLookupError as e:
+        raise ValueError(
+            f"Can't check copy destination {entry} right now: {e}."
+            " Try again in a moment."
+        ) from e
+    if not reachable:
+        raise ValueError(
+            f"Copy destination {entry} has not started the bot. Start it"
+            " and try again."
+        )

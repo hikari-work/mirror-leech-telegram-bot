@@ -11,21 +11,20 @@ from ... import (
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient, own_account
 from ..ext_utils.bot_utils import get_size_bytes
-from ..ext_utils.copy_presets import presets_of
+from ..ext_utils.copy_presets import as_chat_id, as_dump_target, presets_of
 from ..ext_utils.links_utils import is_telegram_link
 from ..ext_utils.media_utils import create_thumb
 from ..telegram_helper.dest_chat import (
     ChatLookupError,
+    can_manage_and_delete,
     can_reach_dest,
     get_dest_chat,
     get_dest_member,
+    is_group_chat,
+    verify_copy_target,
 )
 from ..telegram_helper.message_utils import get_tg_link_message
 from ._host import TaskConfigHost
-
-# A destination the bot can post many files into and clean up after; anything
-# else (a PM, most of all) is handled as a plain chat.
-GROUP_CHAT_TYPES = ("SUPERGROUP", "CHANNEL", "GROUP", "FORUM")
 
 # Telegram's per-file ceiling for a bot token; a premium user session raises it.
 BOT_MAX_SPLIT_SIZE = 2097152000
@@ -46,26 +45,6 @@ def _setting_for(user_dict, key, global_value, when_set=""):
 def _is_enabled(user_dict, key, global_value) -> bool:
     """Whether a boolean setting is on, preferring the user's own choice."""
     return bool(user_dict.get(key) or (global_value and key not in user_dict))
-
-
-def _is_group_chat(chat) -> bool:
-    """Whether a destination is a group or channel rather than a plain chat.
-
-    ``Chat.type`` is optional in pyrogram, and an answer without one is no
-    evidence that the destination is a group, so it takes the same path a PM
-    does.
-    """
-    return chat.type is not None and chat.type.name in GROUP_CHAT_TYPES
-
-
-def _as_chat_id(value):
-    """A chat or thread id as an int when it looks numeric, else untouched."""
-    return int(value) if value.lstrip("-").isdigit() else value
-
-
-def _can_manage_and_delete(member) -> bool:
-    """Whether an account can both manage the chat and delete messages in it."""
-    return member.privileges.can_manage_chat and member.privileges.can_delete_messages
 
 
 def _as_dump_entries(chats):
@@ -249,8 +228,8 @@ class SettingsResolverMixin(TaskConfigHost):
         self.up_dest = self._apply_transmission_prefix(self.up_dest)
         if "|" in self.up_dest:
             chat, thread = self.up_dest.split("|", 1)
-            self.up_dest = _as_chat_id(chat)
-            self.chat_thread_id = _as_chat_id(thread)
+            self.up_dest = as_chat_id(chat)
+            self.chat_thread_id = as_chat_id(thread)
         elif self.up_dest.lstrip("-").isdigit():
             self.up_dest = int(self.up_dest)
         elif self.up_dest.lower() == "pm":
@@ -295,7 +274,7 @@ class SettingsResolverMixin(TaskConfigHost):
                 "Account of user session can't find the the destination chat!"
             )
             self._downgrade_to_bot_session()
-        elif not _is_group_chat(chat):
+        elif not is_group_chat(chat):
             self._downgrade_to_bot_session()
         elif not chat.is_admin:
             LOGGER.warning(
@@ -322,7 +301,7 @@ class SettingsResolverMixin(TaskConfigHost):
             )
             self._downgrade_to_bot_session()
             return
-        if not _can_manage_and_delete(member):
+        if not can_manage_and_delete(member):
             self._downgrade_to_bot_session()
             LOGGER.warning(
                 "Enable manage chat and delete messages to account of the user"
@@ -343,7 +322,7 @@ class SettingsResolverMixin(TaskConfigHost):
             if not self.user_transmission:
                 raise ValueError("Chat not found!")
             self.hybrid_leech = False
-        elif _is_group_chat(chat):
+        elif is_group_chat(chat):
             await self._verify_bot_privileges(chat)
         else:
             await self._verify_bot_can_reach_dest()
@@ -359,7 +338,7 @@ class SettingsResolverMixin(TaskConfigHost):
             )
         except ChatLookupError as e:
             self._dest_unverified("the bot's privileges", e)
-        if member is not None and not _can_manage_and_delete(member):
+        if member is not None and not can_manage_and_delete(member):
             if not self.user_transmission:
                 raise ValueError(
                     "You don't have enough privileges in this chat! Enable"
@@ -416,22 +395,9 @@ class SettingsResolverMixin(TaskConfigHost):
         if not self.clone_dump_chats:
             return
         self.clone_dump_chats = {
-            (chat_id, thread_id): {"last_sent_msg": None}
-            for chat_id, thread_id in map(
-                self._as_dump_target, _as_dump_entries(self.clone_dump_chats)
-            )
+            as_dump_target(entry, self.user_id): {"last_sent_msg": None}
+            for entry in _as_dump_entries(self.clone_dump_chats)
         }
-
-    def _as_dump_target(self, entry):
-        """One configured dump chat as a ``(chat_id, thread_id)`` pair."""
-        if not isinstance(entry, str):
-            return entry, None
-        if "|" in entry:
-            chat, thread = entry.split("|", 1)
-            return _as_chat_id(chat), _as_chat_id(thread)
-        if entry.lower() == "pm":
-            return self.user_id, None
-        return _as_chat_id(entry), None
 
     # ── copy presets ────────────────────────────────────────────────────
 
@@ -463,65 +429,7 @@ class SettingsResolverMixin(TaskConfigHost):
             )
         targets = {}
         for entry in entries:
-            chat_id, thread_id = self._as_dump_target(entry)
-            await self._verify_copy_target(entry, chat_id)
+            chat_id, thread_id = as_dump_target(entry, self.user_id)
+            await verify_copy_target(entry, chat_id)
             targets[(chat_id, thread_id)] = {"last_sent_msg": None}
         self.clone_dump_chats = targets
-
-    async def _verify_copy_target(self, entry, chat_id) -> None:
-        """Stop the task unless the bot can post copies into *chat_id*.
-
-        Checked as the bot, whichever session is uploading: the copies are sent
-        with ``TgClient.bot`` regardless, so its rights are the ones that decide
-        whether they will arrive.
-
-        Unlike the upload destination there is no degraded mode to fall back to
-        -- a copy target that cannot be verified has no second session to try --
-        so ``ChatLookupError`` stops the task too, and says that it was the
-        check that failed rather than the chat that is missing.
-        """
-        try:
-            chat = await get_dest_chat(TgClient.bot, chat_id)
-        except ChatLookupError as e:
-            raise ValueError(
-                f"Can't check copy destination {entry} right now: {e}."
-                " Try again in a moment."
-            ) from e
-        if chat is None:
-            raise ValueError(
-                f"Copy destination {entry} was not found. Add the bot to it first."
-            )
-        if not _is_group_chat(chat):
-            await self._verify_copy_target_reachable(entry, chat_id)
-            return
-        if not chat.is_admin:
-            raise ValueError(f"Bot is not admin in copy destination {entry}!")
-        try:
-            member = await get_dest_member(
-                TgClient.bot, chat.id, own_account(TgClient.bot).id
-            )
-        except ChatLookupError as e:
-            raise ValueError(
-                f"Can't check the bot's privileges in copy destination {entry}:"
-                f" {e}. Try again in a moment."
-            ) from e
-        if not _can_manage_and_delete(member):
-            raise ValueError(
-                f"Not enough privileges in copy destination {entry}! Enable"
-                " manage chat and delete messages for this bot."
-            )
-
-    async def _verify_copy_target_reachable(self, entry, chat_id) -> None:
-        """Check a non-group copy destination has actually started the bot."""
-        try:
-            reachable = await can_reach_dest(TgClient.bot, chat_id)
-        except ChatLookupError as e:
-            raise ValueError(
-                f"Can't check copy destination {entry} right now: {e}."
-                " Try again in a moment."
-            ) from e
-        if not reachable:
-            raise ValueError(
-                f"Copy destination {entry} has not started the bot. Start it"
-                " and try again."
-            )
