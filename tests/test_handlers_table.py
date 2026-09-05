@@ -71,6 +71,7 @@ EXPECTED_COMMANDS = [
     ("send_user_settings", ["us", "usetting"], "auth"),
     ("user_login", ["login"], "auth"),
     ("user_logout", ["logout"], "auth"),
+    ("copy_task", ["copy"], "auth"),
     ("ytdl_leech", ["yl", "ytdlleech"], "auth"),
 ]
 
@@ -86,6 +87,7 @@ EXPECTED_CALLBACKS = [
     ("status_pages", "^status", None),
     ("torrent_search_update", "^torser", None),
     ("edit_user_settings", "^userset", None),
+    ("copy_choice", "^copyt", None),
 ]
 
 # Runs inside the subprocess. Filter trees are only ever a match filter or

@@ -15,7 +15,8 @@ with a ``send_media_group`` of ``InputMedia`` built from the ``file_id`` list
 as the fallback. The ``file_id`` fallback is second choice on purpose: the
 ``file_reference`` inside a ``file_id`` expires within hours to days, so the
 coordinates of the original message are the durable half and the ``file_id``
-only ever buys the record a little more time.
+only ever buys the record a little more time. ``copy_unit`` is the replay
+itself: the same fan-out, pointed at a record instead of a running task.
 """
 
 from __future__ import annotations
@@ -142,3 +143,107 @@ def record(units: list[dict[str, Any]], unit: dict[str, Any] | None) -> None:
         )
         return
     units.append(unit)
+
+
+async def copy_unit(
+    pacer: FloodPacer,
+    targets: dict[tuple[Any, Any], dict[str, Any]],
+    unit: dict[str, Any],
+    client: Any,
+) -> dict[tuple[Any, Any], str]:
+    """Send one recorded *unit* to every *targets* chat.
+
+    Returns one error string per chat the unit did not reach, keyed like
+    *targets*; a chat missing from the answer got the unit. ``fan_out`` paces
+    the send, chains the replies and keeps one chat's failure from stopping
+    the others; the callable handed to it adds the two things /copy needs on
+    top -- the ``file_id`` fallback for a message telegram no longer has, and
+    a note of which chat ended up with nothing.
+
+    *client* is a parameter for the same reason ``copy`` is one for
+    ``fan_out``: keeping this module free of bot imports is what lets the
+    stub-based tests load it from the real path.
+    """
+    errors: dict[tuple[Any, Any], str] = {}
+
+    async def copy(**kwargs: Any) -> Any:
+        # A FloodWait is "slow down", not "the message is gone" -- handing it
+        # to the fallback would send duplicates once the wait clears, so it
+        # travels on to the pacer instead.
+        from pyrogram.errors import FloodPremiumWait, FloodWait
+
+        chat_id = kwargs["chat_id"]
+        key = (chat_id, kwargs["message_thread_id"])
+        try:
+            return await _from_coordinates(client, unit, kwargs)
+        except (FloodWait, FloodPremiumWait):
+            raise
+        except Exception as e:
+            try:
+                return await _from_file_ids(client, unit, kwargs)
+            except (FloodWait, FloodPremiumWait):
+                raise
+            except Exception as fallback:
+                errors[key] = f"{e} / {fallback}"
+                return None
+
+    await fan_out(pacer, targets, copy, unit["chat"], unit["msg"])
+    return errors
+
+
+async def _from_coordinates(client: Any, unit: dict[str, Any], kwargs: Any) -> Any:
+    """Copy the unit from the message it still is -- the primary path."""
+    if unit["mode"] == "group":
+        return await client.copy_media_group(**kwargs)
+    return await client.copy_message(**kwargs)
+
+
+async def _from_file_ids(client: Any, unit: dict[str, Any], kwargs: Any) -> Any:
+    """Send the unit from its recorded ``file_id`` list -- the fallback.
+
+    The ids age out within hours to days, which is why this is the second
+    choice and not the first; an expired one raises, and the caller reports
+    both errors rather than sending nothing silently.
+    """
+    # The senders take where-to-send arguments, not the where-it-came-from
+    # ones the coordinate path needed, so the kwargs are rebuilt here.
+    where = {
+        key: value
+        for key, value in kwargs.items()
+        if key
+        in (
+            "chat_id",
+            "disable_notification",
+            "message_thread_id",
+            "reply_to_message_id",
+        )
+    }
+    if unit["mode"] == "group":
+        return await client.send_media_group(
+            media=[_input_media(entry) for entry in unit["media"]], **where
+        )
+    entry = unit["media"][0]
+    send = getattr(client, f"send_{entry['kind']}")
+    return await send(
+        **{entry["kind"]: entry["file_id"], "caption": entry["caption"], **where}
+    )
+
+
+def _input_media(entry: dict[str, Any]) -> Any:
+    """One fallback entry as the ``InputMedia`` a media-group send wants."""
+    # Imported here rather than at the top for the same reason as everywhere
+    # else in this module: the stub-based tests replace pyrogram wholesale.
+    from pyrogram.types import (
+        InputMediaAudio,
+        InputMediaDocument,
+        InputMediaPhoto,
+        InputMediaVideo,
+    )
+
+    kinds = {
+        "document": InputMediaDocument,
+        "video": InputMediaVideo,
+        "audio": InputMediaAudio,
+        "photo": InputMediaPhoto,
+    }
+    return kinds[entry["kind"]](media=entry["file_id"], caption=entry["caption"])

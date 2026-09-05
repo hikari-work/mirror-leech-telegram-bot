@@ -180,7 +180,8 @@ Copies every album this task uploads to the chats saved under that preset name. 
 Notes:
 1. The preset takes the place of your Clone Dump Chats for this task, it is not added to them.
 2. Media Group is forced on for the task, because what gets copied is the album. Any file no album carried is copied on its own at the end.
-3. The bot has to be able to post to every chat in the preset, or the task is refused before it downloads anything and told you which chat failed."""
+3. The bot has to be able to post to every chat in the preset, or the task is refused before it downloads anything and told you which chat failed.
+4. A task that already finished can still be sent to a preset afterwards: /copy its Task ID."""
 
 leech_as = """<b>Leech as</b>: -doc -med
 /cmd link -doc (Leech as document)
@@ -369,6 +370,7 @@ NOTE: Try each command without any argument to see more detalis.
 /{BotCommands.UserSetCommand[0]} or /{BotCommands.UserSetCommand[1]} [query]: Users settings.
 /{BotCommands.LoginCommand}: Login with your own telegram account to download restricted/private telegram links (PM only).
 /{BotCommands.LogoutCommand}: Remove and revoke your saved personal session.
+/{BotCommands.CopyCommand} [task_id]: Copy a finished task's uploads to one of your copy presets, without downloading again.
 /{BotCommands.BotSetCommand[0]} or /{BotCommands.BotSetCommand[1]} [query]: Bot settings.
 /{BotCommands.SelectCommand}: Select files from torrents by gid or reply.
 /{BotCommands.CancelTaskCommand[0]} or /{BotCommands.CancelTaskCommand[1]} [gid]: Cancel task by gid or reply.

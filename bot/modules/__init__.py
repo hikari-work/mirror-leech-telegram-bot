@@ -2,6 +2,7 @@ from .bot_settings import send_bot_settings, edit_bot_settings
 from .bypass import bypass_scrape_cmd
 from .cancel_task import cancel, cancel_multi, cancel_all_buttons, cancel_all_update
 from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo
+from .copy import copy_task, copy_choice
 from .exec import aioexecute, execute, clear
 from .file_selector import select, confirm_selection
 from .force_start import remove_from_queue
@@ -34,6 +35,8 @@ __all__ = [
     "add_sudo",
     "remove_sudo",
     "bypass_scrape_cmd",
+    "copy_task",
+    "copy_choice",
     "aioexecute",
     "execute",
     "clear",

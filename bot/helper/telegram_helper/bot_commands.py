@@ -33,3 +33,4 @@ class BotCommands:
     BypassCommand = [f"bypass{i}", f"bp{i}"]
     LoginCommand = f"login{i}"
     LogoutCommand = f"logout{i}"
+    CopyCommand = f"copy{i}"
