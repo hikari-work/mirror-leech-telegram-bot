@@ -7,16 +7,13 @@ from logging import (
     basicConfig,
     error as log_error,
     info as log_info,
-    getLogger,
-    ERROR,
 )
 from os import path, remove, getenv
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
 from subprocess import run as srun
 from typing import Dict, Any
 
-getLogger("pymongo").setLevel(ERROR)
+from psycopg import connect as pg_connect
+from psycopg.rows import dict_row
 
 if path.exists("log.txt"):
     with open("log.txt", "r+") as f:
@@ -66,12 +63,19 @@ DATABASE_NAME = config_file.get("DATABASE_NAME", "mltb")
 
 if DATABASE_URL := config_file.get("DATABASE_URL", "").strip():
     try:
-        conn = MongoClient(DATABASE_URL, server_api=ServerApi("1"))
-        db = conn[DATABASE_NAME]
-        config_dict = db.settings.config.find_one({"_id": BOT_ID})
-        if config_dict is not None:
-            config_file["UPSTREAM_REPO"] = config_dict["UPSTREAM_REPO"]
-            config_file["UPSTREAM_BRANCH"] = config_dict["UPSTREAM_BRANCH"]
+        if DATABASE_NAME:
+            conn = pg_connect(DATABASE_URL, dbname=DATABASE_NAME, autocommit=True)
+        else:
+            conn = pg_connect(DATABASE_URL, autocommit=True)
+        conn.row_factory = dict_row
+        row = conn.execute(
+            "SELECT data FROM settings_config WHERE bot_id = %s", (BOT_ID,)
+        ).fetchone()
+        stored = row["data"] if row is not None else None
+        if stored:
+            for key in ("UPSTREAM_REPO", "UPSTREAM_BRANCH"):
+                if key in stored:
+                    config_file[key] = stored[key]
         conn.close()
     except Exception as e:
         log_error(f"Database ERROR: {e}")
