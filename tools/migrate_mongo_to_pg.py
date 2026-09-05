@@ -148,25 +148,56 @@ def _migrate_tasks(pg: Any, mongo: Any, bot: str) -> int:
 def _migrate_copies(pg: Any, mongo: Any, bot: str) -> int:
     count = 0
     for doc in mongo[f"copies.{bot}"].find():
-        pg.execute(
-            "INSERT INTO copy_records "
-            "(bot_id, id, cid, mid, user_id, name, at, units) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (bot_id, id) DO UPDATE SET "
-            "cid = EXCLUDED.cid, mid = EXCLUDED.mid, "
-            "user_id = EXCLUDED.user_id, name = EXCLUDED.name, "
-            "at = EXCLUDED.at, units = EXCLUDED.units",
-            (
-                bot,
-                doc["_id"],
-                doc.get("cid"),
-                doc.get("mid"),
-                doc.get("user"),
-                doc.get("name"),
-                doc.get("at"),
-                Jsonb(doc.get("units", [])),
-            ),
-        )
+        cid, mid = doc.get("cid"), doc.get("mid")
+        if cid is None or mid is None:
+            continue
+        # Each task is a parent row plus its unit/media children, rewritten as
+        # the bot stores them today. One transaction keeps the trio atomic and
+        # the delete-before-insert makes a re-run converge instead of duping.
+        with pg.transaction():
+            pg.execute(
+                "INSERT INTO copy_tasks (bot_id, cid, mid, user_id, name, at) "
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (bot_id, cid, mid) DO UPDATE SET "
+                "user_id = EXCLUDED.user_id, name = EXCLUDED.name, "
+                "at = EXCLUDED.at",
+                (bot, cid, mid, doc.get("user"), doc.get("name"), doc.get("at")),
+            )
+            pg.execute(
+                "DELETE FROM copy_units WHERE bot_id = %s AND cid = %s AND mid = %s",
+                (bot, cid, mid),
+            )
+            for seq, unit in enumerate(doc.get("units") or []):
+                pg.execute(
+                    "INSERT INTO copy_units "
+                    "(bot_id, cid, mid, seq, mode, src_chat, src_msg) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        bot,
+                        cid,
+                        mid,
+                        seq,
+                        unit.get("mode"),
+                        unit.get("chat"),
+                        unit.get("msg"),
+                    ),
+                )
+                for idx, entry in enumerate(unit.get("media") or []):
+                    pg.execute(
+                        "INSERT INTO copy_unit_media "
+                        "(bot_id, cid, mid, seq, idx, kind, file_id, caption) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            bot,
+                            cid,
+                            mid,
+                            seq,
+                            idx,
+                            entry.get("kind"),
+                            entry.get("file_id"),
+                            entry.get("caption"),
+                        ),
+                    )
         count += 1
     return count
 

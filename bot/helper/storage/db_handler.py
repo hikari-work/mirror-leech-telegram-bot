@@ -7,6 +7,13 @@ write whole row" pattern maps one document to one ``jsonb`` row, so the schema
 here is a handful of tables with a ``data jsonb`` column rather than a
 field-per-column normalisation.
 
+Two exceptions are rows, because they are the fixed-shape nested lists the bot
+keeps: the ``units`` of a finished copy task (``copy_tasks`` plus one
+``copy_units`` row per unit and one ``copy_unit_media`` row per file in it) and
+the per-user copy presets (``copy_presets`` plus one ``copy_preset_dests`` row
+per destination). Everything else -- maps of scalars, or documents whose keys
+are decided at runtime -- stays a single ``jsonb`` column.
+
 One database may host several bots, exactly as the Mongo layout it replaces
 allowed: the per-bot collections ``rss.<bot>``/``tasks.<bot>``/``copies.<bot>``
 and the ``_id``-keyed ``settings.*`` documents become a ``bot_id`` column, and
@@ -29,10 +36,11 @@ from __future__ import annotations
 
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from importlib import import_module
 from time import time
 from typing import Any, cast
-from collections.abc import Sequence
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -103,17 +111,47 @@ _SCHEMA = (
         PRIMARY KEY (bot_id, link)
     )
     """,
+    # One finished task is one row here; its units and their media are child
+    # rows (below) that a task delete cascades away. ``cid``/``mid`` are the
+    # coordinates of the task's result message, unique per chat.
     """
-    CREATE TABLE IF NOT EXISTS copy_records (
+    CREATE TABLE IF NOT EXISTS copy_tasks (
         bot_id  text   NOT NULL,
-        id      text   NOT NULL,
         cid     bigint NOT NULL,
         mid     bigint NOT NULL,
         user_id bigint NOT NULL,
         name    text   NOT NULL,
         at      bigint NOT NULL,
-        units   jsonb  NOT NULL,
-        PRIMARY KEY (bot_id, id)
+        PRIMARY KEY (bot_id, cid, mid)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS copy_units (
+        bot_id   text   NOT NULL,
+        cid      bigint NOT NULL,
+        mid      bigint NOT NULL,
+        seq      integer NOT NULL,
+        mode     text   NOT NULL,
+        src_chat bigint,
+        src_msg  bigint,
+        PRIMARY KEY (bot_id, cid, mid, seq),
+        FOREIGN KEY (bot_id, cid, mid) REFERENCES copy_tasks
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS copy_unit_media (
+        bot_id  text   NOT NULL,
+        cid     bigint NOT NULL,
+        mid     bigint NOT NULL,
+        seq     integer NOT NULL,
+        idx     integer NOT NULL,
+        kind    text,
+        file_id text,
+        caption text,
+        PRIMARY KEY (bot_id, cid, mid, seq, idx),
+        FOREIGN KEY (bot_id, cid, mid, seq) REFERENCES copy_units
+            ON DELETE CASCADE
     )
     """,
     # A name holds the newest revision only; save_blob upserts in place.
@@ -216,6 +254,23 @@ class DbManager:
             raise RuntimeError("DbManager is not connected")
         cursor = await conn.execute(cast(Any, sql), params)
         return cast("list[dict]", await cursor.fetchall())
+
+    @asynccontextmanager
+    async def _txn(self) -> AsyncIterator[None]:
+        """Yield inside one transaction -- or straight through when unconnected.
+
+        The connection autocommits each statement, so the several writes of one
+        save (a parent upsert plus child deletes and inserts) are wrapped in an
+        explicit transaction to land atomically. The hermetic tests replace the
+        executors and leave ``_conn`` None; for them there is no connection to
+        wrap, so this yields directly and every statement is just recorded.
+        """
+        conn = self._conn
+        if conn is None:
+            yield
+            return
+        async with conn.transaction():
+            yield
 
     # ---------------------------------------------------------------- blobs
 
@@ -581,52 +636,121 @@ class DbManager:
         """Store what one task uploaded, replacing any record of the same id."""
         if self._return:
             return
-        key = f"{cid}:{mid}"
-        await self._execute(
-            """
-            INSERT INTO copy_records
-                (bot_id, id, cid, mid, user_id, name, at, units)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (bot_id, id) DO UPDATE SET
-                cid = EXCLUDED.cid,
-                mid = EXCLUDED.mid,
-                user_id = EXCLUDED.user_id,
-                name = EXCLUDED.name,
-                at = EXCLUDED.at,
-                units = EXCLUDED.units
-            """,
-            (TgClient.ID, key, cid, mid, user_id, name, int(time()), _jsonb(units)),
-        )
-        await self._prune_copy_records(user_id)
+        async with self._txn():
+            await self._execute(
+                """
+                INSERT INTO copy_tasks (bot_id, cid, mid, user_id, name, at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (bot_id, cid, mid) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    name = EXCLUDED.name,
+                    at = EXCLUDED.at
+                """,
+                (TgClient.ID, cid, mid, user_id, name, int(time())),
+            )
+            # Children are deleted and reinserted so a re-save of the same task
+            # can never leave a unit the new record no longer has. Deleting the
+            # units cascades to their media rows.
+            await self._execute(
+                """
+                DELETE FROM copy_units
+                WHERE bot_id = %s AND cid = %s AND mid = %s
+                """,
+                (TgClient.ID, cid, mid),
+            )
+            for seq, unit in enumerate(units):
+                # chat/msg are absent on a sparse unit, so both stay nullable.
+                await self._execute(
+                    """
+                    INSERT INTO copy_units
+                        (bot_id, cid, mid, seq, mode, src_chat, src_msg)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        TgClient.ID,
+                        cid,
+                        mid,
+                        seq,
+                        unit["mode"],
+                        unit.get("chat"),
+                        unit.get("msg"),
+                    ),
+                )
+                for idx, entry in enumerate(unit.get("media") or []):
+                    await self._execute(
+                        """
+                        INSERT INTO copy_unit_media
+                            (bot_id, cid, mid, seq, idx, kind, file_id, caption)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            TgClient.ID,
+                            cid,
+                            mid,
+                            seq,
+                            idx,
+                            entry.get("kind"),
+                            entry.get("file_id"),
+                            entry.get("caption"),
+                        ),
+                    )
+            await self._prune_copy_records(user_id)
 
     async def find_copy_records(self, mid: int) -> list[dict]:
         """Every saved record with this task id -- one chat's mid can repeat.
 
-        Rows are shaped like the Mongo documents callers read: ``_id`` is
-        ``"cid:mid"`` and the owner field is named ``user``.
+        The task, unit and media rows are joined into documents shaped like the
+        Mongo rows callers read: ``_id`` is ``"cid:mid"`` and the owner field is
+        named ``user``. A unit rebuilds its ``chat``/``msg`` only when the source
+        coordinates were stored, a media entry only its present keys, and every
+        unit carries a ``media`` list -- empty when no media rows were stored.
         """
         if self._return:
             return []
         rows = await self._fetchall(
             """
-            SELECT id, cid, mid, user_id, name, at, units
-            FROM copy_records WHERE bot_id = %s AND mid = %s
-            ORDER BY id
+            SELECT t.bot_id, t.cid, t.mid, t.user_id, t.name, t.at,
+                   u.seq, u.mode, u.src_chat, u.src_msg,
+                   m.idx, m.kind, m.file_id, m.caption
+            FROM copy_tasks t
+            LEFT JOIN copy_units u
+              ON u.bot_id = t.bot_id AND u.cid = t.cid AND u.mid = t.mid
+            LEFT JOIN copy_unit_media m
+              ON m.bot_id = u.bot_id AND m.cid = u.cid AND m.mid = u.mid
+             AND m.seq = u.seq
+            WHERE t.bot_id = %s AND t.mid = %s
+            ORDER BY t.cid, t.mid, u.seq, m.idx
             """,
             (TgClient.ID, mid),
         )
-        return [
-            {
-                "_id": row["id"],
-                "cid": row["cid"],
-                "mid": row["mid"],
-                "user": row["user_id"],
-                "name": row["name"],
-                "at": row["at"],
-                "units": row["units"],
-            }
-            for row in rows
-        ]
+        docs: list[dict] = []
+        cur_seq: int | None = None
+        for row in rows:
+            if not docs or (docs[-1]["cid"], docs[-1]["mid"]) != (
+                row["cid"],
+                row["mid"],
+            ):
+                docs.append(
+                    {
+                        "_id": f"{row['cid']}:{row['mid']}",
+                        "cid": row["cid"],
+                        "mid": row["mid"],
+                        "user": row["user_id"],
+                        "name": row["name"],
+                        "at": row["at"],
+                        "units": [],
+                    }
+                )
+                cur_seq = None
+            doc = docs[-1]
+            if row["seq"] is None:
+                continue  # a parent row whose unit rows are gone -> units: []
+            if row["seq"] != cur_seq:
+                doc["units"].append(_rebuild_unit(row))
+                cur_seq = row["seq"]
+            if row["idx"] is not None:
+                doc["units"][-1]["media"].append(_rebuild_media(row))
+        return docs
 
     async def _prune_copy_records(self, user_id: int) -> None:
         """Drop a user's records past the newest MAX_TASK_RECORDS of them.
@@ -634,29 +758,47 @@ class DbManager:
         No index is built on user/at: the repo has never made one, and with a
         couple hundred rows per user a table scan per save is cheaper than an
         index whose only reader is this prune. ``at`` can tie between two
-        saves in the same second, so ``id`` breaks the order deterministically.
+        saves in the same second, so ``mid`` breaks the order deterministically.
         """
         if self._return:
             return
         rows = await self._fetchall(
             """
-            SELECT id FROM copy_records
+            SELECT cid, mid FROM copy_tasks
             WHERE bot_id = %s AND user_id = %s
-            ORDER BY at DESC, id
+            ORDER BY at DESC, mid DESC
             OFFSET %s
             """,
             (TgClient.ID, user_id, MAX_TASK_RECORDS),
         )
-        stale = [row["id"] for row in rows]
-        if not stale:
-            return
-        await self._execute(
-            """
-            DELETE FROM copy_records
-            WHERE bot_id = %s AND id = ANY(%s)
-            """,
-            (TgClient.ID, stale),
-        )
+        for stale in rows:
+            # One delete per stale task; the FK cascade clears its units/media.
+            await self._execute(
+                """
+                DELETE FROM copy_tasks
+                WHERE bot_id = %s AND cid = %s AND mid = %s
+                """,
+                (TgClient.ID, stale["cid"], stale["mid"]),
+            )
+
+
+def _rebuild_unit(row: dict) -> dict:
+    """A unit dict from its row, omitting source keys that were never stored."""
+    unit: dict[str, Any] = {"mode": row["mode"], "media": []}
+    if row["src_chat"] is not None:
+        unit["chat"] = row["src_chat"]
+    if row["src_msg"] is not None:
+        unit["msg"] = row["src_msg"]
+    return unit
+
+
+def _rebuild_media(row: dict) -> dict:
+    """One media entry from its row, keeping only the keys that were stored."""
+    entry: dict[str, Any] = {}
+    for key in ("kind", "file_id", "caption"):
+        if row[key] is not None:
+            entry[key] = row[key]
+    return entry
 
 
 database = DbManager()

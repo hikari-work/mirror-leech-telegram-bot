@@ -8,9 +8,11 @@ The uploader half drives ``_upload_file`` the way
 next to the ``_uncopied`` bookkeeping: after a successful send, and when an
 album retires the messages it carried.
 
-The database half runs against a fake collection: what ``save_copy_record``
-writes, what ``find_copy_records`` answers, and that the prune leaves the
-newest ``MAX_TASK_RECORDS`` of one user alone.
+The database half runs against a recorder that stands in for the connection
+and captures every statement: what ``save_copy_record`` writes to the
+relational ``copy_tasks``/``copy_units``/``copy_unit_media`` rows, what
+``find_copy_records`` reassembles, and that the prune leaves the newest
+``MAX_TASK_RECORDS`` of one user alone.
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from psycopg.types.json import Jsonb
 
 from bot.helper.storage.copy_records import (
     MAX_RECORD_UNITS,
@@ -482,12 +483,13 @@ async def test_units_are_recorded_in_send_order(uploader_module, monkeypatch):
 #
 # What the copy-record methods write and read is pinned here at the SQL
 # boundary: a recorder stands in for the connection and captures every
-# statement, so a test can assert the SQL a method chose (a full-column
-# replace rather than a jsonb merge, an offset prune) and the parameters it
-# sent. The behavioural round trips -- that a saved row keeps its units, that
-# the prune leaves the newest MAX_TASK_RECORDS of one user -- need a real
-# store, so they live in ``test_pg_integration.py`` where PostgreSQL is
-# actually running.
+# statement, so a test can assert the SQL a method chose -- a parent upsert
+# into ``copy_tasks`` followed by a child delete-and-reinsert into
+# ``copy_units``/``copy_unit_media``, an offset prune over ``copy_tasks`` --
+# and the parameters it sent. The behavioural round trips -- that a saved
+# task keeps its units, that the prune leaves the newest MAX_TASK_RECORDS of
+# one user -- need a real store, so they live in ``test_pg_integration.py``
+# where PostgreSQL is actually running.
 
 
 class _Recorder:
@@ -504,9 +506,7 @@ class _Recorder:
         self.reads = []  # (sql, params) of every _fetchone/_fetchall
 
     async def execute(self, sql, params):
-        # the real connection adapts a Jsonb param into the column value; for a
-        # faithful trace the recorder unwraps it back to the stored python value
-        self.writes.append((sql, tuple(_plain(p) for p in params)))
+        self.writes.append((sql, tuple(params)))
 
     async def fetchone(self, sql, params):
         self.reads.append((sql, params))
@@ -515,11 +515,6 @@ class _Recorder:
     async def fetchall(self, sql, params):
         self.reads.append((sql, params))
         return self._results.pop(0) if self._results else []
-
-
-def _plain(value):
-    """A param as the store keeps it: a Jsonb wrapper reduced to its payload."""
-    return value.obj if isinstance(value, Jsonb) else value
 
 
 def _db(*results):
@@ -533,7 +528,7 @@ def _db(*results):
     return dbm, recorder
 
 
-async def test_a_saved_record_holds_the_task_and_its_units():
+async def test_a_saved_record_writes_parent_rows_then_its_units():
     units = [
         {"mode": "single", "chat": -1001, "msg": 7, "media": [{"kind": "photo"}]}
     ]
@@ -542,31 +537,45 @@ async def test_a_saved_record_holds_the_task_and_its_units():
 
     await dbm.save_copy_record(-1001, 7, 42, "a folder", units)
 
-    sql, params = recorder.writes[0]
-    assert "INSERT INTO copy_records" in sql
-    assert "ON CONFLICT (bot_id, id) DO UPDATE SET" in sql
-    # one row keyed "cid:mid" under this bot, like the Mongo document was
-    assert params[1] == "-1001:7"
-    assert params[2] == -1001
-    assert params[3] == 7
-    assert params[4] == 42
-    assert params[5] == "a folder"
-    assert isinstance(params[6], int)
-    assert params[7] == units
+    # parent upsert into copy_tasks, then a child delete-and-reinsert so a
+    # re-save of the same task can never leave stale units behind
+    task_sql, task_params = recorder.writes[0]
+    assert "INSERT INTO copy_tasks" in task_sql
+    assert "ON CONFLICT (bot_id, cid, mid) DO UPDATE SET" in task_sql
+    assert task_params[1:5] == (-1001, 7, 42, "a folder")
+    assert isinstance(task_params[5], int)  # at
+
+    del_sql, del_params = recorder.writes[1]
+    assert "DELETE FROM copy_units" in del_sql
+    assert del_params[1:] == (-1001, 7)
+
+    unit_sql, unit_params = recorder.writes[2]
+    assert "INSERT INTO copy_units" in unit_sql
+    assert unit_params[1:] == (-1001, 7, 0, "single", -1001, 7)
+
+    media_sql, media_params = recorder.writes[3]
+    assert "INSERT INTO copy_unit_media" in media_sql
+    # media columns are nullable; absent keys arrive as None
+    assert media_params[1:] == (-1001, 7, 0, 0, "photo", None, None)
 
 
-async def test_saving_again_replaces_the_record_of_the_same_task():
+async def test_saving_again_replaces_the_units_of_the_same_task():
     dbm, recorder = _db()
     dbm._prune_copy_records = AsyncMock()
 
     await dbm.save_copy_record(-1001, 7, 42, "old", [])
-    await dbm.save_copy_record(-1001, 7, 42, "new", [])
+    await dbm.save_copy_record(-1001, 7, 42, "new", [{"mode": "single"}])
 
-    # two upserts of one key -- a full-column replace, not a jsonb merge, so
-    # nothing of the earlier record survives into the new one
-    assert len(recorder.writes) == 2
-    assert all(params[1] == "-1001:7" for _, params in recorder.writes)
+    # each save is one parent upsert + one child delete + the unit inserts
+    assert len(recorder.writes) == 5  # 2 upserts, 2 deletes, 1 unit insert
+    assert recorder.writes[0][1][1:5] == (-1001, 7, 42, "old")
+    assert recorder.writes[2][1][1:5] == (-1001, 7, 42, "new")
     assert "|| EXCLUDED" not in recorder.writes[0][0]
+    # the child delete runs on every save, so the second never duplicates
+    assert [w for w in recorder.writes if "DELETE FROM copy_units" in w[0]] == [
+        recorder.writes[1],
+        recorder.writes[3],
+    ]
 
 
 async def test_saving_also_prunes_that_user():
@@ -575,46 +584,80 @@ async def test_saving_also_prunes_that_user():
     await dbm.save_copy_record(-1001, 7, 42, "a folder", [])
 
     prune_sql, prune_params = recorder.reads[0]
-    assert "SELECT id FROM copy_records" in prune_sql
+    assert "SELECT cid, mid FROM copy_tasks" in prune_sql
     assert prune_params[1] == 42
-    # empty prune result -> only the upsert was written
-    assert len(recorder.writes) == 1
+    assert prune_params[2] == MAX_TASK_RECORDS
+    # empty prune result -> nothing was written past the parent and child rows
+    assert len(recorder.writes) == 2
 
 
 async def test_find_returns_only_the_records_of_that_task_id():
     rows = [
-        {"id": "-1001:7", "cid": -1001, "mid": 7, "user_id": 42,
-         "name": "a", "at": 1, "units": []},
-        {"id": "-1002:7", "cid": -1002, "mid": 7, "user_id": 43,
-         "name": "b", "at": 2, "units": []},
+        # two parents, each with one unit and one photo member
+        {"bot_id": "999", "cid": -1001, "mid": 7, "user_id": 42, "name": "a",
+         "at": 1, "seq": 0, "mode": "single", "src_chat": -1001, "src_msg": 10,
+         "idx": 0, "kind": "photo", "file_id": None, "caption": None},
+        {"bot_id": "999", "cid": -1002, "mid": 7, "user_id": 43, "name": "b",
+         "at": 2, "seq": 0, "mode": "single", "src_chat": -1002, "src_msg": 11,
+         "idx": 0, "kind": "document", "file_id": "f1", "caption": "c"},
     ]
     dbm, recorder = _db(rows)
 
     found = await dbm.find_copy_records(7)
 
-    assert sorted(doc["_id"] for doc in found) == ["-1001:7", "-1002:7"]
+    assert [doc["_id"] for doc in found] == ["-1001:7", "-1002:7"]
     # rows are shaped like the Mongo documents /copy reads: owner is ``user``
-    assert found[0]["user"] in (42, 43)
+    # and each unit carries its media list rebuilt in order
+    assert found[0]["user"] == 42
+    assert found[0]["units"] == [
+        {"mode": "single", "chat": -1001, "msg": 10,
+         "media": [{"kind": "photo"}]}
+    ]
+    assert found[1]["units"][0]["media"] == [
+        {"kind": "document", "file_id": "f1", "caption": "c"}
+    ]
     sql, params = recorder.reads[0]
-    assert "WHERE bot_id = %s AND mid = %s" in sql
+    assert "LEFT JOIN copy_units" in sql and "LEFT JOIN copy_unit_media" in sql
+    assert "WHERE t.bot_id = %s AND t.mid = %s" in sql
     assert params[1] == 7
 
 
-async def test_prune_issues_an_offset_select_then_deletes_what_it_found():
+async def test_find_rebuilds_a_parent_with_no_units_as_an_empty_list():
+    # a parent row with no matching unit rows (seq is NULL) yields units: []
+    rows = [
+        {"bot_id": "999", "cid": -1001, "mid": 7, "user_id": 42, "name": "a",
+         "at": 1, "seq": None, "mode": None, "src_chat": None, "src_msg": None,
+         "idx": None, "kind": None, "file_id": None, "caption": None},
+    ]
+    dbm, _ = _db(rows)
+
+    found = await dbm.find_copy_records(7)
+
+    assert found == [{"_id": "-1001:7", "cid": -1001, "mid": 7, "user": 42,
+                      "name": "a", "at": 1, "units": []}]
+
+
+async def test_prune_issues_an_offset_select_then_deletes_each_stale_row():
     # rows exactly as dict_row returns them from the offset select
-    rows = [{"id": "-1001:0"}, {"id": "-1001:1"}]
+    rows = [{"cid": -1001, "mid": 0}, {"cid": -1001, "mid": 1}]
     dbm, recorder = _db(rows)
 
     await dbm._prune_copy_records(42)
 
     select_sql, select_params = recorder.reads[0]
-    assert "ORDER BY at DESC, id" in select_sql
+    assert "FROM copy_tasks" in select_sql
+    assert "ORDER BY at DESC, mid DESC" in select_sql
     assert "OFFSET %s" in select_sql
     assert select_params[1] == 42
     assert select_params[2] == MAX_TASK_RECORDS
-    delete_sql, delete_params = recorder.writes[0]
-    assert "DELETE FROM copy_records" in delete_sql
-    assert delete_params[1] == ["-1001:0", "-1001:1"]
+    # one delete per stale task; the cascade clears its unit/media rows
+    assert len(recorder.writes) == 2
+    assert all(
+        "DELETE FROM copy_tasks" in sql and "cid = %s AND mid = %s" in sql
+        for sql, _ in recorder.writes
+    )
+    assert recorder.writes[0][1][1:] == (-1001, 0)
+    assert recorder.writes[1][1][1:] == (-1001, 1)
 
 
 async def test_prune_with_nothing_stale_writes_nothing():

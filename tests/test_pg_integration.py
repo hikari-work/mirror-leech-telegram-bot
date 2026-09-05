@@ -161,20 +161,42 @@ async def test_incomplete_tasks_group_by_chat_then_are_forgotten(dbm):
 
 
 async def test_copy_records_round_trip_is_shaped_like_the_old_documents(dbm):
-    units = [
-        {"mode": "single", "chat": -1001, "msg": 7, "media": [{"kind": "photo"}]}
+    album = [
+        {"mode": "group", "chat": -1001, "msg": 70, "media": [
+            {"kind": "photo", "file_id": "a1", "caption": "one"},
+            {"kind": "document", "file_id": "a2", "caption": ""},
+        ]},
+        {"mode": "single", "chat": -1001, "msg": 71, "media": [
+            {"kind": "video", "file_id": "a3", "caption": "tail"},
+        ]},
     ]
-    await dbm.save_copy_record(-1001, 7, 42, "a folder", units)
-    await dbm.save_copy_record(-1001, 8, 42, "another", [{"mode": "single"}])
+    await dbm.save_copy_record(-1001, 7, 42, "a folder", album)
+    # a unit with neither coordinates nor media is legitimate on the edge
+    await dbm.save_copy_record(-1001, 8, 42, "sparse", [{"mode": "single"}])
 
-    found = await dbm.find_copy_records(7)
-
-    assert len(found) == 1
-    doc = found[0]
+    # the album replays with its units and media in the recorded seq/idx order
+    (doc,) = await dbm.find_copy_records(7)
     assert doc["_id"] == "-1001:7"
-    assert doc["user"] == 42
-    assert doc["name"] == "a folder"
-    assert doc["units"] == units
+    assert (doc["cid"], doc["mid"], doc["user"], doc["name"]) == (-1001, 7, 42,
+                                                                  "a folder")
+    assert isinstance(doc["at"], int)
+    assert doc["units"] == album
+    # a stored unit with no media rows is normalised to an empty media list
+    (sparse,) = await dbm.find_copy_records(8)
+    assert sparse["units"] == [{"mode": "single", "media": []}]
+
+    # and the flattening really happened: rows, not a jsonb blob
+    assert await _count(dbm, "copy_units", dbm._bot) == 3  # 2 album + 1 sparse
+    assert await _count(dbm, "copy_unit_media", dbm._bot) == 3  # all on the album
+
+
+async def _count(dbm: DbManager, table: str, bot: str) -> int:
+    """Rows of one bot in a table -- the shape of a table-level assertion."""
+    cursor = await dbm._conn.execute(
+        f"SELECT count(*) AS n FROM {table} WHERE bot_id = %s", (bot,)
+    )
+    row = await cursor.fetchone()
+    return row["n"]
 
 
 async def test_the_prune_is_per_user_and_spares_others(dbm):
@@ -186,7 +208,7 @@ async def test_the_prune_is_per_user_and_spares_others(dbm):
 
     # user 42 is trimmed to their newest MAX_TASK_RECORDS ...
     cursor = await dbm._conn.execute(
-        "SELECT user_id FROM copy_records WHERE bot_id = %s", (dbm._bot,)
+        "SELECT user_id FROM copy_tasks WHERE bot_id = %s", (dbm._bot,)
     )
     counts = Counter(row["user_id"] for row in await cursor.fetchall())
     assert counts[42] == MAX_TASK_RECORDS
