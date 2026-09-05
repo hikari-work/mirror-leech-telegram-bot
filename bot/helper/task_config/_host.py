@@ -88,6 +88,10 @@ class TaskConfigHost:
     name: str
     folder_name: str
     copy_preset: str
+    # What the task uploaded, one dict per copy command, in send order. Filled
+    # by the uploader (``copy_records.record``) and handed to the database by
+    # ``TaskListener.on_upload_complete``; stays empty with no DATABASE_URL.
+    copy_units: list[dict[str, Any]]
     # The ``-t`` argument, then the thumbnail file ``_resolve_thumbnail`` made of
     # it. "" for a task without one, and never None: ``is_telegram_link`` calls
     # ``startswith`` on it unguarded.

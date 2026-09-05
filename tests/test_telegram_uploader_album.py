@@ -92,7 +92,13 @@ def uploader_module(monkeypatch):
         ),
         "bot": _stub("bot", intervals={"stopAll": False}),
         "bot.core": _pkg("bot.core"),
-        "bot.core.config_manager": _stub("bot.core.config_manager", Config=object()),
+        "bot.core.config_manager": _stub(
+            # DATABASE_URL is read in `_user_settings` to decide whether the
+            # task's messages are recorded for /copy; tests that want them
+            # recorded flip it on.
+            "bot.core.config_manager",
+            Config=SimpleNamespace(DATABASE_URL=""),
+        ),
         "bot.core.telegram_manager": _stub(
             "bot.core.telegram_manager",
             TgClient=tg_client,
@@ -254,6 +260,7 @@ def _make_uploader(uploader_module, calls):
         up_dest=None,
         clone_dump_chats={},
         copy_preset="",
+        copy_units=[],
         user_dict={},
         mid=1,
         message=None,

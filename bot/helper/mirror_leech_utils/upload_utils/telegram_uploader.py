@@ -31,7 +31,7 @@ from .... import intervals
 from ....core.config_manager import Config
 from ....core.telegram_manager import TgClient, user_session
 from ...ext_utils.bot_utils import sync_to_async
-from ...ext_utils.copy_records import fan_out
+from ...ext_utils.copy_records import fan_out, group_unit, record, single_unit, strike
 from ...ext_utils.files_utils import get_base_name, is_archive
 from ...ext_utils.media_utils import (
     get_audio_thumbnail,
@@ -99,6 +99,10 @@ class TelegramUploader:
         # Messages sent but not yet copied anywhere. Only kept for a task using
         # a copy preset; see `_copy_uncopied_to_clone_dumps`.
         self._uncopied = []
+        # Whether the task's messages are being written down for /copy. Set
+        # from `Config.DATABASE_URL` in `_user_settings`: with no database
+        # there is nowhere to hand the units to, so none are collected.
+        self._record_units = False
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -160,6 +164,7 @@ class TelegramUploader:
             if "FILES_LINKS" not in self._listener.user_dict
             else False
         )
+        self._record_units = bool(Config.DATABASE_URL)
 
     async def _msg_to_reply(self):
         if self._listener.up_dest:
@@ -313,6 +318,13 @@ class TelegramUploader:
         # to be deleted -- there is nothing left to copy one at a time.
         carried = {(msg.chat.id, msg.id) for msg in originals}
         self._uncopied = [msg for msg in self._uncopied if msg not in carried]
+        if self._record_units:
+            # The album replaces what it carried, so the per-message units
+            # already booked for those are struck and one unit for the whole
+            # album takes their place -- in send order, which is the order the
+            # next file's unit will land after.
+            strike(self._listener.copy_units, carried)
+            record(self._listener.copy_units, group_unit(sent))
         for msg in originals:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -631,6 +643,11 @@ class TelegramUploader:
             # an album carried, and what survives is copied at the end.
             sent = self.anchor
             self._uncopied.append((chat_of(sent).id, sent.id))
+        if self._record_units:
+            # Same moment as `_uncopied`, but for every task: this is what a
+            # later /copy replays, and an album that carries this message
+            # strikes the unit below just as it strikes `_uncopied`.
+            record(self._listener.copy_units, single_unit(self.anchor))
         await self._batcher.track(o_path)
         return True
 

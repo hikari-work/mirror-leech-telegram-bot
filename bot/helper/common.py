@@ -43,6 +43,10 @@ class TaskConfig(
         self.user_dict = user_data.get(self.user_id, {})
         self.clone_dump_chats = {}
         self.copy_preset = ""
+        # What this task uploaded, one entry per copy command, filled by the
+        # uploader as messages go out and written to the database when the
+        # task completes. Empty for a task with no database configured.
+        self.copy_units = []
         self.dir = f"{DOWNLOAD_DIR}{self.mid}"
         self.up_dir = ""
         self.link = ""

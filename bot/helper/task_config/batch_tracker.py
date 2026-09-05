@@ -160,6 +160,12 @@ class BatchTrackerMixin(TaskConfigHost):
         head += f"\n<b>Total Size:</b> {get_readable_file_size(total_size)}"
         if total_corrupted:
             head += f"\n<b>Corrupted Files:</b> {total_corrupted}"
+        # Every child carried its own mid in its result; this line is the only
+        # place a bulk names them, and without it a task inside one could never
+        # be /copy'd.
+        mids = [str(res["mid"]) for res in batch["results"] if "mid" in res]
+        if mids:
+            head += f"\n<b>Task IDs:</b> {', '.join(mids)}"
         head += self._error_digest(batch["errors"])
         head += f"\n<b>cc:</b> {self.tag}\n\n"
 

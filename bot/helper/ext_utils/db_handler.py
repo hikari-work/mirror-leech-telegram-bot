@@ -2,6 +2,7 @@ from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
 from gridfs.asynchronous import AsyncGridFSBucket
 from importlib import import_module
+from time import time
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.server_api import ServerApi
@@ -11,6 +12,7 @@ from ... import LOGGER, user_data, rss_dict, qbit_options
 from ...core.telegram_manager import TgClient
 from ...core.config_manager import Config
 from .blob_crypto import KEY_VAR, blob_box
+from .copy_records import MAX_TASK_RECORDS
 
 # Keys whose value is a file on disk rather than a scalar. They live in GridFS
 # under users/<uid>/<key>, so the users collection only ever holds scalars.
@@ -244,6 +246,59 @@ class DbManager:
                     notifier_dict[row["cid"]] = {row["tag"]: [row["_id"]]}
         await self.db.tasks[TgClient.ID].drop()
         return notifier_dict
+
+    # ── copy records ────────────────────────────────────────────────────
+    # What each finished task uploaded, so /copy can replay it. `_id` is
+    # "cid:mid" because a message id is only unique inside its chat; a plain
+    # mid would collide between two chats that happened to number their
+    # messages alike.
+
+    async def save_copy_record(
+        self, cid: int, mid: int, user_id: int, name: str, units: list
+    ) -> None:
+        """Store what one task uploaded, replacing any record of the same id."""
+        if self._return:
+            return
+        await self.db.copies[TgClient.ID].update_one(
+            {"_id": f"{cid}:{mid}"},
+            {
+                "$set": {
+                    "cid": cid,
+                    "mid": mid,
+                    "user": user_id,
+                    "name": name,
+                    "at": int(time()),
+                    "units": units,
+                }
+            },
+            upsert=True,
+        )
+        await self._prune_copy_records(user_id)
+
+    async def find_copy_records(self, mid: int) -> list[dict]:
+        """Every saved record with this task id -- one chat's mid can repeat."""
+        if self._return:
+            return []
+        cursor = self.db.copies[TgClient.ID].find({"mid": mid})
+        return await cursor.to_list(None)
+
+    async def _prune_copy_records(self, user_id: int) -> None:
+        """Drop a user's records past the newest MAX_TASK_RECORDS of them.
+
+        No index is created on user/at: the repo has never made one, and with
+        a couple hundred documents per user a collection scan per save is
+        cheaper to keep than an index whose only reader is this prune.
+        """
+        if self._return:
+            return
+        stale = (
+            self.db.copies[TgClient.ID]
+            .find({"user": user_id}, {"_id": 1})
+            .sort("at", -1)
+            .skip(MAX_TASK_RECORDS)
+        )
+        for doc in await stale.to_list(None):
+            await self.db.copies[TgClient.ID].delete_one({"_id": doc["_id"]})
 
     async def trunc_table(self, name):
         if self._return:

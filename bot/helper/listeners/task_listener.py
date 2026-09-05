@@ -12,13 +12,13 @@ from ... import (
     intervals,
     non_queued_dl,
     non_queued_up,
-    upload_chat_of,
     queue_dict_lock,
     queued_dl,
     queued_up,
     same_directory_lock,
     task_dict,
     task_dict_lock,
+    upload_chat_of,
 )
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
@@ -444,6 +444,19 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
+        # The record is what a later /copy replays; without it the only way
+        # to put this task's files anywhere else is to download them again.
+        if Config.DATABASE_URL and self.copy_units:
+            # Chat.id is optional only for the partial updates pyrogram builds;
+            # a command message the bot is handling came from a real chat.
+            await database.save_copy_record(
+                chat_of(self.message).id,  # pyrefly: ignore[bad-argument-type]
+                self.mid,
+                self.user_id,
+                self.name,
+                self.copy_units,
+            )
+
         LOGGER.info(f"Task Done: {self.name}")
 
         batch = self._batch()
@@ -459,6 +472,9 @@ class TaskListener(TaskConfig):
                     "files": files,
                     "link": link,
                     "mime_type": "",
+                    # each child of a bulk has a mid of its own, and the
+                    # summary is the only place they are all listed
+                    "mid": self.mid,
                 }
             )
         else:
@@ -466,6 +482,7 @@ class TaskListener(TaskConfig):
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:
                 msg += f"\n<b>Corrupted Files: </b>{mime_type}"
+            msg += f"\n<b>Task ID: </b><code>{self.mid}</code>"
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
             if not files:
                 await send_message(self.message, msg)
