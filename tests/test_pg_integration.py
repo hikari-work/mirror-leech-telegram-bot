@@ -20,6 +20,7 @@ from uuid import uuid4
 
 import pytest
 
+from bot import user_data
 from bot.core.config_manager import Config
 from bot.core.telegram_manager import TgClient
 from bot.helper.storage.copy_records import MAX_TASK_RECORDS
@@ -87,6 +88,28 @@ async def test_users_table_is_shared_and_replace_wholesale(dbm):
     # ... and the write happened with no bot scope at all
     await dbm.update_config({"A": 1}, bot_id=dbm._bot)
     assert dict(await dbm.read_user_rows())[uid] == {"AS_DOCUMENT": False}
+
+
+async def test_copy_presets_live_in_rows_not_the_users_doc(dbm):
+    uid = -int(uuid4().hex[:8], 16)
+    user_data[uid] = {
+        "COPY_PRESETS": {"anime": ["pm", "@updates", "-1001501001|2"], "empty": []},
+        "AS_DOCUMENT": True,
+    }
+
+    await dbm.update_user_data(uid)
+
+    try:
+        # the jsonb document no longer carries the preset key ...
+        assert dict(await dbm.read_user_rows())[uid] == {"AS_DOCUMENT": True}
+        # ... and the preset rows round-trip with the tokens the user typed
+        presets = await dbm.read_copy_presets_all()
+        assert presets.get(uid) == {
+            "anime": ["pm", "@updates", "-1001501001|2"],
+            "empty": [],
+        }
+    finally:
+        del user_data[uid]
 
 
 # ── user-document blobs ───────────────────────────────────────────────

@@ -94,6 +94,30 @@ _SCHEMA = (
         data    jsonb NOT NULL
     )
     """,
+    # Copy presets are global per user too: they used to live in the users
+    # document, and adding a bot_id would change multi-bot behaviour. A preset
+    # is one row here and its destinations child rows; a preset delete cascades
+    # them away. Destinations stay the tokens the user typed (``pm``,
+    # ``@username``, a chat id, ``chat|thread``) -- resolving one needs the
+    # reader's own id, so they are never split into chat/thread columns.
+    """
+    CREATE TABLE IF NOT EXISTS copy_presets (
+        user_id bigint NOT NULL,
+        name    text   NOT NULL,
+        PRIMARY KEY (user_id, name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS copy_preset_dests (
+        user_id bigint NOT NULL,
+        name    text   NOT NULL,
+        dst_seq integer NOT NULL,
+        dest    text   NOT NULL,
+        PRIMARY KEY (user_id, name, dst_seq),
+        FOREIGN KEY (user_id, name) REFERENCES copy_presets
+            ON DELETE CASCADE
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS rss (
         bot_id  text NOT NULL,
@@ -485,6 +509,13 @@ class DbManager:
     # The users table is global (no bot_id), exactly like the Mongo collection.
 
     async def update_user_data(self, user_id):
+        """Write one user's whole in-memory settings back, presets included.
+
+        Copy presets no longer live in the users jsonb document: the key is
+        pulled out and stored as its own rows in the same transaction, so the
+        two never disagree. When the key is absent from memory nothing is
+        written for presets -- a user without them keeps a single users write.
+        """
         if self._return:
             return
         data = user_data.get(user_id, {}).copy()
@@ -492,7 +523,14 @@ class DbManager:
         # be replaced wholesale.
         for key in USER_DOC_KEYS:
             data.pop(key, None)
-        await self.save_user_row(user_id, data)
+        # "Remove" leaves a "" behind in the mapping; only a dict is a real set.
+        presets = data.pop("COPY_PRESETS", None)
+        async with self._txn():
+            await self.save_user_row(user_id, data)
+            if presets is not None:
+                await self._replace_copy_presets(
+                    user_id, presets if isinstance(presets, dict) else {}
+                )
 
     async def save_user_row(self, user_id: int, data: dict[str, Any]):
         """Replace one user's whole settings document."""
@@ -515,6 +553,56 @@ class DbManager:
             "SELECT user_id, data FROM users ORDER BY user_id"
         )
         return [(row["user_id"], row["data"]) for row in rows]
+
+    async def _replace_copy_presets(
+        self, user_id: int, presets: dict[str, list[str]]
+    ) -> None:
+        """Store one user's whole preset set, replacing whatever was there.
+
+        Called from ``update_user_data`` inside its transaction. A preset with
+        no destinations keeps its parent row alone; the cascade clears the
+        destination rows of a preset (or user) that is being deleted.
+        """
+        await self._execute(
+            "DELETE FROM copy_presets WHERE user_id = %s", (user_id,)
+        )
+        for name, dests in presets.items():
+            await self._execute(
+                "INSERT INTO copy_presets (user_id, name) VALUES (%s, %s)",
+                (user_id, name),
+            )
+            for seq, dest in enumerate(dests or []):
+                await self._execute(
+                    """
+                    INSERT INTO copy_preset_dests (user_id, name, dst_seq, dest)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_id, name, seq, dest),
+                )
+
+    async def read_copy_presets_all(self) -> dict[int, dict[str, list[str]]]:
+        """Every user's presets keyed by user id, for the boot restore.
+
+        A preset whose destination rows are gone reads back as an empty list,
+        so the mapping is exact rather than best-effort.
+        """
+        if self._return:
+            return {}
+        rows = await self._fetchall(
+            """
+            SELECT p.user_id, p.name, d.dst_seq, d.dest
+            FROM copy_presets p
+            LEFT JOIN copy_preset_dests d
+              ON d.user_id = p.user_id AND d.name = p.name
+            ORDER BY p.user_id, p.name, d.dst_seq
+            """
+        )
+        presets: dict[int, dict[str, list[str]]] = {}
+        for row in rows:
+            presets.setdefault(row["user_id"], {}).setdefault(row["name"], [])
+            if row["dest"] is not None:
+                presets[row["user_id"]][row["name"]].append(row["dest"])
+        return presets
 
     async def update_user_doc(self, user_id, key, path=""):
         if self._return:

@@ -253,6 +253,52 @@ async def test_update_user_data_strips_doc_keys_then_saves(dbm):
     assert data == {"AS_DOCUMENT": True}
 
 
+async def test_update_user_data_funnels_presets_into_their_rows(dbm):
+    user_data[5] = {
+        "COPY_PRESETS": {"a": ["pm", "@chan"], "b": []},
+        "AS_DOCUMENT": True,
+    }
+
+    await dbm.update_user_data(5)
+
+    # the jsonb write no longer carries the preset key
+    user_sql, (user_id, payload) = dbm._recorder.writes[0]
+    assert "INSERT INTO users" in user_sql
+    assert (user_id, payload) == (5, {"AS_DOCUMENT": True})
+    # a full replace of the preset set, so edits and removals both land
+    del_sql, (del_uid,) = dbm._recorder.writes[1]
+    assert "DELETE FROM copy_presets" in del_sql
+    assert del_uid == 5
+    # preset "a": a parent row, then its destinations in typed order
+    parent_sql, parent_params = dbm._recorder.writes[2]
+    assert "INSERT INTO copy_presets" in parent_sql
+    assert parent_params == (5, "a")
+    assert dbm._recorder.writes[3][1] == (5, "a", 0, "pm")
+    assert dbm._recorder.writes[4][1] == (5, "a", 1, "@chan")
+    # preset "b" holds no destinations: the parent row stands alone
+    assert dbm._recorder.writes[5][1] == (5, "b")
+    assert len(dbm._recorder.writes) == 6
+
+
+async def test_read_copy_presets_all_groups_dests_by_user_and_name(dbm):
+    dbm._recorder._results = [
+        [
+            {"user_id": 5, "name": "a", "dst_seq": 0, "dest": "pm"},
+            {"user_id": 5, "name": "a", "dst_seq": 1, "dest": "@chan"},
+            {"user_id": 5, "name": "b", "dst_seq": None, "dest": None},
+            {"user_id": 7, "name": "x", "dst_seq": 0, "dest": "123456"},
+        ],
+    ]
+
+    presets = await dbm.read_copy_presets_all()
+
+    # a preset with no destination rows reads back as an empty list
+    assert presets == {5: {"a": ["pm", "@chan"], "b": []}, 7: {"x": ["123456"]}}
+    sql, _ = dbm._recorder.reads[0]
+    assert "LEFT JOIN copy_preset_dests" in sql
+    assert "ORDER BY p.user_id, p.name, d.dst_seq" in sql
+
+
 async def test_update_user_doc_saves_or_deletes_the_blob(dbm):
     await dbm.update_user_doc(5, "THUMBNAIL")
     sql, (name,) = dbm._recorder.writes[0]
@@ -412,6 +458,7 @@ async def test_every_method_is_a_noop_when_disconnected():
         await dbm.save_aria2_settings()
         await dbm.save_user_row(1, {})
         assert await dbm.read_user_rows() == []
+        assert await dbm.read_copy_presets_all() == {}
         await dbm.update_user_data(1)
         await dbm.update_user_doc(1, "THUMBNAIL")
         assert await dbm.read_rss_rows() == []

@@ -112,11 +112,34 @@ def _migrate_users(pg: Any, mongo: Any) -> int:
         data = {
             k: v for k, v in doc.items() if k != "_id" and k not in _USER_DOC_KEYS
         }
-        pg.execute(
-            "INSERT INTO users (user_id, data) VALUES (%s, %s) "
-            "ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data",
-            (uid, Jsonb(data)),
-        )
+        # Copy presets are their own rows now; the key is pulled out of the
+        # jsonb document so the doc holds scalars only, mirroring how the bot
+        # stores a user after the normalisation.
+        presets = data.pop("COPY_PRESETS", None)
+        with pg.transaction():
+            pg.execute(
+                "INSERT INTO users (user_id, data) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data",
+                (uid, Jsonb(data)),
+            )
+            if isinstance(presets, dict):
+                # Full replace -- delete-then-insert -- so a re-run converges.
+                pg.execute(
+                    "DELETE FROM copy_presets WHERE user_id = %s", (uid,)
+                )
+                for name, dests in presets.items():
+                    pg.execute(
+                        "INSERT INTO copy_presets (user_id, name) "
+                        "VALUES (%s, %s)",
+                        (uid, name),
+                    )
+                    for seq, dest in enumerate(dests or []):
+                        pg.execute(
+                            "INSERT INTO copy_preset_dests "
+                            "(user_id, name, dst_seq, dest) "
+                            "VALUES (%s, %s, %s, %s)",
+                            (uid, name, seq, dest),
+                        )
         count += 1
     return count
 

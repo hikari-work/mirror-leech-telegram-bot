@@ -242,6 +242,12 @@ async def restore_users(bot_id):
     if not rows:
         return
 
+    # Copy presets are their own rows now (global per user), so they are read
+    # separately and overlaid on the jsonb doc -- rows are authoritative for a
+    # user who has them, while a pre-normalisation doc key still serves the
+    # users who do not until the one-shot move runs.
+    presets_by_user = await database.read_copy_presets_all()
+
     if not await aiopath.exists("thumbnails"):
         await makedirs("thumbnails")
     for uid, row in rows.items():
@@ -250,6 +256,8 @@ async def restore_users(bot_id):
             async with aiopen(path_, "wb+") as f:
                 await f.write(blob)
             row["THUMBNAIL"] = path_
+        if uid in presets_by_user:
+            row["COPY_PRESETS"] = presets_by_user[uid]
         user_data[uid] = row
     LOGGER.info("Users data has been imported from Database")
 
