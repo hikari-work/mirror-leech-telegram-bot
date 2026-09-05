@@ -9,10 +9,13 @@ USER_SESSION_STRING = ""
 CMD_SUFFIX = ""
 AUTHORIZED_CHATS = ""
 SUDO_USERS = ""
+# PostgreSQL connection string, e.g.
+# postgresql://user:pass@host:5432/dbname. The schema is created on
+# first boot; leave DATABASE_NAME empty when the URL names the database.
 DATABASE_URL = ""
 DATABASE_NAME = "mltb"
 # DB_ENCRYPTION_KEY encrypts private files (cookies.txt, .netrc) before they
-# are stored in MongoDB. It is read from
+# are stored as encrypted blobs in PostgreSQL. It is read from
 # the environment ONLY and is deliberately not a config variable: this file is
 # itself saved to the database, so a key here would sit next to the data it
 # protects. Set any passphrase, e.g. DB_ENCRYPTION_KEY=... in your .env or

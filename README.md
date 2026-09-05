@@ -215,9 +215,9 @@ Fill up rest of the fields. Meaning of each field is discussed below.
 
 - `USER_SESSION_STRING` (`Str`): To download/upload from your telegram account if user is `PREMIUM` and to send rss. To generate session string use this command `python3 generate_string_session.py` after mounting repo folder for sure. **NOTE**: You can't use bot with private message. Use it with superGroup.
 
-- `DATABASE_URL` (`Str`): Your Mongo Database URL (Connection string). Follow this [Create Database](https://github.com/anasty17/test?tab=readme-ov-file#create-database) to create database. Data will be saved in Database: bot settings, users settings, rss data and incomplete tasks. **NOTE**: You can always edit all settings that saved in database from the official site -> (Browse collections). 
+- `DATABASE_URL` (`Str`): Your PostgreSQL URL (Connection string), e.g. `postgresql://user:pass@host:5432/dbname`. The schema is created automatically on first boot. Data saved in the database: bot settings, users settings, rss data, incomplete tasks, copy records and (encrypted) private files. **NOTE**: unlike the old Mongo-backed version there is no hosted web console to browse collections; `psql` is the equivalent. Installations that already ran on Mongo can be carried over with `tools/migrate_mongo_to_pg.py` (see the migration section below).
 
-- `DATABASE_NAME` (`Str`): Name of the Mongo database. Default is `mltb`.
+- `DATABASE_NAME` (`Str`): Optional. Overrides the database name from the URL, exactly like Mongo's database argument did. Leave it empty when the URL already names the database. Default is `mltb`.
 
 - `CMD_SUFFIX` (`Str`|`Int`): Commands index number. This number will be added to the end of all commands.
 
@@ -579,14 +579,42 @@ help - All cmds with description
 <details>
   <summary><h5>Create Database</h5></summary>
 
-1. Go to `https://mongodb.com/` and sign-up.
-2. Create Shared Cluster.
-3. Press on `Database` under `Deployment` Header, your created cluster will be there.
-4. Press on connect, choose `Allow Access From Anywhere` and press on `Add IP Address` without editing the ip, then
-   create user.
-5. After creating user press on `Choose a connection`, then press on `Connect your application`. Choose `Driver` *
-   *python** and `version` **3.12 or later**.
-6. Copy your `connection string` and replace `<password>` with the password of your user, then press close.
+1. Provision a PostgreSQL server (a managed one or a container). Any recent
+   version works; the schema uses `jsonb`, `bytea` and ordinary constraints.
+2. Create a database and a user, e.g. with a throwaway container:
+
+   ```
+   docker run -d --name mltb-pg \
+     -e POSTGRES_USER=mltb -e POSTGRES_PASSWORD=mltb -e POSTGRES_DB=mltb \
+     -p 5432:5432 postgres:16
+   ```
+
+3. Set `DATABASE_URL` to the connection string, e.g.
+   `postgresql://mltb:mltb@localhost:5432/mltb`. Leave `DATABASE_NAME` empty
+   when the URL already names the database. Tables are created automatically on
+   the bot's first boot; nothing needs to be initialised by hand.
+
+------
+
+</details>
+
+<details>
+  <summary><h5>Migrating from a Mongo Installation</h5></summary>
+
+A one-shot script reads the old Mongo layout and writes it into PostgreSQL:
+
+```
+pip install pymongo                      # migration-time only
+python tools/migrate_mongo_to_pg.py \
+    --mongo-uri "$MONGO_URL" --mongo-db mltb \
+    --pg-url "$DATABASE_URL"
+```
+
+Run the bot once against an empty PostgreSQL first so the schema exists, then
+migrate, then start the bot for real. Settings, users, RSS feeds, unfinished
+tasks, copy records and stored private files are all carried over. The script
+is idempotent (every write is an upsert), so a re-run after an interruption
+only fills the gaps.
 
 ------
 

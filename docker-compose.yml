@@ -10,7 +10,7 @@ services:
       - /dev/net/tun
     environment:
       # Encrypts private files (cookies.txt, .netrc, config.py) before they
-      # are stored in MongoDB GridFS. Set it in a
+      # are stored as blobs in PostgreSQL. Set it in a
       # .env file next to this compose file; never in config.py, whose
       # contents are themselves persisted to the database.
       #
@@ -18,4 +18,6 @@ services:
       # the bot fall back to storing those files as plaintext.
       #
       # Changing or losing the key makes previously stored blobs unreadable.
+      # DATABASE_URL itself lives in config.py (this compose file predates the
+      # PostgreSQL backend and sets no database variables).
       DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?set DB_ENCRYPTION_KEY in .env (any passphrase) before starting}
