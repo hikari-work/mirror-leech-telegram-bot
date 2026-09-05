@@ -114,6 +114,25 @@ CREATE TABLE IF NOT EXISTS users (
     data    jsonb NOT NULL
 );
 
+-- Preset tujuan /copy, global per user juga: dulu hidup di dokumen `users`
+-- (`COPY_PRESETS`), di-row-kan belakangan. Satu preset = satu baris di sini +
+-- satu baris `copy_preset_dests` per tujuan; hapus preset men-cascade tujuan.
+CREATE TABLE IF NOT EXISTS copy_presets (
+    user_id bigint NOT NULL,
+    name    text   NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS copy_preset_dests (
+    user_id bigint NOT NULL,
+    name    text   NOT NULL,
+    dst_seq integer NOT NULL,         -- urutan tujuan dalam preset
+    dest    text   NOT NULL,          -- token mentah: pm / @chat / chat_id / chat|thread
+    PRIMARY KEY (user_id, name, dst_seq),
+    FOREIGN KEY (user_id, name) REFERENCES copy_presets
+        ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS rss (
     bot_id  text NOT NULL,
     user_id bigint NOT NULL,
@@ -129,16 +148,42 @@ CREATE TABLE IF NOT EXISTS incomplete_tasks (
     PRIMARY KEY (bot_id, link)
 );
 
-CREATE TABLE IF NOT EXISTS copy_records (
+-- Hasil task /copy: satu task = baris copy_tasks + satu baris copy_units per
+-- unit + satu baris copy_unit_media per file di unit. Bertiga ini menggantikan
+-- kolom `units` jsonb di `copy_records` (tabel lama di-drop tool backfill).
+CREATE TABLE IF NOT EXISTS copy_tasks (
     bot_id  text   NOT NULL,
-    id      text   NOT NULL,          -- "{cid}:{mid}", bekas _id dokumen
     cid     bigint NOT NULL,
-    mid     bigint NOT NULL,
+    mid     bigint NOT NULL,          -- id pesan hasil; /copy & prune memakainya
     user_id bigint NOT NULL,
     name    text   NOT NULL,
     at      bigint NOT NULL,          -- int(time()), diurutkan untuk prune
-    units   jsonb  NOT NULL,
-    PRIMARY KEY (bot_id, id)
+    PRIMARY KEY (bot_id, cid, mid)
+);
+
+CREATE TABLE IF NOT EXISTS copy_units (
+    bot_id   text    NOT NULL,
+    cid      bigint  NOT NULL,
+    mid      bigint  NOT NULL,
+    seq      integer NOT NULL,        -- posisi unit dalam task (single/group)
+    mode     text    NOT NULL,
+    src_chat bigint,                  -- chat asal; NULL utk unit tanpa koordinat
+    src_msg  bigint,                  -- message asal; NULL utk unit tanpa koordinat
+    PRIMARY KEY (bot_id, cid, mid, seq),
+    FOREIGN KEY (bot_id, cid, mid) REFERENCES copy_tasks ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS copy_unit_media (
+    bot_id  text    NOT NULL,
+    cid     bigint  NOT NULL,
+    mid     bigint  NOT NULL,
+    seq     integer NOT NULL,
+    idx     integer NOT NULL,         -- urutan file di dalam satu unit
+    kind    text,                     -- document/video/audio/photo
+    file_id text,                     -- cadangan re-leech bila pesan asal hilang
+    caption text,
+    PRIMARY KEY (bot_id, cid, mid, seq, idx),
+    FOREIGN KEY (bot_id, cid, mid, seq) REFERENCES copy_units ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS blobs (
@@ -155,13 +200,25 @@ CREATE TABLE IF NOT EXISTS blobs (
    yang disimpan cuma dict yang sama.
 2. Isi dokumen **tidak punya skema tetap**: `settings.config` menerima atribut
    `Config` baru yang belum dikenal saat tabel dibuat; `rss` memuat feed dengan
-   key sewenang-wenang (judul feed = key); `units` adalah JSON bersarang yang
-   kedalaman & bentuknya ditentukan kode pemanggil. `jsonb` menampung itu semua
-   tanpa skema ketat, persis seperti dokumen Mongo.
+   key sewenang-wenang (judul feed = key). `jsonb` menampung itu semua tanpa
+   skema ketat, persis seperti dokumen Mongo.
 3. `jsonb` di psycopg ter-adaptasi otomatis ke/dari `dict` Python — kode tidak
    perlu `json.dumps`/`loads` manual di tiap method. Ini alasan memilih psycopg
    ketimbang asyncpg (asyncpg mengembalikan `jsonb` sebagai `str` kecuali ada
    `set_type_codec` per koneksi).
+
+**Normalisasi pasca-hoc: dua pengecualian `jsonb`.** Dua isi ternyata
+**fixed-shape nested list** — kedalaman & key-nya ditentukan kode pemanggil,
+bukan runtime — jadi belakangan di-row-kan: `units` satu task /copy
+(`copy_tasks`/`copy_units`/`copy_unit_media`) dan preset tujuan per user
+(`copy_presets`/`copy_preset_dests`), keduanya di blok SQL di atas. Bentuk dict
+yang dipegang kode pemanggil (`units` list-of-dicts,
+`user_data[uid]["COPY_PRESETS"]`) dipertahankan persis; yang berubah hanya sisi
+tulis/baca DB. Jalurnya sama dengan swap Mongo→PG: **DDL aditif idempotent**
+(tabel lama `copy_records` dibiarkan ada sampai tool backfill menjatuhkannya) +
+tool one-shot di `tools/` (`migrate_copy_records_to_rows.py`,
+`migrate_copy_presets_to_rows.py`) — konsisten dengan nada "tidak ada alembic"
+di §2.
 
 **Pemetaan cara tulis utuh ke SQL** — inti adapter (detail §3):
 
@@ -183,12 +240,20 @@ CREATE TABLE IF NOT EXISTS blobs (
 - *get_incomplete_tasks* → `SELECT ... WHERE bot_id = $1` **lalu** `DELETE FROM
   incomplete_tasks WHERE bot_id = $1` — urutan baca-lalu-hapus dipertahankan.
 - *trunc_table("rss"/"tasks")* → `DELETE FROM <tabel> WHERE bot_id = $1`.
-- *find_copy_records(mid)* → `SELECT ... WHERE bot_id = $1 AND mid = $2`
-  (seq-scan, tanpa index — mirror Mongo).
-- *_prune_copy_records(user)* → pilih `id` lama: `SELECT id FROM copy_records
-  WHERE bot_id = $1 AND user_id = $2 ORDER BY at DESC, id LIMIT ... OFFSET
-  MAX_TASK_RECORDS` lalu `DELETE ... WHERE bot_id=$1 AND id = ANY($2)`. Tambah
-  pengurut kedua `id` supaya urutan deterministik saat `at` kembar.
+- *save_copy_record(cid, mid, user_id, name, units)* → satu transaksi: upsert
+  `copy_tasks`, `DELETE FROM copy_units` untuk (bot, cid, mid) itu (cascade ke
+  baris media), lalu insert `copy_units` per unit (`seq`) dan `copy_unit_media`
+  per file (`idx`). Unit tanpa koordinat/isi → kolom NULL di baris (`units` di
+  kode pemanggil tetap dibaca lewat `.get`).
+- *find_copy_records(mid)* → `copy_tasks LEFT JOIN copy_units LEFT JOIN
+  copy_unit_media`, difilter `t.bot_id = $1 AND t.mid = $2`, urut `t.cid,
+  t.mid, u.seq, m.idx` (seq-scan, tanpa index — mirror Mongo). Python merakit
+  kembali dokumen bentuk lama per (cid, mid); kolom NULL tidak dipancarkan.
+- *_prune_copy_records(user)* → pilih yang basi: `SELECT cid, mid FROM
+  copy_tasks WHERE bot_id = $1 AND user_id = $2 ORDER BY at DESC, mid DESC
+  OFFSET MAX_TASK_RECORDS`, lalu satu `DELETE FROM copy_tasks` per baris (FK
+  cascade menghapus unit/media anaknya). Urutan kedua `mid` membuat urutan
+  deterministik saat `at` kembar.
 
 ---
 
@@ -206,8 +271,10 @@ dipakai raw:
   Pemakaian bot single-loop dan jarang (boot + tiap perubahan settings), jadi
   **tidak perlu connection pool**. `autocommit = True` untuk pola
   *one-shot statement* yang dominan (setiap method = satu `execute`, Mongo juga
-  per-command); transaksi eksplisit hanya jika satu method butuh beberapa
-  statement atomik — dan hari ini tidak ada yang butuh.
+  per-command); transaksi eksplisit dipakai hanya jika satu method butuh
+  beberapa statement atomik — `save_copy_record` (task + unit + media anaknya,
+  §2) dan `update_user_data` saat user punya preset (dokumen `users` + baris
+  preset).
 - Parameter pakai placeholder `%s` psycopg (portabel), bukan `$1` asyncpg.
 - `jsonb` → `dict`/`list` Python otomatis dua arah.
 
@@ -231,10 +298,10 @@ pemanggil. Adapter PG menggantikan driver, API tetap:
 | `update_deploy_config` | upsert `settings_deploy` |
 | `update_config(dict_)` | `settings_config` `||` merge |
 | `update_aria2` / `update_qbittorrent` / `save_qbit_settings` | upsert/`||`-merge `settings_aria2` / `settings_qbit` |
-| `update_user_data` / `update_user_doc` | replace utuh `users` (+ blob thumbnail) |
+| `update_user_data` / `update_user_doc` | replace utuh `users`; `COPY_PRESETS` di-pop dari dokumen dan difunnel ke baris `copy_presets`/`copy_preset_dests` dalam transaksi yang sama (+ blob thumbnail) |
 | `rss_update` / `rss_update_all` / `rss_delete` | replace utuh / delete baris `rss(bot_id, user_id)` |
 | `add_incomplete_task` / `rm_complete_task` / `get_incomplete_tasks` | insert / delete / select-lalu-delete `incomplete_tasks` |
-| `save_copy_record` / `find_copy_records` / `_prune_copy_records` | upsert / select-by-mid / prune `copy_records` |
+| `save_copy_record` / `find_copy_records` / `_prune_copy_records` | tulis / select-join / prune `copy_tasks`+`copy_units`+`copy_unit_media` (§2) |
 | `trunc_table(name)` | `DELETE FROM <tabel> WHERE bot_id = $1` |
 
 `user_sessions.py` membaca `database._return` dan `startup.py` mengecek
@@ -406,9 +473,11 @@ merge yang menentukan perilaku.
 ### 6.3 Integrasi — `tests/test_pg_integration.py` (Postgres nyata)
 
 Menegakkan yang tidak bisa ditangkap fake: **SQL valid**, DDL idempotent,
-perilaku `jsonb` round-trip (`units` list-dict bersarang utuh kembali), range
-`substr` prefix blob dengan nama yang mengandung `.`/`/`, urutan deterministik
-saat `at` kembar, dan `DELETE ... ANY(...)` prune.
+round-trip dokumen copy yang di-rakit ulang dari baris `copy_tasks`/`copy_units`/
+`copy_unit_media` kembali utuh persis (urutan `seq`/`idx` dipertahankan dan
+kolom NULL tidak dipancarkan), range `substr` prefix blob dengan nama yang
+mengandung `.`/`/`, urutan deterministik saat `at` kembar, dan prune per-user
+yang menyisakan `MAX_TASK_RECORDS`.
 
 Mekanisme gating:
 

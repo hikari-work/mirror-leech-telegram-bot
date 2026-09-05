@@ -215,7 +215,7 @@ Fill up rest of the fields. Meaning of each field is discussed below.
 
 - `USER_SESSION_STRING` (`Str`): To download/upload from your telegram account if user is `PREMIUM` and to send rss. To generate session string use this command `python3 generate_string_session.py` after mounting repo folder for sure. **NOTE**: You can't use bot with private message. Use it with superGroup.
 
-- `DATABASE_URL` (`Str`): Your PostgreSQL URL (Connection string), e.g. `postgresql://user:pass@host:5432/dbname`. The schema is created automatically on first boot. Data saved in the database: bot settings, users settings, rss data, incomplete tasks, copy records and (encrypted) private files. **NOTE**: unlike the old Mongo-backed version there is no hosted web console to browse collections; `psql` is the equivalent. Installations that already ran on Mongo can be carried over with `tools/migrate_mongo_to_pg.py` (see the migration section below).
+- `DATABASE_URL` (`Str`): Your PostgreSQL URL (Connection string), e.g. `postgresql://user:pass@host:5432/dbname`. The schema is created automatically on first boot. Data saved in the database: bot settings, users settings, rss data, incomplete tasks, copy records (a finished `/copy` task is a row plus its unit/file rows, and a user's copy presets live in their own rows) and (encrypted) private files. **NOTE**: unlike the old Mongo-backed version there is no hosted web console to browse collections; `psql` is the equivalent. Installations that already ran on Mongo can be carried over with `tools/migrate_mongo_to_pg.py` (see the migration section below).
 
 - `DATABASE_NAME` (`Str`): Optional. Overrides the database name from the URL, exactly like Mongo's database argument did. Leave it empty when the URL already names the database. Default is `mltb`.
 
@@ -615,6 +615,15 @@ migrate, then start the bot for real. Settings, users, RSS feeds, unfinished
 tasks, copy records and stored private files are all carried over. The script
 is idempotent (every write is an upsert), so a re-run after an interruption
 only fills the gaps.
+
+PostgreSQL installs that predate the row-based copy storage can be brought up
+to date with two idempotent one-shots in `tools/`:
+`migrate_copy_records_to_rows.py` turns a legacy `copy_records` table into
+`copy_tasks`/`copy_units`/`copy_unit_media` and drops it, and
+`migrate_copy_presets_to_rows.py` moves `COPY_PRESETS` out of the `users`
+jsonb document into `copy_presets`/`copy_preset_dests`. Both need the row
+tables to exist first, so boot the bot once against the database before
+running them.
 
 ------
 
