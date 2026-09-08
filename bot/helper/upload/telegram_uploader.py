@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from asyncio import sleep
 from contextlib import asynccontextmanager
 from logging import getLogger
@@ -51,9 +53,24 @@ if TYPE_CHECKING:
     # module need the pyrogram classes at import time, which it does not: it
     # never builds a client or a message, it is handed both.
     from pyrogram import Client
-    from pyrogram.types import Message
+    from pyrogram.types import (
+        InputMediaAudio,
+        InputMediaDocument,
+        InputMediaVideo,
+        Message,
+    )
 
 LOGGER = getLogger(__name__)
+
+# A media group is worth more than the file that flushed it, so its send is
+# retried across the connection drops an overloaded account answers with --
+# bounded, because a dead connection must not hold an upload hostage, and each
+# retry waits a little longer, up to the cap below. Once the budget is gone the
+# group is given up on and its messages stay where they already are, one by
+# one, exactly as they would after a refusal.
+_GROUP_RETRIES = 5
+_GROUP_RETRY_DELAY = 2.0
+_GROUP_RETRY_DELAY_MAX = 16.0
 
 
 class _Attempt:
@@ -299,14 +316,56 @@ class TelegramUploader:
         )
 
     async def send_group(self, chat_id, media, reply_to_message_id):
-        """Send one album. None means it never reached telegram."""
+        """Send one album, waiting out floods and connection drops.
+
+        None means it never reached telegram. Floods are waited out here as
+        everywhere else; the connection drops get the bounded retry below,
+        because failing a group on one would strand every message it was about
+        to absorb.
+        """
         return await self._pacer.guard(
-            self._group_client.send_media_group,
+            self._send_media_group,
             chat_id=chat_id,
             media=media,
             reply_to_message_id=reply_to_message_id,
-            disable_notification=True,
         )
+
+    async def _send_media_group(
+        self,
+        chat_id: int | str,
+        media: list[
+            InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo
+        ],
+        reply_to_message_id: int,
+    ) -> list[Message] | None:
+        """Run ``send_media_group`` once it has ridden out the burst around it.
+
+        ``session`` retries the drop ten times on its own and then raises
+        ``TimeoutError``, which nothing further out waits out -- the group send
+        is the one call that loses the most to a rate-limited account. So the
+        transient failures are met here instead: retried in place with the group
+        intact, and only after the budget is gone given up on, returning None so
+        the file that flushed the group is not sent again to cover for it.
+        """
+        delay = _GROUP_RETRY_DELAY
+        for attempt in range(_GROUP_RETRIES):
+            try:
+                return await self._group_client.send_media_group(
+                    chat_id=chat_id,
+                    media=media,
+                    reply_to_message_id=reply_to_message_id,
+                    disable_notification=True,
+                )
+            except (OSError, TimeoutError) as e:
+                if self._listener.is_cancelled or attempt == _GROUP_RETRIES - 1:
+                    if attempt == _GROUP_RETRIES - 1:
+                        LOGGER.warning(
+                            f"Giving up on a media group after "
+                            f"{_GROUP_RETRIES} attempts. Error: {e}"
+                        )
+                    return None
+                await sleep(delay)
+                delay = min(delay * 2, _GROUP_RETRY_DELAY_MAX)
 
     async def retire_group(self, originals, sent):
         """Book an album that went out and dispose of what it replaced.

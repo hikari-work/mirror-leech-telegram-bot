@@ -578,3 +578,89 @@ async def test_one_unreachable_destination_does_not_cost_the_others(uploader_mod
         (-2001, 34),
         (-2002, None),
     ]
+
+
+# --- a group send that hits a connection drop ------------------------------
+#
+# An album goes out as one request, and the whole point is lost if that request
+# dies to a transient failure while the messages it would absorb stay put. The
+# send is retried in place -- bounded, so a dead connection cannot hold the
+# upload hostage -- and only then given up on, leaving the messages where they
+# already are, one by one, exactly as a refusal would.
+
+
+def _failing_send_media_group(failures, error):
+    """A ``send_media_group`` that drops the first *failures* calls.
+
+    Returns the replacement together with the record of every payload it was
+    asked to send, so a test can tell an in-place retry from a re-send.
+    """
+    attempts = []
+
+    async def send_media_group(chat_id, media, **_kwargs):
+        attempts.append(list(media))
+        if len(attempts) <= failures:
+            raise error
+        return [FakeMessage("photo", caption=m.caption) for m in media]
+
+    return send_media_group, attempts
+
+
+def _count_photos(uploader):
+    """Replace the fake ``send_photo`` with one that counts the calls."""
+    send_photo = uploader._listener.client.send_photo
+    photos = []
+
+    async def counted_send_photo(chat_id, caption=None, **_kwargs):
+        photos.append(caption)
+        return await send_photo(chat_id, caption=caption, **_kwargs)
+
+    uploader._listener.client.send_photo = counted_send_photo
+    return photos
+
+
+@pytest.mark.asyncio
+async def test_an_album_retries_a_connection_drop_in_place(
+    uploader_module, monkeypatch
+):
+    """A group send that hits a connection drop is retried as the same album,
+    not by re-sending the file that flushed it."""
+    monkeypatch.setattr(uploader_module, "_GROUP_RETRIES", 3, raising=False)
+    monkeypatch.setattr(uploader_module, "_GROUP_RETRY_DELAY", 0.0, raising=False)
+    uploader, _ = _make_uploader(uploader_module, [])
+    photos = _count_photos(uploader)
+    uploader._listener.client.send_media_group, attempts = _failing_send_media_group(
+        2, TimeoutError("Failed to invoke after 10 retries")
+    )
+
+    for i in range(10):
+        await uploader._upload_file(f"<code>{i}.jpg</code>", f"{i}.jpg", f"/tmp/{i}.jpg")
+
+    assert len(photos) == 10, "retrying the album must not re-send the files"
+    assert len(attempts) == 3, "two drops, then the group itself goes out again"
+    assert all(len(group) == 10 for group in attempts)
+    assert [m.media for m in attempts[0]] == [m.media for m in attempts[-1]]
+    assert uploader._batcher._album_msgs == []
+
+
+@pytest.mark.asyncio
+async def test_a_group_send_that_never_recovers_resends_no_file(
+    uploader_module, monkeypatch
+):
+    """Giving up on an album keeps the file count honest: the tenth photo was
+    already sent, so retrying it would double the file."""
+    monkeypatch.setattr(uploader_module, "_GROUP_RETRIES", 1, raising=False)
+    monkeypatch.setattr(uploader_module, "_GROUP_RETRY_DELAY", 0.0, raising=False)
+    uploader, _ = _make_uploader(uploader_module, [])
+    photos = _count_photos(uploader)
+    uploader._listener.client.send_media_group, attempts = _failing_send_media_group(
+        1, TimeoutError("Request timed out")
+    )
+
+    for i in range(10):
+        await uploader._upload_file(f"<code>{i}.jpg</code>", f"{i}.jpg", f"/tmp/{i}.jpg")
+
+    assert len(photos) == 10
+    assert len(attempts) == 1
+    assert uploader._batcher._album_msgs == []
+    uploader._listener.on_upload_error.assert_not_awaited()
