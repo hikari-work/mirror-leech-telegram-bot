@@ -21,6 +21,7 @@ from ..telegram.dest_chat import (
     verify_copy_target,
 )
 from ..telegram.message_utils import get_tg_link_message
+from ..upload.s3_uploader import s3_config_error
 from ..util.bot_utils import get_size_bytes
 from ..util.links_utils import is_telegram_link
 from ..util.media_utils import create_thumb
@@ -83,10 +84,20 @@ class SettingsResolverMixin(TaskConfigHost):
 
         Order matters: the destination has the last word on which session
         uploads, and that in turn decides how large a split may be.
+
+        A task bound for a bucket stops after the three steps that change what
+        lands on disk. Everything below them is about *telegram* delivery --
+        which chat, through which session, how big a piece may be, which album
+        or thumbnail to attach -- and none of it is read on the way to a bucket.
+        ``_resolve_upload_destination`` in particular can raise "Chat not found!"
+        for a task that was never going to post anything.
         """
         self._resolve_name_substitutions()
         self._resolve_extension_filters()
         self._resolve_ffmpeg_commands()
+        if self.destination != "tg":
+            self._resolve_s3_destination()
+            return
         await self._resolve_upload_destination()
         self._resolve_split_sizes()
         self._resolve_upload_format()
@@ -94,6 +105,28 @@ class SettingsResolverMixin(TaskConfigHost):
         self._resolve_clone_dump_chats()
         await self._resolve_copy_preset()
         await self._resolve_thumbnail()
+
+    def _resolve_s3_destination(self) -> None:
+        """Refuse a bucket-bound task that has no bucket to land in.
+
+        Both checks happen here rather than at the first upload so that a typo
+        in the settings costs a message instead of a download: by the time an
+        uploader would notice, the task has already spent however long the
+        transfer took.
+
+        Unlike the telegram path there is no network probe, on purpose. An R2
+        token scoped to "Object Read & Write" is not guaranteed to be allowed
+        ``HeadBucket``, so probing would fail tasks whose uploads would have
+        worked -- the wrong half of the trade.
+        """
+        if self.destination != "s3":
+            raise ValueError(
+                f"UPLOAD_DESTINATION is {self.destination!r}; this bot uploads"
+                " to 'tg' (telegram) or 's3' (a bucket)."
+            )
+        error = s3_config_error()
+        if error:
+            raise ValueError(error)
 
     # ── plain settings ──────────────────────────────────────────────────
 

@@ -58,6 +58,25 @@ class Config:
     RSS_CHAT = ""
     RSS_DELAY = 600
     RSS_SIZE_LIMIT = 0
+    # The object store a task with ``-s3`` uploads to. Cloudflare R2 is what the
+    # endpoint below looks like in practice, but nothing here is R2-specific: any
+    # S3-compatible service answers to the same four values.
+    S3_ENDPOINT_URL = ""
+    S3_ACCESS_KEY_ID = ""
+    S3_SECRET_ACCESS_KEY = ""
+    S3_BUCKET = ""
+    # The SDK insists on a region and the service ignores it, which is why the
+    # default is the placeholder R2 expects rather than a real region.
+    S3_REGION = "auto"
+    # Optional folder the task-id folders are nested under: "mirror" turns
+    # 10032/… into mirror/10032/….
+    S3_KEY_PREFIX = ""
+    # Base URL of the bucket browser the completion message links to, e.g.
+    # "https://mirror.example.com". The bot appends ?bucket=…&prefix=… to it,
+    # which is the shape the operator's own app answers to.
+    S3_BROWSER_URL = ""
+    # Parts of one multipart upload in flight at the same time.
+    S3_MULTIPART_CONCURRENCY = 4
     SEARCH_API_LINK = ""
     SEARCH_LIMIT = 0
     SEARCH_PLUGINS = []
@@ -70,6 +89,10 @@ class Config:
     TG_PROXY = {}
     THUMBNAIL_LAYOUT = ""
     TORRENT_TIMEOUT = 0
+    # Where a finished download goes: "tg" (telegram messages, the behaviour this
+    # bot has always had) or "s3" (objects in a bucket, reported as one link to
+    # the task's folder). A single task overrides it with ``-s3`` / ``-tg``.
+    UPLOAD_DESTINATION = "tg"
     UPSTREAM_REPO = ""
     UPSTREAM_BRANCH = "master"
     USER_SESSION_STRING = ""
@@ -161,6 +184,9 @@ class Config:
             "BASE_URL",
             "SEARCH_API_LINK",
             "MEGA_PROXY_URL",
+            "S3_ENDPOINT_URL",
+            "S3_BROWSER_URL",
+            "S3_KEY_PREFIX",
         }:
             return converted_value.strip("/") if converted_value else ""
 

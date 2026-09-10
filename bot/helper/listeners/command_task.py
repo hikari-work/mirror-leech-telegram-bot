@@ -52,8 +52,27 @@ class CommandTask(TaskListener):
 
         The mapping is the one the parser filled them from, so an option only has
         to be named once to travel all the way from the command to the task.
+        Subclasses assign their own flags first and hand back to this one last,
+        so the destination settled at the bottom is the final word.
         """
         for attr in COMMON_ARG_FIELDS.values():
             setattr(self, attr, getattr(args, attr))
         self.folder_name = args.folder_name
         self.multi = args.multi
+        # The flags override the destination the config chose, and -s3 wins if
+        # both are given. Which of the two the user typed last is not something
+        # the parser records, so a rule that can be stated beats one that
+        # depends on the order of tokens.
+        if args.is_s3 or args.is_tg:
+            self.destination = "s3" if args.is_s3 else "tg"
+        if self.destination == "s3":
+            # Both of these exist to feed the telegram uploader, and both do
+            # their work *during* the download: -su picks TelegramUploader
+            # inside DirectListener's streaming path, before any destination is
+            # chosen, and -ss moves a single-file download into a screenshot
+            # folder of its own, which is then no longer the folder the
+            # completion message links to. Turning them off is not politeness
+            # to a flag that would be ignored anyway -- leaving either on breaks
+            # the upload rather than the option.
+            self.stream_upload = False
+            self.screen_shots = False

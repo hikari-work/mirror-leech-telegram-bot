@@ -119,6 +119,11 @@ class TaskConfigHost:
     is_qbit: bool
     is_ytdlp: bool
     is_super_chat: bool
+    # Where the finished files go: "tg" for telegram messages, "s3" for objects
+    # in a bucket. ``TaskConfig.__init__`` takes it from ``UPLOAD_DESTINATION``
+    # and ``-s3`` / ``-tg`` override it; the uploader table in ``task_listener``
+    # is keyed by it, so a value nobody serves is rejected in ``before_start``.
+    destination: str
 
     # The child process an ffmpeg or 7z step currently has running. ``FFMpeg``
     # and ``SevenZ`` are handed the task and leave it here rather than keeping it

@@ -36,6 +36,8 @@ COMMON_ARG_DEFAULTS: RawArgs = {
     "-hl": False,
     "-bt": False,
     "-ut": False,
+    "-s3": False,
+    "-tg": False,
     "-i": 0,
     "-sp": 0,
     "link": "",
@@ -128,6 +130,11 @@ class CommonArgs:
     hybrid_leech: bool = False
     bot_trans: bool = False
     user_trans: bool = False
+    # Where this one task uploads to, overriding UPLOAD_DESTINATION. A flag
+    # forces an answer rather than naming one, so "no flag at all" stays
+    # distinguishable from "flagged back to the default".
+    is_s3: bool = False
+    is_tg: bool = False
 
     # int
     multi: int = 0
@@ -258,6 +265,9 @@ def _apply_common(args: CommonArgs, raw: RawArgs) -> None:
     """Copy everything both commands parse alike from *raw* onto *args*."""
     for key, attr in COMMON_ARG_FIELDS.items():
         setattr(args, attr, raw[key])
+
+    args.is_s3 = raw["-s3"]
+    args.is_tg = raw["-tg"]
 
     # folder_name
     m = raw["-m"]

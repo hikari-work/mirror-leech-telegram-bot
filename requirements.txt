@@ -3,6 +3,7 @@ aiohttp-socks
 apscheduler
 aioaria2
 aioqbt
+boto3
 cloudscraper
 cryptography
 dnspython

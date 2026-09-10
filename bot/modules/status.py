@@ -86,9 +86,13 @@ async def get_download_status(download):
     The upload branch of the caller passes it unguarded, so an rclone or gDrive
     upload -- neither of which is asked for a speed here -- used to raise
     ``AttributeError`` out of the whole stats page.
+
+    A tool that is missing from the list is not an error, just a status line
+    without the rate: ``s3`` has to be named here like the other uploader, or a
+    bucket-bound task reports its progress and never its speed.
     """
     tool = download.tool
-    speed = download.speed() if tool in ["telegram", "yt-dlp"] else ""
+    speed = download.speed() if tool in ("telegram", "yt-dlp", "s3") else ""
     return (
         await download.status()
         if iscoroutinefunction(download.status)

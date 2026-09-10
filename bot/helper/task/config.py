@@ -1,4 +1,5 @@
 from ... import DOWNLOAD_DIR, user_data
+from ...core.config_manager import Config
 from . import (
     BatchTrackerMixin,
     MediaPipelineMixin,
@@ -66,9 +67,10 @@ class TaskConfig(
         self._alldebrid_magnet_id = 0
         self._torbox_torrent_id = 0
         self._torbox_web_id = 0
-        # ponytail: is_leech is always True (leech-only branch). Kept as
-        # instance attr for uploader/status code; remove if bot gains other modes.
-        self.is_leech = True
+        # Where this task's upload goes: "tg" or "s3". The config default, which
+        # ``-s3`` / ``-tg`` override per command -- see ``_apply_args``, which is
+        # the only writer after this line.
+        self.destination = str(Config.UPLOAD_DESTINATION or "tg").strip().lower()
         self.is_qbit = False
         self.is_ytdlp = False
         self.is_alldebrid = False

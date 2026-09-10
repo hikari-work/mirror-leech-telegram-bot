@@ -225,6 +225,19 @@ waits for TorBox to finish/cache it, then downloads each file from TorBox CDN li
 
 Requires <code>TORBOX_API_KEY</code> in bot configuration."""
 
+upload_destination = """<b>Upload Destination</b>: -s3 -tg
+
+/cmd link -s3
+Upload the finished files to the configured S3-compatible bucket (Cloudflare R2 for this bot) instead of sending them to Telegram. Everything one task downloads lands in a single folder named after the task id, and the completion message carries one link to that folder.
+
+/cmd link -tg
+Force Telegram for one task, for when <code>UPLOAD_DESTINATION</code> in the bot settings is <code>s3</code>. Both flags are accepted by /leech and /ytdl, and <code>-s3</code> wins if you give both.
+
+<b>NOTE:</b>
+1. Needs <code>S3_ENDPOINT_URL</code>, <code>S3_ACCESS_KEY_ID</code>, <code>S3_SECRET_ACCESS_KEY</code>, <code>S3_BUCKET</code> and <code>S3_BROWSER_URL</code>; a task with <code>-s3</code> fails before downloading when any of them is empty.
+2. The link <code>S3_BROWSER_URL</code> points at must be reachable from the device reading the message, not <code>127.0.0.1</code>.
+3. Files are split into parts only because Telegram caps message size, so <code>-s3</code> never splits. <code>-su</code> and <code>-ss</code> are ignored for the same reason: both feed the Telegram uploader."""
+
 YT_HELP_DICT = {
     "main": yt,
     "New-Name": f"{new_name}\nNote: Don't add file extension",
@@ -246,6 +259,7 @@ YT_HELP_DICT = {
     "Leech-Type": leech_as,
     "Copy-Preset": copy_preset,
     "FFmpeg-Cmds": ffmpeg_cmds,
+    "Destination": upload_destination,
 }
 
 stream_upload = """<b>Stream Upload</b>: -su
@@ -285,6 +299,7 @@ LEECH_HELP_DICT = {
     "AllDebrid": alldebrid_arg,
     "TorBox": torbox_arg,
     "Stream-Upload": stream_upload,
+    "Destination": upload_destination,
 }
 
 RSS_HELP_MESSAGE = """
@@ -363,7 +378,7 @@ Here I will explain how to use mltb.* which is reference to files you want to wo
 
 help_string = f"""
 NOTE: Try each command without any argument to see more detalis.
-/{BotCommands.LeechCommand[0]} or /{BotCommands.LeechCommand[1]}: Start leeching to Telegram.
+/{BotCommands.LeechCommand[0]} or /{BotCommands.LeechCommand[1]}: Start leeching to Telegram or, with <code>-s3</code>, to your bucket.
 /{BotCommands.QbLeechCommand[0]} or /{BotCommands.QbLeechCommand[1]}: Start leeching using qBittorrent.
 /{BotCommands.YtdlLeechCommand[0]} or /{BotCommands.YtdlLeechCommand[1]}: Leech yt-dlp supported link.
 /{BotCommands.BypassCommand[0]} or /{BotCommands.BypassCommand[1]} [link]: Bypass and get the direct link.

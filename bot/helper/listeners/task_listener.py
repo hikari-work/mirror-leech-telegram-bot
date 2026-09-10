@@ -1,7 +1,9 @@
 from asyncio import gather, sleep
+from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 from time import monotonic
+from typing import Any
 
 from aiofiles.os import listdir, remove
 from aiofiles.os import path as aiopath
@@ -23,6 +25,7 @@ from ... import (
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
 from ..progress.queue_status import QueueStatus
+from ..progress.s3_status import S3UploadStatus
 from ..progress.telegram_status import TelegramStatus
 from ..storage.db_handler import database
 from ..task.config import TaskConfig
@@ -34,6 +37,7 @@ from ..telegram.message_utils import (
     send_message,
     update_status_message,
 )
+from ..upload.s3_uploader import S3Uploader
 from ..upload.telegram_uploader import TelegramUploader
 from ..util.files_utils import (
     clean_download,
@@ -405,7 +409,7 @@ class TaskListener(TaskConfig):
         self.name = up_path.replace(f"{up_dir}/", "").split("/", 1)[0]
         self.size = await get_path_size(up_dir)
 
-        if not self.compress:
+        if not self.compress and _DESTINATIONS[self.destination].splits:
             await self.proceed_split(up_path, gid)
             if self.is_cancelled:
                 return up_path, True
@@ -413,7 +417,7 @@ class TaskListener(TaskConfig):
         return up_path, False
 
     async def _start_upload(self, up_dir, gid):
-        """Queue the upload if needed, then hand the files to Telegram."""
+        """Queue the upload if needed, then hand the files to their destination."""
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
@@ -428,14 +432,15 @@ class TaskListener(TaskConfig):
         self.size = await get_path_size(up_dir)
 
         LOGGER.info(f"Leech Name: {self.name}")
-        tg = TelegramUploader(self, up_dir)
+        spec = _DESTINATIONS[self.destination]
+        uploader = spec.uploader(self, up_dir)
         async with task_dict_lock:
-            task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
+            task_dict[self.mid] = spec.status(self, uploader, gid)
         await gather(
             update_status_message(chat_of(self.message).id),
-            tg.upload(),
+            uploader.upload(),
         )
-        del tg
+        del uploader
 
     async def on_upload_complete(self, link, files, folders, mime_type):
         if (
@@ -628,3 +633,35 @@ class TaskListener(TaskConfig):
                 await send_message(self.message, f"{self.tag} {escape(str(error))}")
 
         await self._teardown_after_error(count)
+
+
+def _telegram_upload_status(listener, obj, gid) -> TelegramStatus:
+    """``TelegramStatus`` in its "up" direction.
+
+    The class serves downloads too -- ``telegram_download`` builds it without a
+    status word at all -- so the direction cannot live on the class and has to
+    be supplied by whoever knows this is an upload.
+    """
+    return TelegramStatus(listener, obj, gid, "up")
+
+
+@dataclass(frozen=True)
+class _Destination:
+    """How the two upload destinations differ.
+
+    Three differences in one row: which object does the work, which status line
+    reports it, and whether the size ceiling it uploads through makes splitting
+    the files necessary at all. Kept as data rather than as branches so that a
+    third destination becomes a row instead of a flag threaded through the
+    pipeline.
+    """
+
+    uploader: Callable[..., Any]
+    status: Callable[..., Any]
+    splits: bool
+
+
+_DESTINATIONS: dict[str, _Destination] = {
+    "tg": _Destination(TelegramUploader, _telegram_upload_status, splits=True),
+    "s3": _Destination(S3Uploader, S3UploadStatus, splits=False),
+}

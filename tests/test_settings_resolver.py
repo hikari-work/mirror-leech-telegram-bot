@@ -73,6 +73,7 @@ class Listener(SettingsResolverMixin):
         self.bot_trans = False
         self.user_trans = False
         self.is_super_chat = True
+        self.destination = "tg"
         self.__dict__.update(overrides)
 
 
@@ -552,3 +553,56 @@ def test_no_dump_chats_configured_stays_an_empty_mapping():
     listener._resolve_clone_dump_chats()
 
     assert listener.clone_dump_chats == {}
+
+
+# ── a task bound for a bucket ───────────────────────────────────────
+
+
+class TestBucketDestination:
+    """The seven telegram steps below the first three do not apply to a bucket.
+
+    They are not merely wasted work: ``_resolve_upload_destination`` verifies the
+    dump chat and raises "Chat not found!" for a task that was never going to
+    post to one.
+    """
+
+    async def test_nothing_telegram_runs_for_a_bucket_task(self, monkeypatch):
+        async def explode(self):
+            raise AssertionError("a telegram step ran for a bucket task")
+
+        monkeypatch.setattr(
+            SettingsResolverMixin, "_resolve_upload_destination", explode
+        )
+        monkeypatch.setattr(sr, "s3_config_error", lambda: "")
+        listener = Listener(destination="s3")
+
+        await listener.before_start()
+
+    async def test_the_telegram_steps_still_run_for_telegram(self, monkeypatch):
+        async def explode(self):
+            raise AssertionError("the telegram chain was skipped")
+
+        monkeypatch.setattr(
+            SettingsResolverMixin, "_resolve_upload_destination", explode
+        )
+        listener = Listener(destination="tg")
+
+        with pytest.raises(AssertionError):
+            await listener.before_start()
+
+    async def test_a_task_with_no_bucket_to_land_in_fails_before_it_downloads(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            sr, "s3_config_error", lambda: "S3 is not configured: set S3_BUCKET"
+        )
+        listener = Listener(destination="s3")
+
+        with pytest.raises(ValueError, match="S3_BUCKET"):
+            await listener.before_start()
+
+    def test_a_destination_this_bot_does_not_serve_is_named_back(self):
+        listener = Listener(destination="aws")
+
+        with pytest.raises(ValueError, match="'aws'"):
+            listener._resolve_s3_destination()

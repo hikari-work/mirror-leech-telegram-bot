@@ -73,6 +73,27 @@ QUEUE_UPLOAD = 0
 # resolved, so this is the knob for bulk (-b) runs: 4 links at a time keeps the
 # gateway from rate-limiting the batch. 0 disables the gate.
 RESOLVE_CONCURRENCY = 4
+# Upload destination. "tg" sends the files to telegram as this bot always has;
+# "s3" puts them in a bucket as one folder per task, named after the task id
+# (10032/…), and the completion message carries a single link to that folder.
+# A single command overrides it with -s3 or -tg.
+UPLOAD_DESTINATION = "tg"
+# The bucket -s3 uploads to. Cloudflare R2 is what these values look like in
+# practice, but any S3-compatible service takes the same four.
+S3_ENDPOINT_URL = ""
+S3_ACCESS_KEY_ID = ""
+S3_SECRET_ACCESS_KEY = ""
+S3_BUCKET = ""
+# The SDK insists on a region and the service ignores it.
+S3_REGION = "auto"
+# Optional folder the task folders are nested under: "mirror" gives mirror/10032/…
+S3_KEY_PREFIX = ""
+# Base URL of the bucket browser the completion message links to. The bot
+# appends ?bucket=…&prefix=… to it, so it must be the address the operator's app
+# answers to -- and one the recipients of the message can actually reach.
+S3_BROWSER_URL = ""
+# Parts of one multipart upload in flight at the same time.
+S3_MULTIPART_CONCURRENCY = 4
 # RSS
 RSS_DELAY = 600
 RSS_CHAT = ""

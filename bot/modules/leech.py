@@ -95,14 +95,19 @@ class Leech(CommandTask):
     # ── arg application ─────────────────────────────────────────────
 
     def _apply_args(self, args):
-        """The shared options, plus the ones only a leech takes."""
-        super()._apply_args(args)
+        """The shared options, plus the ones only a leech takes.
+
+        Leech's own flags go on first; ``super()`` is called last because it
+        settles the destination, and the two options that only a telegram
+        upload can honour have to be decided after that.
+        """
         self.seed = args.seed
         self.extract = args.extract
         self.join = args.join
         self.is_alldebrid = args.is_alldebrid
         self.is_torbox = args.is_torbox
         self.stream_upload = args.stream_upload
+        super()._apply_args(args)
 
     # ── reply / link resolution ─────────────────────────────────────
 
