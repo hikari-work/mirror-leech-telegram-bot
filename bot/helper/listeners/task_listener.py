@@ -30,6 +30,7 @@ from ..telegram.message_utils import (
     chat_of,
     delete_message,
     delete_status,
+    file_link_line,
     send_message,
     update_status_message,
 )
@@ -489,7 +490,7 @@ class TaskListener(TaskConfig):
             else:
                 fmsg = ""
                 for index, (link, name) in enumerate(files.items(), start=1):
-                    fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
+                    fmsg += file_link_line(index, link, name)
                     if len(fmsg.encode() + msg.encode()) > 4000:
                         await send_message(self.message, msg + fmsg)
                         await sleep(1)

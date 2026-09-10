@@ -6,6 +6,7 @@ from ... import multi_batches, multi_tags
 from ..telegram.message_utils import (
     delete_message,
     edit_message,
+    file_link_line,
     send_message,
 )
 from ..util.status_utils import get_readable_file_size
@@ -194,7 +195,7 @@ class BatchTrackerMixin(TaskConfigHost):
         fmsg = ""
         anchor_used = False
         for index, (flink, fname) in enumerate(all_files.items(), start=1):
-            fmsg += f"{index}. <a href='{flink}'>{fname}</a>\n"
+            fmsg += file_link_line(index, flink, fname)
             if len(fmsg.encode()) + len(msg.encode()) > 4000:
                 if anchor_used:
                     await send_message(anchor, msg + fmsg)

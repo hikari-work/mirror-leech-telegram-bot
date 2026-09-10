@@ -1,3 +1,4 @@
+import html
 from asyncio import sleep
 from pyrogram.errors import FloodWait, FloodPremiumWait
 from re import match as re_match
@@ -34,6 +35,23 @@ def chat_of(message: Message) -> Chat:
     about that, so the assumption is stated here.
     """
     return message.chat  # pyrefly: ignore[bad-return]
+
+
+def file_link_line(index: int, link: str, name: str) -> str:
+    """One numbered, clickable result line for an uploaded file.
+
+    Both halves are escaped, and neither is optional. A name comes off disk, so
+    a file called ``<b>x</b>.mkv`` used to arrive as markup; a link to a bucket
+    carries ``&`` between its query parameters, which is the same mistake
+    spelled differently. Telegram's parser accepts a bare ``&`` often enough
+    that only some names and some links broke.
+
+    Escaping is a no-op for the telegram message links this was first written
+    for, so the message a leech has always sent is unchanged -- and the only
+    length it adds is in the safe direction, where a chunk splits earlier.
+    """
+    escaped_link = html.escape(link, quote=True)
+    return f"{index}. <a href='{escaped_link}'>{html.escape(name)}</a>\n"
 
 
 async def send_message(message, text, buttons=None, block=True):
