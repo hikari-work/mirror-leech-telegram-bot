@@ -43,6 +43,42 @@ def _get_hash_file(fpath):
 """
 
 
+_PRE_METADATA_STATES = ("metaDL", "checkingResumeData", "stoppedDL")
+"""The states a magnet sits in while its metadata is still being fetched.
+
+Until it leaves one of these there is no file list, so the selection buttons
+the caller is about to send would have nothing to select.
+"""
+
+
+async def _wait_for_metadata(listener, meta):
+    """Poll until qBittorrent has the magnet's metadata, then return the torrent.
+
+    ``None`` means it never arrived -- the torrent is gone, or the answer was
+    not shaped like a torrent at all -- and the caller gives up. Either way the
+    placeholder *meta* has been deleted by the time this returns.
+    """
+    while True:
+        tor_info = await TorrentManager.qbittorrent.torrents.info(tag=f"{listener.mid}")
+        if len(tor_info) == 0:
+            await delete_message(meta)
+            return None
+        try:
+            torrent = tor_info[0]
+            if torrent.state not in _PRE_METADATA_STATES:
+                await delete_message(meta)
+                return torrent
+        except Exception:
+            await delete_message(meta)
+            return None
+        # Without this the loop calls the API again the moment the previous call
+        # returns, for as long as the metadata takes -- and qBittorrent serves
+        # its WebUI from one thread, so that is the whole API held under a
+        # stream of requests. The second is the same gap the "added to queue"
+        # wait above leaves, and it is invisible next to fetching metadata.
+        await sleep(1)
+
+
 async def add_qb_torrent(listener, path, ratio, seed_time):
     try:
         form = AddFormBuilder.with_client(TorrentManager.qbittorrent)
@@ -103,25 +139,9 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
             if listener.link.startswith("magnet:"):
                 metamsg = "Downloading Metadata, wait then you can select files. Use torrent file to avoid this wait."
                 meta = await send_message(listener.message, metamsg)
-                while True:
-                    tor_info = await TorrentManager.qbittorrent.torrents.info(
-                        tag=f"{listener.mid}"
-                    )
-                    if len(tor_info) == 0:
-                        await delete_message(meta)
-                        return
-                    try:
-                        tor_info = tor_info[0]
-                        if tor_info.state not in [
-                            "metaDL",
-                            "checkingResumeData",
-                            "stoppedDL",
-                        ]:
-                            await delete_message(meta)
-                            break
-                    except Exception:
-                        await delete_message(meta)
-                        return
+                tor_info = await _wait_for_metadata(listener, meta)
+                if tor_info is None:
+                    return
 
             ext_hash = tor_info.hash
             if not add_to_queue:
