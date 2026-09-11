@@ -194,6 +194,30 @@ def _jsonb(value: Any) -> Jsonb:
     return Jsonb(value)
 
 
+_UNIT_INSERT = """
+    INSERT INTO copy_units
+        (bot_id, cid, mid, seq, mode, src_chat, src_msg)
+    VALUES {values}
+"""
+
+_MEDIA_INSERT = """
+    INSERT INTO copy_unit_media
+        (bot_id, cid, mid, seq, idx, kind, file_id, caption)
+    VALUES {values}
+"""
+
+
+def _values_clause(rows: int, columns: int) -> str:
+    """``(%s, %s), (%s, %s)`` -- one placeholder group per row.
+
+    What this makes multi-row is the row *count*, and that comes from the length
+    of a list this module built -- never from anything a user typed -- so the
+    statement stays something this module wrote. The two arguments have to agree
+    or Postgres sees a mismatch between the column list and the values.
+    """
+    return ", ".join([f"({', '.join(['%s'] * columns)})"] * rows)
+
+
 class DbManager:
     def __init__(self):
         # ``_return`` guards the whole class: every method opens with
@@ -746,42 +770,47 @@ class DbManager:
                 """,
                 (TgClient.ID, cid, mid),
             )
-            for seq, unit in enumerate(units):
-                # chat/msg are absent on a sparse unit, so both stay nullable.
-                await self._execute(
-                    """
-                    INSERT INTO copy_units
-                        (bot_id, cid, mid, seq, mode, src_chat, src_msg)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        TgClient.ID,
-                        cid,
-                        mid,
-                        seq,
-                        unit["mode"],
-                        unit.get("chat"),
-                        unit.get("msg"),
-                    ),
+            # One statement per table, each carrying every row, rather than one
+            # statement per row: a ten-file album used to cost twenty-one round
+            # trips inside this transaction.
+            #
+            # chat/msg are absent on a sparse unit, so both stay nullable.
+            unit_rows = [
+                (
+                    TgClient.ID,
+                    cid,
+                    mid,
+                    seq,
+                    unit["mode"],
+                    unit.get("chat"),
+                    unit.get("msg"),
                 )
-                for idx, entry in enumerate(unit.get("media") or []):
-                    await self._execute(
-                        """
-                        INSERT INTO copy_unit_media
-                            (bot_id, cid, mid, seq, idx, kind, file_id, caption)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            TgClient.ID,
-                            cid,
-                            mid,
-                            seq,
-                            idx,
-                            entry.get("kind"),
-                            entry.get("file_id"),
-                            entry.get("caption"),
-                        ),
-                    )
+                for seq, unit in enumerate(units)
+            ]
+            media_rows = [
+                (
+                    TgClient.ID,
+                    cid,
+                    mid,
+                    seq,
+                    idx,
+                    entry.get("kind"),
+                    entry.get("file_id"),
+                    entry.get("caption"),
+                )
+                for seq, unit in enumerate(units)
+                for idx, entry in enumerate(unit.get("media") or [])
+            ]
+            if unit_rows:
+                await self._execute(
+                    _UNIT_INSERT.format(values=_values_clause(len(unit_rows), 7)),
+                    [value for row in unit_rows for value in row],
+                )
+            if media_rows:
+                await self._execute(
+                    _MEDIA_INSERT.format(values=_values_clause(len(media_rows), 8)),
+                    [value for row in media_rows for value in row],
+                )
             await self._prune_copy_records(user_id)
 
     async def find_copy_records(self, mid: int) -> list[dict]:

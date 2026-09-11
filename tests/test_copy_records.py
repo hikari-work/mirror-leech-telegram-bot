@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from bot.helper.storage import db_handler as dbm_module
 from bot.helper.storage.copy_records import (
     MAX_RECORD_UNITS,
     MAX_TASK_RECORDS,
@@ -557,6 +558,65 @@ async def test_a_saved_record_writes_parent_rows_then_its_units():
     assert "INSERT INTO copy_unit_media" in media_sql
     # media columns are nullable; absent keys arrive as None
     assert media_params[1:] == (-1001, 7, 0, 0, "photo", None, None)
+
+
+async def test_a_multi_unit_record_is_written_in_one_statement_per_table():
+    """A ten-file album used to cost one round trip per row, inside the txn.
+
+    The single-unit case above looks the same either way, which is exactly why
+    this one exists: only a record with more than one row distinguishes "one
+    statement carrying every row" from "one statement per row".
+    """
+    units = [
+        {"mode": "single", "chat": -1001, "msg": 10,
+         "media": [{"kind": "photo", "file_id": "f1", "caption": "one"},
+                   {"kind": "photo", "file_id": "f2", "caption": None}]},
+        {"mode": "group", "chat": -1001, "msg": 11, "media": []},
+        {"mode": "single", "media": [{"kind": "video", "file_id": "f3"}]},
+    ]
+    dbm, recorder = _db()
+    dbm._prune_copy_records = AsyncMock()
+
+    await dbm.save_copy_record(-1001, 7, 42, "an album", units)
+
+    # upsert, child delete, one units insert, one media insert -- four, not the
+    # seven the per-row form produced
+    assert len(recorder.writes) == 4
+
+    unit_sql, unit_params = recorder.writes[2]
+    assert "INSERT INTO copy_units" in unit_sql
+    # three rows flattened in order: bot_id, cid, mid, seq, mode, src_chat, src_msg
+    bot = dbm_module.TgClient.ID
+    assert unit_params == (
+        bot, -1001, 7, 0, "single", -1001, 10,
+        bot, -1001, 7, 1, "group", -1001, 11,
+        bot, -1001, 7, 2, "single", None, None,
+    )
+    # one placeholder group per row, so the two counts have to agree
+    assert unit_sql.count("%s") == len(unit_params)
+
+    media_sql, media_params = recorder.writes[3]
+    assert "INSERT INTO copy_unit_media" in media_sql
+    # seq and idx are carried per row, so the album's order survives the batch
+    assert media_params == (
+        bot, -1001, 7, 0, 0, "photo", "f1", "one",
+        bot, -1001, 7, 0, 1, "photo", "f2", None,
+        bot, -1001, 7, 2, 0, "video", "f3", None,
+    )
+    assert media_sql.count("%s") == len(media_params)
+
+
+async def test_a_record_with_no_units_writes_no_child_rows():
+    """An empty list must not become `VALUES` with nothing after it."""
+    dbm, recorder = _db()
+    dbm._prune_copy_records = AsyncMock()
+
+    await dbm.save_copy_record(-1001, 7, 42, "nothing", [])
+
+    assert len(recorder.writes) == 2  # the upsert and the child delete
+    assert not [
+        w for w in recorder.writes if "INSERT INTO copy_unit" in w[0]
+    ]
 
 
 async def test_saving_again_replaces_the_units_of_the_same_task():
