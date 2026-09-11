@@ -205,9 +205,14 @@ class FakeMessage:
         self.audio = SimpleNamespace(file_id=f"audio{self.id}") if kind == "audio" else None
 
 
-def _make_uploader(uploader_module, calls):
-    """Build an uploader wired to a fake client that records its calls."""
-    calls_by_id = {}
+def _make_client(calls_by_id, calls):
+    """A fake pyrogram client whose files answer with registered messages.
+
+    Every message it sends registers itself by id, so ``get_messages`` can hand
+    it back -- which is what the album does when the anchor is not one the album
+    can be built from. *calls* is where ``send_media_group`` is recorded, or
+    None for a client whose album sends are not being watched.
+    """
 
     def _sent(kind, caption, reply_parameters):
         return FakeMessage(
@@ -230,7 +235,8 @@ def _make_uploader(uploader_module, calls):
         return _sent("audio", caption, reply_parameters)
 
     async def send_media_group(chat_id, media, **kwargs):
-        calls.append(("send_media_group", list(media)))
+        if calls is not None:
+            calls.append(("send_media_group", list(media)))
         sent = [FakeMessage("photo", caption=m.caption) for m in media]
         for msg in sent:
             msg.media_group_id = "group1"
@@ -239,13 +245,25 @@ def _make_uploader(uploader_module, calls):
     async def get_messages(chat_id, message_ids):
         return calls_by_id[message_ids]
 
-    client = SimpleNamespace(
+    return SimpleNamespace(
         send_photo=send_photo,
         send_video=send_video,
         send_document=send_document,
         send_audio=send_audio,
         send_media_group=send_media_group,
         get_messages=get_messages,
+    )
+
+
+def _make_uploader(uploader_module, calls):
+    """Build an uploader wired to a fake client that records its calls."""
+    calls_by_id = {}
+    client = _make_client(calls_by_id, calls)
+    # The user session is a client of its own and is what carries a file under
+    # hybrid leech. Its messages register alongside the others, so the album can
+    # read one back -- which is exactly what it has to do on that path.
+    sys.modules["bot.core.telegram_manager"].TgClient.user = _make_client(
+        calls_by_id, None
     )
     listener = SimpleNamespace(
         thumb="none",
@@ -664,3 +682,82 @@ async def test_a_group_send_that_never_recovers_resends_no_file(
     assert len(attempts) == 1
     assert uploader._batcher._album_msgs == []
     uploader._listener.on_upload_error.assert_not_awaited()
+
+
+# --- which client the album's file_ids belong to ---------------------------
+
+
+def test_the_anchor_is_reused_when_the_album_client_sent_it(uploader_module):
+    """No user session: one client sends the files and the album alike."""
+    uploader, _ = _make_uploader(uploader_module, [])
+
+    assert uploader._send_client is uploader._group_client
+    assert uploader.anchor_for_group() is uploader.anchor
+
+
+def test_the_anchor_is_reused_under_a_user_session_without_hybrid(
+    uploader_module,
+):
+    """Both sides move to the user session, so they still agree."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    # ``_user_session`` is read off the listener once, in __init__
+    uploader._user_session = True
+    uploader._listener.hybrid_leech = False
+
+    assert uploader._send_client is uploader._group_client
+    assert uploader.anchor_for_group() is uploader.anchor
+
+
+def test_the_anchor_is_fetched_back_when_hybrid_splits_the_two(uploader_module):
+    """Hybrid leech sends the file through the user session and the album
+    through the bot, so the file_id the file answered with is not one the album
+    can be built from -- the message has to be read back instead."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    uploader._user_session = True
+    uploader._listener.hybrid_leech = True
+
+    assert uploader._send_client is not uploader._group_client
+    assert uploader.anchor_for_group() is None
+
+
+@pytest.mark.asyncio
+async def test_an_album_of_fetched_messages_still_carries_their_captions(
+    uploader_module,
+):
+    """Reading the messages back has to leave the album as it would have been."""
+    calls = []
+    uploader, _ = _make_uploader(uploader_module, calls)
+    uploader._user_session = True
+    uploader._listener.hybrid_leech = True
+
+    for name in ("a.jpg", "b.jpg"):
+        await uploader._upload_file(f"<code>{name}</code>", name, f"/tmp/{name}")
+
+    # nothing the album's own client can use, so both have to be read back
+    assert uploader._batcher._album_msgs[0][2] is None
+
+    await uploader._batcher.send_album()
+
+    assert [m.caption for m in calls[0][1]] == [
+        "<code>a.jpg</code>",
+        "<code>b.jpg</code>",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_album_of_reused_anchors_carries_their_captions(uploader_module):
+    """...and the path that sends through one client throughout still matches."""
+    calls = []
+    uploader, _ = _make_uploader(uploader_module, calls)
+
+    for name in ("a.jpg", "b.jpg"):
+        await uploader._upload_file(f"<code>{name}</code>", name, f"/tmp/{name}")
+
+    assert uploader._batcher._album_msgs[0][2] is not None
+
+    await uploader._batcher.send_album()
+
+    assert [m.caption for m in calls[0][1]] == [
+        "<code>a.jpg</code>",
+        "<code>b.jpg</code>",
+    ]

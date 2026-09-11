@@ -1,5 +1,6 @@
 """Holding media back so it can go out as one album instead of many messages."""
 
+from asyncio import gather
 from logging import getLogger
 from re import match as re_match
 from typing import TYPE_CHECKING
@@ -33,11 +34,15 @@ class MediaGroupBatcher:
     uploaded -- a video sent as a document is a document here.
 
     The uploader remains the one thing talking to telegram, and this object asks
-    it for five:
+    it for six:
 
     ``anchor``
         the message the reply chain currently hangs under. Re-read every time,
         because sending a group moves it.
+    ``anchor_for_group``
+        that same message when the client the album goes out through can use it
+        as it stands, and None when it has to be read back first. The batcher
+        does not know which client is which and does not need to.
     ``is_cancelled``
         whether the task is still worth sending anything for.
     ``resolve_message(chat_id, message_id)``
@@ -109,9 +114,47 @@ class MediaGroupBatcher:
             return
         anchor = self._sender.anchor
         if self.enabled and (anchor.photo or anchor.video):
-            self._album_msgs.append([anchor.chat.id, anchor.id])
+            self._album_msgs.append(self._hold(anchor))
             if len(self._album_msgs) == GROUP_SIZE:
                 await self.send_album()
+
+    def _hold(self, anchor):
+        """A sent message as it is kept until its group goes out.
+
+        ``[chat_id, message_id, message]``: the coordinates are always there,
+        because the message may have to be read back, and the message itself is
+        filled in when it does not. The uploader answers None to
+        ``anchor_for_group`` when the client that will send the album is not the
+        one that sent this message, and then reading it back is the only way to
+        get a ``file_id`` that client can use.
+        """
+        return [anchor.chat.id, anchor.id, self._sender.anchor_for_group()]
+
+    async def _resolve(self, held):
+        """The messages behind *held*, fetching back only those that need it.
+
+        A message sent through the client the album goes out through is already
+        the right one to build the album from, and asking telegram for it again
+        was a round trip per member of the group.
+
+        What is fetched is fetched together rather than one after another: the
+        requests do not depend on each other, and a ten-file album used to pay
+        ten round trips in series. None in the answer means the task was
+        cancelled while waiting out a flood, or a fetch failed -- the caller
+        gets that back rather than an ``AttributeError`` on ``msg.photo``.
+        """
+        waiting = [slot for slot in held if slot[2] is None]
+        fetched = await gather(
+            *(self._sender.resolve_message(slot[0], slot[1]) for slot in waiting),
+            return_exceptions=True,
+        )
+        for slot, msg in zip(waiting, fetched):
+            if isinstance(msg, BaseException):
+                # raised only after every fetch has settled, so none is left
+                # running behind the caller
+                raise msg
+            slot[2] = msg
+        return [slot[2] for slot in held]
 
     async def send_album(self):
         """Send the photos and videos waiting to go out as one album.
@@ -124,9 +167,11 @@ class MediaGroupBatcher:
         self._album_msgs = []
         if len(msgs) < 2:
             return None
+        msgs = await self._resolve(msgs)
+        if any(msg is None for msg in msgs):
+            return None
         media: list[InputMedia] = []
-        for index, msg in enumerate(msgs):
-            msgs[index] = msg = await self._sender.resolve_message(msg[0], msg[1])
+        for msg in msgs:
             if msg.photo:
                 media.append(
                     InputMediaPhoto(media=msg.photo.file_id, caption=msg.caption)
@@ -189,7 +234,7 @@ class MediaGroupBatcher:
         """Hold a split part until its group is full, then send it as one."""
         anchor = self._sender.anchor
         msgs = self._media_dict[key].setdefault(pname, [])
-        msgs.append([anchor.chat.id, anchor.id])
+        msgs.append(self._hold(anchor))
         if len(msgs) == GROUP_SIZE:
             await self._send_bucket(pname, key)
         else:
@@ -198,13 +243,15 @@ class MediaGroupBatcher:
     async def _send_bucket(self, subkey, key):
         """Send one split group, and forget it only once telegram has it.
 
-        A bucket holds ``[chat_id, message_id]`` pairs, which are replaced in
-        place by the messages they name: the group send needs the chat and the
-        reply target off the first of them, and the captions off all of them.
+        A bucket holds ``[chat_id, message_id, message]`` slots, resolved just
+        before the send. The resolved list is a new one, so a send that did not
+        land leaves the bucket holding the slots rather than messages -- a
+        retry then resolves them again instead of reading coordinates off a
+        message.
         """
-        msgs = self._media_dict[key][subkey]
-        for index, msg in enumerate(msgs):
-            msgs[index] = await self._sender.resolve_message(msg[0], msg[1])
+        msgs = await self._resolve(self._media_dict[key][subkey])
+        if any(msg is None for msg in msgs):
+            return
         if await self._ship(msgs, self._input_media(msgs, key)) is None:
             return
         del self._media_dict[key][subkey]

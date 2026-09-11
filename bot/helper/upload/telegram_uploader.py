@@ -307,6 +307,20 @@ class TelegramUploader:
     def is_cancelled(self):
         return self._listener.is_cancelled
 
+    def anchor_for_group(self) -> Message | None:
+        """The anchor, when the client that will send the album can use it.
+
+        A ``file_id`` belongs to the client it was issued to, and an album goes
+        out through ``_group_client`` while the files go out through
+        ``_send_client``. Those are the same client unless a user session is
+        carrying the upload, and when they differ the message has to be read
+        back through the client that will send the album -- which is what None
+        says, and what ``resolve_message`` is for.
+        """
+        if self._send_client is not self._group_client:
+            return None
+        return self.anchor
+
     async def resolve_message(self, chat_id, message_id):
         """Fetch a sent message back, for the file_id an album has to reuse."""
         return await self._pacer.guard(

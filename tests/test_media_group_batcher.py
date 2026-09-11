@@ -13,6 +13,7 @@ dropped, and an album is cleared before the send that may reject it.
 
 import importlib.util
 import logging
+from asyncio import sleep
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,9 +51,10 @@ class FakeMessage:
 
 
 class FakeSender:
-    """The five members the batcher asks of the uploader, and nothing else."""
+    """The six members the batcher asks of the uploader, and nothing else."""
 
-    def __init__(self, group_answers=None, resolve_as=None):
+    def __init__(self, group_answers=None, resolve_as=None, reusable=True,
+                 resolve_none=False):
         self.registry = {}
         self.calls = []
         self.retired = []
@@ -60,20 +62,43 @@ class FakeSender:
         self.anchor = FakeMessage(registry=self.registry)
         self._group_answers = list(group_answers or [])
         self._resolve_as = list(resolve_as or [])
+        # Whether the anchor the batcher just filed is one the album's own
+        # client can use. True is the upload with no user session behind it.
+        self._reusable = reusable
+        self._resolve_none = resolve_none
+        # How many fetches were open at once, which is what tells a gathered
+        # round of them from a serial one.
+        self.in_flight = 0
+        self.peak_in_flight = 0
 
     def sends(self, kind, caption=None):
         """Stand in for the uploader having just sent a file."""
         self.anchor = FakeMessage(kind, caption=caption, registry=self.registry)
         return self.anchor
 
+    def anchor_for_group(self):
+        return self.anchor if self._reusable else None
+
     async def resolve_message(self, chat_id, message_id):
         self.calls.append(("resolve", message_id))
-        msg = self.registry.get(message_id)
-        if self._resolve_as:
-            kind = self._resolve_as.pop(0)
-            if kind != "same":
-                return FakeMessage(kind, caption=None if msg is None else msg.caption)
-        return msg
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            # yields once so the other fetches of the same round can start,
+            # which is what makes an overlap visible
+            await sleep(0)
+            if self._resolve_none:
+                return None
+            msg = self.registry.get(message_id)
+            if self._resolve_as:
+                kind = self._resolve_as.pop(0)
+                if kind != "same":
+                    return FakeMessage(
+                        kind, caption=None if msg is None else msg.caption
+                    )
+            return msg
+        finally:
+            self.in_flight -= 1
 
     async def send_group(self, chat_id, media, reply_to_message_id):
         payload = [(type(m).__name__, m.caption) for m in media]
@@ -93,6 +118,10 @@ class FakeSender:
     @property
     def groups_sent(self):
         return [payload for name, payload in self.calls if name == "send_group"]
+
+    @property
+    def resolves(self):
+        return [msg_id for name, msg_id in self.calls if name == "resolve"]
 
 
 def _make(enabled=True, **kwargs):
@@ -344,7 +373,7 @@ async def test_the_album_is_cleared_before_a_failing_send():
 
 @pytest.mark.asyncio
 async def test_the_album_is_skipped_when_a_message_comes_back_a_document(caplog):
-    batcher, sender = _make(resolve_as=["same", "document"])
+    batcher, sender = _make(reusable=False, resolve_as=["same", "document"])
     for i in range(2):
         await _upload(batcher, sender, "photo", f"{i}.jpg")
 
@@ -363,6 +392,88 @@ async def test_an_album_that_never_landed_is_not_retired():
 
     assert await batcher.send_album() is None
     assert sender.retired == []
+
+
+# --- the messages an album is built from -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_message_the_album_client_sent_is_not_read_back():
+    """Nothing has to be fetched when the file went out through that client."""
+    batcher, sender = _make()
+    for i in range(3):
+        await _upload(batcher, sender, "photo", f"{i}.jpg")
+
+    await batcher.send_album()
+
+    assert sender.resolves == []
+    assert len(sender.groups_sent[0]) == 3
+
+
+@pytest.mark.asyncio
+async def test_messages_another_client_sent_are_read_back():
+    """With a user session carrying the upload, the album client needs them back."""
+    batcher, sender = _make(reusable=False)
+    for i in range(3):
+        await _upload(batcher, sender, "photo", f"{i}.jpg")
+
+    await batcher.send_album()
+
+    assert len(sender.resolves) == 3
+    assert len(sender.groups_sent[0]) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_messages_are_fetched_together_not_one_after_another():
+    """The fetches do not depend on each other, so none waits for the last."""
+    batcher, sender = _make(reusable=False)
+    for i in range(3):
+        await _upload(batcher, sender, "photo", f"{i}.jpg")
+
+    await batcher.send_album()
+
+    assert sender.peak_in_flight == 3
+
+
+@pytest.mark.asyncio
+async def test_a_split_group_is_fetched_together_too():
+    """The bucket path resolves its slots the same way the album does."""
+    batcher, sender = _make(reusable=False)
+    for i in (1, 2, 3):
+        await _upload(batcher, sender, "video", f"big.mkv.{i:03d}")
+
+    await batcher.flush()
+
+    assert sender.peak_in_flight == 3
+    assert len(sender.groups_sent[0]) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_never_came_back_is_not_read_by_attribute():
+    """A cancelled fetch answers None; the album is abandoned, not crashed on."""
+    batcher, sender = _make(reusable=False, resolve_none=True)
+    for i in range(3):
+        await _upload(batcher, sender, "photo", f"{i}.jpg")
+
+    assert await batcher.send_album() is None
+    assert sender.groups_sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_bucket_kept_after_a_refused_send_is_still_sendable():
+    """The retry resolves the slots again rather than reading coordinates off a
+    message -- which is what the in-place rewrite used to leave behind."""
+    batcher, sender = _make(reusable=False, group_answers=[None])
+    for i in (1, 2):
+        await _upload(batcher, sender, "video", f"big.mkv.{i:03d}")
+
+    await batcher.flush()
+    assert list(batcher._media_dict["videos"]) == [f"{DIR}/big.mkv"]
+
+    await batcher.flush()
+
+    assert batcher._media_dict["videos"] == {}
+    assert len(sender.retired) == 1
 
 
 # --- flushing what is left -------------------------------------------------
