@@ -181,6 +181,14 @@ _SCHEMA = (
             ON DELETE CASCADE
     )
     """,
+    # ``find_copy_records`` looks a task up by ``(bot_id, mid)``, and ``mid`` is
+    # the *third* column of the primary key -- so the key cannot serve it and
+    # every ``/copy`` read scans the table. This index is what that lookup
+    # needs; the primary key still serves everything that has ``cid``.
+    """
+    CREATE INDEX IF NOT EXISTS copy_tasks_bot_mid_idx
+        ON copy_tasks (bot_id, mid)
+    """,
     # A name holds the newest revision only; save_blob upserts in place.
     """
     CREATE TABLE IF NOT EXISTS blobs (
@@ -943,10 +951,16 @@ class DbManager:
     async def _prune_copy_records(self, user_id: int) -> None:
         """Drop a user's records past the newest MAX_TASK_RECORDS of them.
 
-        No index is built on user/at: the repo has never made one, and with a
-        couple hundred rows per user a table scan per save is cheaper than an
-        index whose only reader is this prune. ``at`` can tie between two
-        saves in the same second, so ``mid`` breaks the order deterministically.
+        No index is built on ``(user_id, at)`` for this query. The repo has never
+        made one, and with a couple hundred rows per user a scan per save has
+        been cheaper than an index whose only reader is this prune. ``at`` can
+        tie between two saves in the same second, so ``mid`` breaks the order
+        deterministically.
+
+        ``copy_tasks_bot_mid_idx`` is not that index: it exists for
+        ``find_copy_records``, which looks a task up by ``mid``. It leads with
+        ``bot_id``, so the planner can narrow to one bot here too, but it carries
+        no ``at`` and so cannot supply this ordering -- the sort above stands.
         """
         if self._return:
             return

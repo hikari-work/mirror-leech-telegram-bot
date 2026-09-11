@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 
 from bot import aria2_options, qbit_options, rss_dict, user_data
 from bot.core.telegram_manager import TgClient
-from bot.helper.storage.db_handler import DbManager, blob_box
+from bot.helper.storage.db_handler import _SCHEMA, DbManager, blob_box
 
 
 class _Recorder:
@@ -471,3 +471,22 @@ async def test_every_method_is_a_noop_when_disconnected():
         await dbm.trunc_table("rss")
 
     await _exercise()
+
+
+# ── the schema ────────────────────────────────────────────────────────
+
+
+def test_the_copy_lookup_has_an_index_over_its_own_two_columns():
+    """``find_copy_records`` filters on ``(bot_id, mid)``; the key cannot serve it.
+
+    The primary key of ``copy_tasks`` is ``(bot_id, cid, mid)``, so ``mid`` is
+    not a usable prefix and the lookup is a sequential scan over every bot's
+    history without an index of its own. This pins the declaration; that the
+    statement really reaches the database is asserted in
+    ``test_pg_integration.py``, where a server is there to read it back from.
+    """
+    (index,) = [s for s in _SCHEMA if "copy_tasks_bot_mid_idx" in s]
+    assert "ON copy_tasks" in index
+    # the column list, as written inside the parentheses
+    columns = index[index.index("(") + 1 : index.index(")")]
+    assert [c.strip() for c in columns.split(",")] == ["bot_id", "mid"]

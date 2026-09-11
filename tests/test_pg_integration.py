@@ -268,6 +268,41 @@ async def test_connect_lets_database_name_pick_the_database(monkeypatch):
         await manager.disconnect()
 
 
+async def test_the_copy_lookup_index_is_really_installed(dbm):
+    """``/copy`` filters on ``(bot_id, mid)``, which the primary key cannot serve.
+
+    ``copy_tasks`` is keyed ``(bot_id, cid, mid)``, so ``mid`` is the third
+    column and a lookup by it scans every bot's history. The index is declared
+    in ``_SCHEMA``; this reads the columns back out of the catalog, so it fails
+    if the declaration is dropped *or* if ``connect()`` stops applying it.
+
+    It deliberately does not assert the planner uses it -- on a table this small
+    a sequential scan is the correct plan, and asserting otherwise would be
+    testing Postgres rather than this module.
+    """
+    (index,) = await dbm._fetchall(
+        """
+        SELECT i.indexrelid::regclass::text AS name
+        FROM pg_index i
+        WHERE i.indexrelid = to_regclass('copy_tasks_bot_mid_idx')
+        """,
+    )
+    assert index["name"] == "copy_tasks_bot_mid_idx"
+
+    # one row per key column, in the order the index declares them --
+    # ``pg_get_indexdef`` rather than the ``indkey`` vector, whose ``= ANY``
+    # silently matches only the first entry.
+    columns = await dbm._fetchall(
+        """
+        SELECT pg_get_indexdef(i.indexrelid, k, true) AS column
+        FROM pg_index i, generate_series(1, i.indnkeyatts) AS k
+        WHERE i.indexrelid = to_regclass('copy_tasks_bot_mid_idx')
+        ORDER BY k
+        """,
+    )
+    assert [row["column"] for row in columns] == ["bot_id", "mid"]
+
+
 async def test_disconnect_after_connect_returns_to_noop(dbm):
     await dbm.disconnect()
     assert not dbm.is_connected
