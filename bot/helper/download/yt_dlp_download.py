@@ -4,7 +4,7 @@ from re import search as re_search
 from secrets import token_urlsafe
 from typing import Any
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import YoutubeDLError
 
 
 from ... import task_dict_lock, task_dict
@@ -56,6 +56,12 @@ class YoutubeDLHelper:
         self._ext = ""
         self.is_playlist = False
         self.keep_thumb = False
+        # What the probe extracted, so the download does not fetch the same
+        # metadata over again. Set only for a single video -- see ``_download``.
+        # ``Any`` because the info dict's type is yt-dlp's own and is not
+        # importable; it is also mutated in place during a download, so a
+        # ``Mapping`` here would claim more than holds.
+        self._ie_result: Any = None
         # yt-dlp options are heterogeneous by design -- flags, counts, hooks,
         # nested dicts of callables -- and the setup below adds lists and more
         # callables to it, so the values cannot be narrowed to what this literal
@@ -142,6 +148,10 @@ class YoutubeDLHelper:
     def _extract_meta_data(self):
         if self._listener.link.startswith(("rtmp", "mms", "rstp", "rtmps")):
             self.opts["external_downloader"] = "ffmpeg"
+        # Cleared rather than left alone: this decides whether ``_download``
+        # reuses a result, and a stale one from an earlier probe would be the
+        # wrong video.
+        self._ie_result = None
         # yt-dlp types ``params`` as a TypedDict naming every option it knows,
         # and ``self.opts`` is assembled from what the user asked for: ``-opt``
         # can set any of them, so no fixed set of keys describes it.
@@ -176,14 +186,33 @@ class YoutubeDLHelper:
                 )
                 if not self._ext:
                     self._ext = ext
+                # Handed to the download so the link is resolved once instead
+                # of twice. Safe to reuse because yt-dlp reads ``outtmpl`` when
+                # it prepares the filename, not from this dict -- so the
+                # template ``add_download`` sets afterwards still decides where
+                # the file lands.
+                self._ie_result = result
 
     def _download(self, path):
         try:
             # Same runtime-assembled opts as in ``_extract_meta_data``.
             with YoutubeDL(self.opts) as ydl:  # pyrefly: ignore[bad-argument-type]
                 try:
-                    ydl.download([self._listener.link])
-                except DownloadError as e:
+                    if self._ie_result is not None:
+                        # The probe already resolved this link, and asking for
+                        # it again would fetch the same metadata a second time
+                        # -- for a video behind an HLS master playlist that is
+                        # a second round of requests before a byte moves.
+                        # ``process_ie_result`` is what ``download`` calls
+                        # underneath, with ``download`` turned on.
+                        ydl.process_ie_result(self._ie_result, download=True)
+                    else:
+                        ydl.download([self._listener.link])
+                except YoutubeDLError as e:
+                    # ``YoutubeDLError`` rather than ``DownloadError``: the
+                    # exception type depends on which of the two calls above
+                    # failed, and both are its subclasses. Anything else is a
+                    # bug here, not a download that failed.
                     if not self._listener.is_cancelled:
                         self._on_download_error(str(e))
                     return
