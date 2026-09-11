@@ -13,7 +13,9 @@ which files come out of it.
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -319,6 +321,102 @@ def test_cancellation_is_the_listeners_to_decide(s3):
     assert uploader.is_cancelled is False
     listener.is_cancelled = True
     assert uploader.is_cancelled is True
+
+
+# ── the work that must not happen on the event loop ─────────────────
+
+
+class _OffloadRecorder:
+    """A ``sync_to_async`` that really does hop threads, and says so.
+
+    The ``s3`` fixture's stand-in runs the function inline, which is what makes
+    every other test here a plain call -- and also what makes it blind to
+    whether the module offloads anything at all. This one keeps the hop, so a
+    test can ask *where* a function ran rather than only that it ran.
+    """
+
+    def __init__(self):
+        self.functions: list = []
+        self.threads: list[threading.Thread] = []
+
+    async def __call__(self, func, *args, **kwargs):
+        self.functions.append(func)
+
+        def record(*inner_args, **inner_kwargs):
+            self.threads.append(threading.current_thread())
+            return func(*inner_args, **inner_kwargs)
+
+        return await asyncio.to_thread(record, *args, **kwargs)
+
+
+@pytest.fixture
+def offloading(s3, monkeypatch):
+    """The configured bucket, with the offload seam observed instead of faked."""
+    recorder = _OffloadRecorder()
+    monkeypatch.setattr(s3u, "sync_to_async", recorder)
+    return recorder
+
+
+async def test_the_client_is_built_off_the_event_loop(
+    offloading, tmp_path, monkeypatch
+):
+    """Building it imports boto3 and has it read credentials off disk.
+
+    That is filesystem and import work, and it used to run in the middle of the
+    upload coroutine -- on the one event loop every other task in the bot shares.
+    """
+    up_dir = tmp_path / "10032"
+    tree(up_dir, "Album/a.mkv")
+    listener = FakeListener(name="Album")
+    built: list[threading.Thread] = []
+
+    def make_client():
+        built.append(threading.current_thread())
+        return FakeClient(listener)
+
+    monkeypatch.setattr(s3u, "_make_client", make_client)
+
+    await s3u.S3Uploader(listener, str(up_dir)).upload()
+
+    assert make_client in offloading.functions
+    assert built and built[0] is not threading.main_thread()
+
+
+async def test_the_transfer_config_is_built_once_for_the_whole_task(
+    s3, monkeypatch, tmp_path
+):
+    """It only describes how one file is split, and that never changes."""
+    up_dir = tmp_path / "10032"
+    tree(up_dir, "Album/a.mkv", "Album/b.mkv", "Album/c.mkv")
+    listener = FakeListener(name="Album")
+    s3.wire(listener)
+
+    built = []
+    real = s3u._transfer_config
+
+    def counted():
+        built.append(real())
+        return built[-1]
+
+    monkeypatch.setattr(s3u, "_transfer_config", counted)
+
+    await s3u.S3Uploader(listener, str(up_dir)).upload()
+
+    assert len(built) == 1
+
+
+async def test_the_client_is_closed_when_the_task_is_done(s3, tmp_path):
+    """Nothing else closes it, so its connections outlived the task."""
+    up_dir = tmp_path / "10032"
+    tree(up_dir, "Album/a.mkv")
+    listener = FakeListener(name="Album")
+    client = s3.wire(listener)
+    closed = []
+    client.close = lambda: closed.append(True)
+
+    await s3u.S3Uploader(listener, str(up_dir)).upload()
+
+    assert closed == [True]
 
 
 # ── the link, and the client that makes it possible ─────────────────

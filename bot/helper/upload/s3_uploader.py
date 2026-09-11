@@ -192,6 +192,10 @@ class S3Uploader:
         self._prefix = object_prefix(listener)
         self._bucket = Config.S3_BUCKET
         self._client: Any = None
+        # How one file is split into parts never changes within a task, and the
+        # answer is a plain object built from config -- so it is built once here
+        # rather than per file in the transfer loop.
+        self._transfer_config = _transfer_config()
         self._callback = _ProgressCallback(self)
         self._lock = Lock()
         self._processed_bytes = 0
@@ -224,24 +228,43 @@ class S3Uploader:
         if error:
             await self._listener.on_upload_error(error)
             return
-        self._client = _make_client()
-        self._walk_root = self._root()
-        LOGGER.info(
-            f"Bucket upload: {self._listener.name}"
-            f" -> {self._bucket}/{self._prefix}/"
-        )
-        walk_result = await sync_to_async(lambda: list(walk(self._walk_root)))
-        for dirpath, _, files in natsorted(walk_result):
-            if ospath.basename(dirpath) in _SKIPPED_DIRS:
-                continue
-            for file_ in natsorted(files):
-                if self.is_cancelled:
-                    return
-                key = f"{self._prefix}/{self._rel_key(dirpath, file_)}"
-                await self._upload_one(ospath.join(dirpath, file_), key)
-                if self.is_cancelled:
-                    return
-        await self._finish()
+        # Off the loop: this imports boto3 and builds a session that reads
+        # credentials off disk, all of it synchronous, and the event loop it
+        # would otherwise run on is shared by every task in the bot.
+        self._client = await sync_to_async(_make_client)
+        try:
+            self._walk_root = self._root()
+            LOGGER.info(
+                f"Bucket upload: {self._listener.name}"
+                f" -> {self._bucket}/{self._prefix}/"
+            )
+            walk_result = await sync_to_async(lambda: list(walk(self._walk_root)))
+            for dirpath, _, files in natsorted(walk_result):
+                if ospath.basename(dirpath) in _SKIPPED_DIRS:
+                    continue
+                for file_ in natsorted(files):
+                    if self.is_cancelled:
+                        return
+                    key = f"{self._prefix}/{self._rel_key(dirpath, file_)}"
+                    await self._upload_one(ospath.join(dirpath, file_), key)
+                    if self.is_cancelled:
+                        return
+            await self._finish()
+        finally:
+            # A cancelled or failed task returns from inside the loop above, and
+            # nothing else holds this client -- left open it keeps its
+            # connections until the garbage collector gets to it.
+            await self._close_client()
+
+    async def _close_client(self) -> None:
+        """Drop the bucket client's connections, tolerating a half-built one."""
+        client, self._client = self._client, None
+        if client is None:
+            return
+        try:
+            await sync_to_async(client.close)
+        except Exception as e:
+            LOGGER.error(f"Closing the bucket client failed: {e}")
 
     def _root(self) -> str:
         """The directory the object keys are relative to.
@@ -284,7 +307,7 @@ class S3Uploader:
                 self._bucket,
                 key,
                 Callback=self._callback,
-                Config=_transfer_config(),
+                Config=self._transfer_config,
             )
         except _UploadCancelled:
             # the listener knows; the caller stops walking the rest
