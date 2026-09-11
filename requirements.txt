@@ -17,6 +17,7 @@ natsort
 pillow
 psutil
 psycopg[binary]
+psycopg-pool
 kurigram
 python-magic
 requests

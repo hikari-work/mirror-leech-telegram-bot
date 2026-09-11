@@ -14,6 +14,7 @@ unless ``PG_TEST_URL`` points at a reachable server:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections import Counter
 from uuid import uuid4
@@ -215,11 +216,10 @@ async def test_copy_records_round_trip_is_shaped_like_the_old_documents(dbm):
 
 async def _count(dbm: DbManager, table: str, bot: str) -> int:
     """Rows of one bot in a table -- the shape of a table-level assertion."""
-    cursor = await dbm._conn.execute(
+    rows = await dbm._fetchall(
         f"SELECT count(*) AS n FROM {table} WHERE bot_id = %s", (bot,)
     )
-    row = await cursor.fetchone()
-    return row["n"]
+    return rows[0]["n"]
 
 
 async def test_the_prune_is_per_user_and_spares_others(dbm):
@@ -230,10 +230,10 @@ async def test_the_prune_is_per_user_and_spares_others(dbm):
         await dbm.save_copy_record(-1001, mid, 42, f"bulk {mid}", [])
 
     # user 42 is trimmed to their newest MAX_TASK_RECORDS ...
-    cursor = await dbm._conn.execute(
+    rows = await dbm._fetchall(
         "SELECT user_id FROM copy_tasks WHERE bot_id = %s", (dbm._bot,)
     )
-    counts = Counter(row["user_id"] for row in await cursor.fetchall())
+    counts = Counter(row["user_id"] for row in rows)
     assert counts[42] == MAX_TASK_RECORDS
     # ... while the flood never touched user 43's single record
     assert counts[other_user] == 1
@@ -241,8 +241,91 @@ async def test_the_prune_is_per_user_and_spares_others(dbm):
     assert [d["user"] for d in await dbm.find_copy_records(0)] == [other_user]
 
 
+async def test_connect_lets_database_name_pick_the_database(monkeypatch):
+    """``DATABASE_NAME`` overrides whatever database the URL arrives at.
+
+    This is the branch the bot normally takes: the setting defaults to ``mltb``,
+    so it is nearly always set. It also has to survive the move to a pool, which
+    takes it through ``make_conninfo`` rather than by handing ``dbname`` to
+    ``connect()``. The URL below deliberately points somewhere else.
+
+    The assertion has to be the database's own name rather than "the tables are
+    there": ``connect()`` creates the schema wherever it lands, so a connection
+    to the wrong database would still leave every table in place.
+    """
+    url = os.getenv("PG_TEST_URL", "")
+    monkeypatch.setattr(Config, "DATABASE_URL", url.replace("/mltb_test", "/postgres"))
+    monkeypatch.setattr(Config, "DATABASE_NAME", "mltb_test")
+    monkeypatch.setattr(TgClient, "ID", f"it-{uuid4().hex[:10]}")
+
+    manager = DbManager()
+    await manager.connect()
+    try:
+        assert manager.is_connected
+        (row,) = await manager._fetchall("SELECT current_database() AS db")
+        assert row["db"] == "mltb_test"
+    finally:
+        await manager.disconnect()
+
+
 async def test_disconnect_after_connect_returns_to_noop(dbm):
     await dbm.disconnect()
     assert not dbm.is_connected
     await dbm.save_blob("a", b"b", bot_id=dbm._bot)
     assert await dbm.get_blob("a", bot_id=dbm._bot) is None
+
+
+# ── two tasks writing at the same time ────────────────────────────────
+
+_INSERT_TASK = """
+    INSERT INTO copy_tasks (bot_id, cid, mid, user_id, name, at)
+    VALUES (%s, %s, %s, %s, %s, %s)
+"""
+
+
+async def test_two_transactions_at_once_stay_separate(dbm):
+    """A rollback must not take another task's committed work with it.
+
+    On one shared connection this cannot hold. psycopg decides whether to issue
+    ``BEGIN`` or ``SAVEPOINT`` by asking the connection whether a transaction is
+    already open, and a second ``_txn`` arriving while the first is still
+    running finds one -- so its writes join the first task's transaction, and
+    when that one rolls back they go with it. Each task now checks a connection
+    out of the pool for the length of its own transaction, so this is two
+    transactions rather than one nested inside the other.
+    """
+    first_has_written = asyncio.Event()
+    second_has_committed = asyncio.Event()
+
+    async def doomed():
+        try:
+            async with dbm._txn():
+                await dbm._execute(
+                    _INSERT_TASK, (dbm._bot, -1001, 900, 42, "doomed", 1)
+                )
+                first_has_written.set()
+                # held open on purpose: the second transaction runs entirely
+                # inside this one's lifetime
+                await second_has_committed.wait()
+                raise RuntimeError("this task failed halfway")
+        except RuntimeError:
+            pass
+
+    async def finishes_cleanly():
+        await first_has_written.wait()
+        async with dbm._txn():
+            await dbm._execute(
+                _INSERT_TASK, (dbm._bot, -1001, 901, 42, "committed", 1)
+            )
+        second_has_committed.set()
+
+    await asyncio.gather(doomed(), finishes_cleanly())
+
+    stored = {
+        row["mid"]
+        for row in await dbm._fetchall(
+            "SELECT mid FROM copy_tasks WHERE bot_id = %s", (dbm._bot,)
+        )
+    }
+    assert 901 in stored  # the task that finished has its row
+    assert 900 not in stored  # the one that failed does not

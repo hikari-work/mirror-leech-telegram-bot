@@ -38,13 +38,16 @@ from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from importlib import import_module
 from time import time
 from typing import Any, cast
 
 from psycopg import AsyncConnection
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from ... import LOGGER, aria2_options, qbit_options, rss_dict, user_data
 from ...core.config_manager import Config
@@ -218,90 +221,143 @@ def _values_clause(rows: int, columns: int) -> str:
     return ", ".join([f"({', '.join(['%s'] * columns)})"] * rows)
 
 
+# How many connections the pool keeps, and how long it waits for one. The bot
+# ran on a single connection before this, so one idle connection is the floor
+# and the ceiling only has to cover a bulk of tasks finishing at once.
+_MIN_POOL_SIZE = 1
+_MAX_POOL_SIZE = 8
+"""More than one, and not for throughput: ``_txn`` holds a connection for the
+whole transaction, so a second concurrent save has to be able to get its own or
+the two would share one transaction -- the bug the pool is here to fix. It also
+has to be more than the number of transactions that can be waiting on each
+other, or they deadlock instead of merely queueing."""
+
+_POOL_OPEN_TIMEOUT = 10.0
+"""Seconds ``connect()`` waits for the first connection. The pool's own default
+is thirty, which is thirty seconds of the bot not starting behind a database
+that is simply down."""
+
+_txn_conn: ContextVar[AsyncConnection | None] = ContextVar("_txn_conn", default=None)
+"""The connection of the transaction the current task is inside, if any.
+
+The executors keep the ``(sql, params)`` signature they had when the module held
+one connection, because a ``ContextVar`` carries the connection to them instead
+of an argument. That signature is the hermetic seam the tests replace, and the
+module's own callers do not have to thread a connection through either.
+"""
+
+
 class DbManager:
     def __init__(self):
         # ``_return`` guards the whole class: every method opens with
         # ``if self._return: ...`` and it is only False between a successful
         # ``connect()`` and the next ``disconnect()``/failure. The dereferences
-        # below therefore never see the None ``_conn`` starts as. Note it is
-        # *not* interchangeable with ``self._conn is None``: ``disconnect()``
-        # sets ``_return`` True before ``_conn`` is cleared.
+        # below therefore never see the None ``_pool`` starts as. Note it is
+        # *not* interchangeable with ``self._pool is None``: ``disconnect()``
+        # sets ``_return`` True before ``_pool`` is cleared.
         self._return = True
-        self._conn: AsyncConnection | None = None
+        self._pool: AsyncConnectionPool | None = None
 
     @property
     def is_connected(self) -> bool:
-        return not self._return and self._conn is not None
+        return not self._return and self._pool is not None
 
     @staticmethod
-    def _conninfo() -> tuple[str, str | None]:
-        return Config.DATABASE_URL, Config.DATABASE_NAME or None
+    def _conninfo() -> str:
+        url, dbname = Config.DATABASE_URL, Config.DATABASE_NAME or None
+        return make_conninfo(url, dbname=dbname) if dbname else url
 
     async def connect(self):
         if not Config.DATABASE_URL:
             self._return = True
             return
         try:
-            if self._conn is not None:
-                await self._conn.close()
-            url, dbname = self._conninfo()
-            if dbname:
-                self._conn = await AsyncConnection.connect(
-                    url, dbname=dbname, autocommit=True
-                )
-            else:
-                self._conn = await AsyncConnection.connect(url, autocommit=True)
-            self._conn.row_factory = cast(Any, dict_row)
-            for statement in _SCHEMA:
-                await self._conn.execute(cast(Any, statement))
+            await self._close_pool()
+            # The pool gives each checkout its own connection, so two tasks
+            # saving at once no longer land in one transaction -- see ``_txn``.
+            # ``open=False`` because opening in the constructor schedules it on
+            # whatever loop is running; this way it is opened here, and a failure
+            # to reach the database is caught below like any other.
+            pool = AsyncConnectionPool(
+                self._conninfo(),
+                min_size=_MIN_POOL_SIZE,
+                max_size=_MAX_POOL_SIZE,
+                open=False,
+                kwargs={"autocommit": True, "row_factory": cast(Any, dict_row)},
+            )
+            try:
+                await pool.open(wait=True, timeout=_POOL_OPEN_TIMEOUT)
+                # Once, against one connection, rather than on every checkout.
+                async with pool.connection() as conn:
+                    for statement in _SCHEMA:
+                        await conn.execute(cast(Any, statement))
+            except Exception:
+                await pool.close()
+                raise
+            self._pool = pool
             self._return = False
         except Exception as e:
             LOGGER.error(f"Error in DB connection: {e}")
-            await self._close_conn()
+            await self._close_pool()
             self._return = True
 
     async def disconnect(self):
         self._return = True
-        await self._close_conn()
+        await self._close_pool()
 
-    async def _close_conn(self):
-        if self._conn is not None:
-            try:
-                await self._conn.close()
-            except Exception:
-                pass
-        self._conn = None
+    async def _close_pool(self):
+        pool, self._pool = self._pool, None
+        if pool is None:
+            return
+        try:
+            await pool.close()
+        except Exception:
+            pass
 
     # ----------------------------------------------------- SQL executors
     # The three methods every query goes through, so a test can replace them
     # with a fake that records the SQL and answers with fixture rows -- the
     # hermetic seam of the whole module.
 
-    async def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        conn = self._conn
-        if conn is None:
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[AsyncConnection]:
+        """The transaction's connection when there is one, else a fresh checkout.
+
+        Inside ``_txn`` the same connection has to serve every statement of the
+        transaction, so it is taken from the context rather than checked out
+        again. Outside one, a statement is its own unit of work and gets its own
+        connection -- which is what lets two of them run at the same time.
+        """
+        conn = _txn_conn.get()
+        if conn is not None:
+            yield conn
+            return
+        pool = self._pool
+        if pool is None:
             # Only reachable through a bug: every public method guards on
-            # ``_return``, which is False only while ``_conn`` is set.
+            # ``_return``, which is False only while ``_pool`` is set.
             raise RuntimeError("DbManager is not connected")
-        # The statement is always one of this module's own literal SQL strings,
-        # so the cast is only for psycopg's LiteralString-typed ``execute``.
-        await conn.execute(cast(Any, sql), params)
+        async with pool.connection() as checked_out:
+            yield checked_out
+
+    async def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+        # The statement is always one of this module's own SQL strings -- the
+        # literals above, or one of those with a generated VALUES clause -- so
+        # the cast is only for psycopg's LiteralString-typed ``execute``.
+        async with self._connection() as conn:
+            await conn.execute(cast(Any, sql), params)
 
     async def _fetchone(self, sql: str, params: Sequence[Any] = ()) -> dict | None:
-        conn = self._conn
-        if conn is None:
-            raise RuntimeError("DbManager is not connected")
-        cursor = await conn.execute(cast(Any, sql), params)
-        # ``row_factory`` is ``dict_row``, so a row is a dict -- the cast keeps
-        # psycopg's generic Row type from leaking into the module's API.
-        return cast("dict | None", await cursor.fetchone())
+        async with self._connection() as conn:
+            cursor = await conn.execute(cast(Any, sql), params)
+            # ``row_factory`` is ``dict_row``, so a row is a dict -- the cast
+            # keeps psycopg's generic Row type from leaking into the module's API.
+            return cast("dict | None", await cursor.fetchone())
 
     async def _fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[dict]:
-        conn = self._conn
-        if conn is None:
-            raise RuntimeError("DbManager is not connected")
-        cursor = await conn.execute(cast(Any, sql), params)
-        return cast("list[dict]", await cursor.fetchall())
+        async with self._connection() as conn:
+            cursor = await conn.execute(cast(Any, sql), params)
+            return cast("list[dict]", await cursor.fetchall())
 
     @asynccontextmanager
     async def _txn(self) -> AsyncIterator[None]:
@@ -309,16 +365,31 @@ class DbManager:
 
         The connection autocommits each statement, so the several writes of one
         save (a parent upsert plus child deletes and inserts) are wrapped in an
-        explicit transaction to land atomically. The hermetic tests replace the
-        executors and leave ``_conn`` None; for them there is no connection to
-        wrap, so this yields directly and every statement is just recorded.
+        explicit transaction to land atomically.
+
+        The transaction runs on a connection of its own for its whole length,
+        and that connection is what the executors inside it pick up. Sharing one
+        connection across the bot could not do this: psycopg decides between
+        ``BEGIN`` and ``SAVEPOINT`` by asking the connection whether it is
+        already in a transaction, so a second ``_txn`` starting while the first
+        still ran found one and joined it -- and a rollback in the first task
+        then took the second task's finished work with it.
+
+        The hermetic tests replace the executors and leave ``_pool`` None; for
+        them there is no connection to wrap, so this yields directly and every
+        statement is just recorded.
         """
-        conn = self._conn
-        if conn is None:
+        pool = self._pool
+        if pool is None:
             yield
             return
-        async with conn.transaction():
-            yield
+        async with pool.connection() as conn:
+            token = _txn_conn.set(conn)
+            try:
+                async with conn.transaction():
+                    yield
+            finally:
+                _txn_conn.reset(token)
 
     # ---------------------------------------------------------------- blobs
 
