@@ -204,55 +204,103 @@ class FakeMessage:
         )
         self.audio = SimpleNamespace(file_id=f"audio{self.id}") if kind == "audio" else None
 
+    async def delete(self, revoke=True):
+        """What ``Message.delete`` does: one delete through its own client."""
+        return await self._client.delete_messages(
+            chat_id=self.chat.id, message_ids=self.id, revoke=revoke
+        )
+
+
+class _FakeClient(SimpleNamespace):
+    """A namespace that hashes by identity, the way a real client does.
+
+    ``SimpleNamespace`` compares by value and is therefore unhashable, but the
+    batched delete groups messages by the client that sent them -- and two real
+    clients are only ever the same object, never merely equal.
+    """
+
+    __hash__ = object.__hash__
+    __eq__ = object.__eq__
+
+
+def _as_ids(message_ids):
+    """The message ids as a list.
+
+    pyrogram takes one id or many: ``Message.delete`` sends the single-id form,
+    while a batched delete sends the list.
+    """
+    return [message_ids] if isinstance(message_ids, int) else list(message_ids)
+
+
+def _senders(state):
+    """What a fake client answers to, keyed by the name pyrogram gives it.
+
+    The client is read off *state* rather than closed over, because it cannot be
+    handed to its own methods before it exists -- and a message has to carry the
+    client that sent it, since that is what ``Message.delete`` sends through and
+    what a batched delete keys on.
+    """
+
+    def _sent(kind, caption, reply_parameters):
+        msg = FakeMessage(
+            kind,
+            caption=caption,
+            reply_to_message_id=reply_parameters.message_id,
+            registry=state.calls_by_id,
+        )
+        msg._client = state.client
+        return msg
+
+    def sender(kind):
+        async def send(chat_id, reply_parameters=None, caption=None, **_kwargs):
+            return _sent(kind, caption, reply_parameters)
+
+        return send
+
+    async def send_media_group(chat_id, media, **kwargs):
+        if state.calls is not None:
+            state.calls.append(("send_media_group", list(media)))
+        sent = [FakeMessage("photo", caption=m.caption) for m in media]
+        for msg in sent:
+            msg.media_group_id = "group1"
+            msg._client = state.client
+        return sent
+
+    async def get_messages(chat_id, message_ids):
+        return state.calls_by_id[message_ids]
+
+    async def delete_messages(chat_id, message_ids, revoke=True):
+        state.deletes.append((chat_id, _as_ids(message_ids)))
+        return len(state.deletes[-1][1])
+
+    return {
+        "send_photo": sender("photo"),
+        "send_video": sender("video"),
+        "send_document": sender("document"),
+        "send_audio": sender("audio"),
+        "send_media_group": send_media_group,
+        "get_messages": get_messages,
+        "delete_messages": delete_messages,
+    }
+
 
 def _make_client(calls_by_id, calls):
     """A fake pyrogram client whose files answer with registered messages.
 
     Every message it sends registers itself by id, so ``get_messages`` can hand
     it back -- which is what the album does when the anchor is not one the album
-    can be built from. *calls* is where ``send_media_group`` is recorded, or
-    None for a client whose album sends are not being watched.
+    can be built from.
+
+    *calls* is where ``send_media_group`` is recorded; the deletes are always
+    recorded, on ``client.deletes``, since a test asserting them has to.
     """
-
-    def _sent(kind, caption, reply_parameters):
-        return FakeMessage(
-            kind,
-            caption=caption,
-            reply_to_message_id=reply_parameters.message_id,
-            registry=calls_by_id,
-        )
-
-    async def send_photo(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return _sent("photo", caption, reply_parameters)
-
-    async def send_video(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return _sent("video", caption, reply_parameters)
-
-    async def send_document(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return _sent("document", caption, reply_parameters)
-
-    async def send_audio(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return _sent("audio", caption, reply_parameters)
-
-    async def send_media_group(chat_id, media, **kwargs):
-        if calls is not None:
-            calls.append(("send_media_group", list(media)))
-        sent = [FakeMessage("photo", caption=m.caption) for m in media]
-        for msg in sent:
-            msg.media_group_id = "group1"
-        return sent
-
-    async def get_messages(chat_id, message_ids):
-        return calls_by_id[message_ids]
-
-    return SimpleNamespace(
-        send_photo=send_photo,
-        send_video=send_video,
-        send_document=send_document,
-        send_audio=send_audio,
-        send_media_group=send_media_group,
-        get_messages=get_messages,
+    state = SimpleNamespace(
+        calls_by_id=calls_by_id, calls=calls, deletes=[], client=None
     )
+    client = _FakeClient(**_senders(state))
+    client.deletes = state.deletes
+    state.client = client
+    return client
 
 
 def _make_uploader(uploader_module, calls):
@@ -682,6 +730,53 @@ async def test_a_group_send_that_never_recovers_resends_no_file(
     assert len(attempts) == 1
     assert uploader._batcher._album_msgs == []
     uploader._listener.on_upload_error.assert_not_awaited()
+
+
+# --- deleting what the album absorbed --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_album_deletes_its_originals_in_one_call(uploader_module):
+    """Three messages in one chat are one delete, not three."""
+    uploader, _ = _make_uploader(uploader_module, [])
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        await uploader._upload_file(f"<code>{name}</code>", name, f"/tmp/{name}")
+
+    await uploader._batcher.send_album()
+
+    deletes = uploader._listener.client.deletes
+    assert len(deletes) == 1
+    chat_id, message_ids = deletes[0]
+    assert chat_id == -1001
+    assert len(message_ids) == 3
+
+
+@pytest.mark.asyncio
+async def test_originals_are_deleted_through_the_client_that_sent_them(
+    uploader_module,
+):
+    """Hybrid leech can put both clients' files in one album.
+
+    ``Message.delete`` sends through the client the message is bound to, so
+    batching by chat alone would delete one client's message through the other.
+    """
+    calls = []
+    uploader, _ = _make_uploader(uploader_module, calls)
+    uploader._listener.hybrid_leech = True
+    bot_client = uploader._listener.client
+    user_client = sys.modules["bot.core.telegram_manager"].TgClient.user
+
+    for index, name in enumerate(("a.jpg", "b.jpg")):
+        # the first file goes through the user session, the second through the bot
+        uploader._user_session = index == 0
+        await uploader._upload_file(f"<code>{name}</code>", name, f"/tmp/{name}")
+
+    await uploader._batcher.send_album()
+
+    assert len(bot_client.deletes) == 1
+    assert len(user_client.deletes) == 1
+    assert len(bot_client.deletes[0][1]) == 1
+    assert len(user_client.deletes[0][1]) == 1
 
 
 # --- which client the album's file_ids belong to ---------------------------

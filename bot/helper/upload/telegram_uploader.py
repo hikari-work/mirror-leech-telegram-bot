@@ -401,7 +401,7 @@ class TelegramUploader:
         for msg in originals:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
-            await delete_message(msg)
+        await self._delete_originals(originals)
         if self._files_links and (
             self._listener.is_super_chat or self._listener.up_dest
         ):
@@ -414,6 +414,31 @@ class TelegramUploader:
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
+
+    @staticmethod
+    async def _delete_originals(originals):
+        """Delete what an album absorbed, one call per client and chat.
+
+        ``Message.delete`` is a round trip per message, and a ten-file album was
+        ten of them. It sends through the client the message is bound to
+        (``msg._client``), so the batch is keyed by that client as well as by
+        the chat: under hybrid leech an album can carry files sent through the
+        user session next to files sent through the bot, and deleting one
+        through the other's client is not the same request. A chat can also
+        differ between two originals, and ``delete_messages`` takes one chat.
+
+        A batch that fails is logged and the rest carry on, the way a single
+        message's failure was: ``retire_group`` has already booked the album by
+        this point, and a refused delete must not undo that.
+        """
+        batches: dict[tuple[Client, int], list[int]] = {}
+        for msg in originals:
+            batches.setdefault((msg._client, msg.chat.id), []).append(msg.id)
+        for (client, chat_id), message_ids in batches.items():
+            try:
+                await client.delete_messages(chat_id=chat_id, message_ids=message_ids)
+            except Exception as e:
+                LOGGER.error(str(e))
 
     async def _copy_to_clone_dumps(self, copy, from_chat_id, message_id):
         """Copy one album, or one message, to every clone dump chat."""

@@ -219,15 +219,36 @@ class FakeMessage:
         )
 
 
+class _FakeClient(SimpleNamespace):
+    """A namespace that hashes by identity, the way a real client does.
+
+    ``SimpleNamespace`` compares by value and is therefore unhashable, but a
+    batched delete groups messages by the client that sent them -- and two real
+    clients are only ever the same object, never merely equal.
+    """
+
+    __hash__ = object.__hash__
+    __eq__ = object.__eq__
+
+
 def _make_uploader(uploader_module):
     """Build an uploader whose sends land in a registry the test can read."""
     calls_by_id = {}
+    deletes = []
+    client = None
+
+    def _sent(kind, caption):
+        # A real message carries the client that sent it, because that is what
+        # ``Message.delete`` sends through and what a batched delete keys on.
+        msg = FakeMessage(kind, caption=caption, registry=calls_by_id)
+        msg._client = client
+        return msg
 
     async def send_photo(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return FakeMessage("photo", caption=caption, registry=calls_by_id)
+        return _sent("photo", caption)
 
     async def send_document(chat_id, reply_parameters=None, caption=None, **_kwargs):
-        return FakeMessage("document", caption=caption, registry=calls_by_id)
+        return _sent("document", caption)
 
     async def send_media_group(chat_id, media, **_kwargs):
         # what kind each member becomes follows what the batcher asked telegram
@@ -238,10 +259,7 @@ def _make_uploader(uploader_module):
             )
             for m in media
         ]
-        sent = [
-            FakeMessage(kind, caption=m.caption)
-            for kind, m in zip(kinds, media)
-        ]
+        sent = [_sent(kind, m.caption) for kind, m in zip(kinds, media)]
         for msg in sent:
             msg.media_group_id = "group1"
         return sent
@@ -249,13 +267,18 @@ def _make_uploader(uploader_module):
     async def get_messages(chat_id, message_ids):
         return calls_by_id[message_ids]
 
-    client = SimpleNamespace(
+    async def delete_messages(chat_id, message_ids, revoke=True):
+        deletes.append((chat_id, list(message_ids)))
+
+    client = _FakeClient(
         send_photo=send_photo,
         send_video=send_photo,
         send_document=send_document,
         send_audio=send_photo,
         send_media_group=send_media_group,
         get_messages=get_messages,
+        delete_messages=delete_messages,
+        deletes=deletes,
     )
     listener = SimpleNamespace(
         thumb="none",
