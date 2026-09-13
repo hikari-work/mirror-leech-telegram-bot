@@ -662,16 +662,22 @@ async def test_saving_again_replaces_the_units_of_the_same_task():
 
 
 async def test_saving_also_prunes_that_user():
-    dbm, recorder = _db()  # the prune's select finds nothing stored
+    dbm, recorder = _db()
 
     await dbm.save_copy_record(-1001, 7, 42, "a folder", [])
 
-    prune_sql, prune_params = recorder.reads[0]
+    # The prune is the last statement of a save and it is one statement, whether
+    # it finds a stale row or not: parent upsert, child delete, prune.
+    prune_sql, prune_params = recorder.writes[-1]
+    assert "DELETE FROM copy_tasks" in prune_sql
     assert "SELECT cid, mid FROM copy_tasks" in prune_sql
-    assert prune_params[1] == 42
-    assert prune_params[2] == MAX_TASK_RECORDS
-    # empty prune result -> nothing was written past the parent and child rows
-    assert len(recorder.writes) == 2
+    # the bot id is sent twice, once for each side of the delete
+    assert prune_params[0] == dbm_module.TgClient.ID
+    assert prune_params[1] == dbm_module.TgClient.ID
+    assert prune_params[2] == 42
+    assert prune_params[3] == MAX_TASK_RECORDS
+    assert len(recorder.writes) == 3
+    assert recorder.reads == []
 
 
 async def test_find_returns_only_the_records_of_that_task_id():
@@ -720,36 +726,54 @@ async def test_find_rebuilds_a_parent_with_no_units_as_an_empty_list():
                       "name": "a", "at": 1, "units": []}]
 
 
-async def test_prune_issues_an_offset_select_then_deletes_each_stale_row():
-    # rows exactly as dict_row returns them from the offset select
-    rows = [{"cid": -1001, "mid": 0}, {"cid": -1001, "mid": 1}]
-    dbm, recorder = _db(rows)
+async def test_prune_deletes_what_it_selects_in_one_statement():
+    """The stale ids are the subquery, so no row is read out to be named again.
+
+    Read-then-delete was two round trips plus one per stale row, and it could
+    drop a record saved between the two statements: the offset the read had
+    resolved past would already have moved.
+    """
+    dbm, recorder = _db()
 
     await dbm._prune_copy_records(42)
 
-    select_sql, select_params = recorder.reads[0]
-    assert "FROM copy_tasks" in select_sql
-    assert "ORDER BY at DESC, mid DESC" in select_sql
-    assert "OFFSET %s" in select_sql
-    assert select_params[1] == 42
-    assert select_params[2] == MAX_TASK_RECORDS
-    # one delete per stale task; the cascade clears its unit/media rows
-    assert len(recorder.writes) == 2
-    assert all(
-        "DELETE FROM copy_tasks" in sql and "cid = %s AND mid = %s" in sql
-        for sql, _ in recorder.writes
+    assert recorder.reads == []
+    assert len(recorder.writes) == 1
+    sql, params = recorder.writes[0]
+    # the delete is over the same table its subquery reads, correlated on the
+    # bot id -- so what the subquery resolves is what the delete takes
+    assert "DELETE FROM copy_tasks" in sql
+    assert "WHERE bot_id = %s AND (cid, mid) IN (" in sql
+    assert "SELECT cid, mid FROM copy_tasks" in sql
+    assert "WHERE bot_id = %s AND user_id = %s" in sql
+    assert "ORDER BY at DESC, mid DESC" in sql
+    assert "OFFSET %s" in sql
+    assert params == (
+        dbm_module.TgClient.ID,
+        dbm_module.TgClient.ID,
+        42,
+        MAX_TASK_RECORDS,
     )
-    assert recorder.writes[0][1][1:] == (-1001, 0)
-    assert recorder.writes[1][1][1:] == (-1001, 1)
 
 
-async def test_prune_with_nothing_stale_writes_nothing():
-    dbm, recorder = _db()  # select finds nothing past the newest MAX_TASK_RECORDS
+async def test_a_save_writes_the_same_prune_whether_or_not_anything_is_stale():
+    """The statement goes out unconditionally; the subquery is the no-op.
+
+    There is no second path to pin: a prune with nothing stale and a prune with
+    a stale row send the same SQL, because which rows the subquery resolves is
+    PostgreSQL's answer, not this code's. That is the point of the shape -- what
+    a prune costs no longer depends on what it finds. The behaviour of the two
+    cases is pinned against a real server in ``test_pg_integration``.
+    """
+    dbm, recorder = _db()
+
+    await dbm._prune_copy_records(42)
+    first = recorder.writes[0]
 
     await dbm._prune_copy_records(42)
 
-    assert len(recorder.reads) == 1
-    assert recorder.writes == []
+    assert recorder.writes == [first, first]
+    assert recorder.reads == []
 
 
 async def test_a_disconnected_db_does_nothing():

@@ -241,6 +241,38 @@ async def test_the_prune_is_per_user_and_spares_others(dbm):
     assert [d["user"] for d in await dbm.find_copy_records(0)] == [other_user]
 
 
+async def test_a_pruned_album_takes_its_units_and_media_with_it(dbm):
+    """The one-statement delete leans on the cascade, so the cascade is pinned.
+
+    Nothing names the child rows: they go because their parent went. Under the
+    per-row delete this held too, but it held per deleted row -- counted here,
+    because a delete that matched the parent but missed a child table's foreign
+    key would leave orphans that ``/copy`` would go on replaying.
+    """
+    for mid in range(MAX_TASK_RECORDS + 1):
+        await dbm.save_copy_record(
+            -1001,
+            mid,
+            42,
+            f"album {mid}",
+            [
+                {"mode": "group", "chat": -1001, "msg": 100 + mid, "media": [
+                    {"kind": "photo", "file_id": f"p{mid}", "caption": ""},
+                ]},
+                {"mode": "single", "chat": -1001, "msg": 200 + mid, "media": [
+                    {"kind": "video", "file_id": f"v{mid}", "caption": ""},
+                ]},
+            ],
+        )
+
+    # mid 0 was the oldest, so the save of the last mid pruned it
+    assert await dbm.find_copy_records(0) == []
+    # 2 units and 2 media rows per album survived, and not one row more: the
+    # pruned album's four child rows went with it
+    assert await _count(dbm, "copy_units", dbm._bot) == MAX_TASK_RECORDS * 2
+    assert await _count(dbm, "copy_unit_media", dbm._bot) == MAX_TASK_RECORDS * 2
+
+
 async def test_connect_lets_database_name_pick_the_database(monkeypatch):
     """``DATABASE_NAME`` overrides whatever database the URL arrives at.
 

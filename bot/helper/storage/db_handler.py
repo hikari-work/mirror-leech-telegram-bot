@@ -951,6 +951,14 @@ class DbManager:
     async def _prune_copy_records(self, user_id: int) -> None:
         """Drop a user's records past the newest MAX_TASK_RECORDS of them.
 
+        One statement. The stale ids are the subquery rather than a read this
+        code then walked issuing a delete per row, so a save pays one round trip
+        however much the prune finds -- and the rows it deletes are the ones the
+        database still sees at the moment of the delete. The read-then-delete
+        pair it replaces could not promise that: a record saved between the two
+        would land *inside* the offset the read had already resolved past, and
+        the delete would take it.
+
         No index is built on ``(user_id, at)`` for this query. The repo has never
         made one, and with a couple hundred rows per user a scan per save has
         been cheaper than an index whose only reader is this prune. ``at`` can
@@ -964,24 +972,18 @@ class DbManager:
         """
         if self._return:
             return
-        rows = await self._fetchall(
+        await self._execute(
             """
-            SELECT cid, mid FROM copy_tasks
-            WHERE bot_id = %s AND user_id = %s
-            ORDER BY at DESC, mid DESC
-            OFFSET %s
-            """,
-            (TgClient.ID, user_id, MAX_TASK_RECORDS),
-        )
-        for stale in rows:
-            # One delete per stale task; the FK cascade clears its units/media.
-            await self._execute(
-                """
-                DELETE FROM copy_tasks
-                WHERE bot_id = %s AND cid = %s AND mid = %s
-                """,
-                (TgClient.ID, stale["cid"], stale["mid"]),
+            DELETE FROM copy_tasks
+            WHERE bot_id = %s AND (cid, mid) IN (
+                SELECT cid, mid FROM copy_tasks
+                WHERE bot_id = %s AND user_id = %s
+                ORDER BY at DESC, mid DESC
+                OFFSET %s
             )
+            """,
+            (TgClient.ID, TgClient.ID, user_id, MAX_TASK_RECORDS),
+        )
 
 
 def _rebuild_unit(row: dict) -> dict:
