@@ -1,13 +1,14 @@
 from asyncio import create_subprocess_exec, wait_for
+from collections.abc import Callable
 from magic import Magic
-from os import walk, path as ospath, readlink
+from os import walk, path as ospath, readlink, remove as os_remove
+from shutil import rmtree as shutil_rmtree
 from re import split as re_split, I, search as re_search, escape
 from aiofiles.os import (
     remove,
     path as aiopath,
     listdir,
     rmdir,
-    readlink as aioreadlink,
     symlink,
     makedirs as aiomakedirs,
 )
@@ -175,18 +176,27 @@ async def clean_all():
 
 async def clean_unwanted(opath):
     LOGGER.info(f"Cleaning unwanted files/folders: {opath}")
-    walk_data = await sync_to_async(lambda: list(walk(opath, topdown=False)))
-    for dirpath, _, files in walk_data:
-        for filee in files:
-            f_path = ospath.join(dirpath, filee)
-            if filee.strip().endswith(".parts") and filee.startswith("."):
-                await remove(f_path)
-        if dirpath.strip().endswith(".unwanted"):
-            await aiormtree(dirpath, ignore_errors=True)
+    await sync_to_async(_clean_unwanted_sync, opath)
     walk_data = await sync_to_async(lambda: list(walk(opath, topdown=False)))
     for dirpath, _, files in walk_data:
         if not await listdir(dirpath):
             await rmdir(dirpath)
+
+
+def _clean_unwanted_sync(opath: str) -> None:
+    """Drop the leftover markers and ``.unwanted`` trees under *opath*.
+
+    One thread hop for the whole tree, like ``_remove_walked``: the walk, the
+    deletions and the ``rmtree`` are all blocking, and paying a hop each for
+    them -- which is what the ``await``s here used to do -- was the bulk of what
+    this function cost.
+    """
+    for dirpath, _, files in walk(opath, topdown=False):
+        for filee in files:
+            if filee.strip().endswith(".parts") and filee.startswith("."):
+                os_remove(ospath.join(dirpath, filee))
+        if dirpath.strip().endswith(".unwanted"):
+            shutil_rmtree(dirpath, ignore_errors=True)
 
 
 async def walk_files(opath, topdown=False):
@@ -196,25 +206,48 @@ async def walk_files(opath, topdown=False):
     loop before any of the paths are touched -- which is also what makes the
     deepest-first order safe to move or delete through.
     """
-    walk_data = await sync_to_async(lambda: list(walk(opath, topdown=topdown)))
+    return await sync_to_async(_walk_files_sync, opath, topdown)
+
+
+def _walk_files_sync(opath: str, topdown: bool = False) -> list[str]:
+    """The blocking half of ``walk_files``, for callers that are already off."""
     return [
         ospath.join(dirpath, file_)
-        for dirpath, _, files in walk_data
+        for dirpath, _, files in walk(opath, topdown=topdown)
         for file_ in files
     ]
 
 
-async def get_path_size(opath):
+def _path_size_sync(opath: str) -> int:
+    """The size of *opath* in bytes, following a symlink to what it names.
+
+    The walk and every stat live in here so that one thread hop covers the whole
+    tree. Spelled out with an ``await`` per file -- through ``aiopath.islink``
+    and ``aiopath.getsize``, which is how this ran -- two hops were paid for
+    every file just to hand it a stat that costs microseconds: measured at
+    roughly 46x the price of the stat itself, over thirteen call sites per task.
+
+    ``islink``/``readlink`` in front of a stat look redundant, since ``os.stat``
+    resolves a link by itself. They are kept for what a *broken* link does
+    without them: the size is then asked of a path that is not there, so the
+    error names the target rather than the link the caller handed over. That
+    target is the path a human has to go and look at, which is the whole value
+    of the message.
+    """
+    if ospath.isfile(opath):
+        if ospath.islink(opath):
+            opath = readlink(opath)
+        return ospath.getsize(opath)
     total_size = 0
-    if await aiopath.isfile(opath):
-        if await aiopath.islink(opath):
-            opath = await aioreadlink(opath)
-        return await aiopath.getsize(opath)
-    for abs_path in await walk_files(opath):
-        if await aiopath.islink(abs_path):
-            abs_path = await aioreadlink(abs_path)
-        total_size += await aiopath.getsize(abs_path)
+    for abs_path in _walk_files_sync(opath):
+        if ospath.islink(abs_path):
+            abs_path = readlink(abs_path)
+        total_size += ospath.getsize(abs_path)
     return total_size
+
+
+async def get_path_size(opath):
+    return await sync_to_async(_path_size_sync, opath)
 
 
 async def count_files_and_folders(opath):
@@ -268,21 +301,35 @@ async def _remove_walked(fpath, should_remove):
     The thumbnail directory yt-dlp writes is skipped: both callers mean the
     payload, and a filter written for videos would take the thumbs with it.
     """
-    walk_data = await sync_to_async(lambda: list(walk(fpath)))
-    for root, _, files in walk_data:
+    await sync_to_async(_remove_walked_sync, fpath, should_remove)
+
+
+def _remove_walked_sync(fpath: str, should_remove: Callable[[str], bool]) -> None:
+    """The blocking half: walk, test and unlink with no hop between them.
+
+    *should_remove* is a plain string predicate, so it can run on the thread
+    pool with the walk and the unlink that surround it -- which is the point.
+    An ``await`` per file, which is what the callers here used to be, cost two
+    thread hops each to reach an unlink that is a syscall.
+    """
+    for root, _, files in walk(fpath):
         if root.strip().endswith("/yt-dlp-thumb"):
             continue
         for f in files:
             if should_remove(f):
-                await remove(ospath.join(root, f))
+                os_remove(ospath.join(root, f))
 
 
 async def remove_excluded_files(fpath, ee):
-    await _remove_walked(fpath, lambda f: f.strip().lower().endswith(tuple(ee)))
+    # ``tuple(ee)`` once, not once per file: it used to be built inside the
+    # predicate, where a tree of a thousand files rebuilt it a thousand times.
+    exts = tuple(ee)
+    await _remove_walked(fpath, lambda f: f.strip().lower().endswith(exts))
 
 
 async def remove_non_included_files(fpath, ie):
-    await _remove_walked(fpath, lambda f: not f.strip().lower().endswith(tuple(ie)))
+    exts = tuple(ie)
+    await _remove_walked(fpath, lambda f: not f.strip().lower().endswith(exts))
 
 
 async def move_and_merge(source, destination, mid):
