@@ -217,6 +217,17 @@ _MEDIA_INSERT = """
     VALUES {values}
 """
 
+_RSS_UPSERT = """
+    INSERT INTO rss (bot_id, user_id, data)
+    VALUES {values}
+    ON CONFLICT (bot_id, user_id) DO UPDATE SET data = EXCLUDED.data
+"""
+"""One user's feed set or every user's at once -- the same statement either way.
+
+A single user is a one-row ``VALUES``, so ``rss_update`` and ``rss_update_all``
+only ever differ in how many rows they name.
+"""
+
 
 def _values_clause(rows: int, columns: int) -> str:
     """``(%s, %s), (%s, %s)`` -- one placeholder group per row.
@@ -730,28 +741,39 @@ class DbManager:
         return [(row["user_id"], row["data"]) for row in rows]
 
     async def rss_update_all(self, bot_id=None):
+        """Rewrite every feed set of this bot in one statement.
+
+        It used to be one ``_execute`` per user, and an ``_execute`` outside a
+        transaction is its own pool checkout and its own implicit commit -- so a
+        bot with twenty subscribers paid twenty of each to save them, and a
+        failure part way through left the users before it saved and the ones
+        after it not. One statement is one round trip and one atomic write.
+
+        The empty case is a return rather than a statement that matches nothing:
+        ``_values_clause(0, 3)`` spells no row at all, and ``VALUES`` with
+        nothing after it is a syntax error. ``rss_dict`` is empty for any bot
+        whose users have no feeds, and ``save_everyone`` is called on that bot.
+        """
         if self._return:
             return
         bot = bot_id or TgClient.ID
-        for user_id in list(rss_dict.keys()):
-            await self._execute(
-                """
-                INSERT INTO rss (bot_id, user_id, data)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (bot_id, user_id) DO UPDATE SET data = EXCLUDED.data
-                """,
-                (bot, user_id, _jsonb(rss_dict[user_id])),
-            )
+        user_ids = list(rss_dict.keys())
+        if not user_ids:
+            return
+        await self._execute(
+            _RSS_UPSERT.format(values=_values_clause(len(user_ids), 3)),
+            [
+                value
+                for user_id in user_ids
+                for value in (bot, user_id, _jsonb(rss_dict[user_id]))
+            ],
+        )
 
     async def rss_update(self, user_id, bot_id=None):
         if self._return:
             return
         await self._execute(
-            """
-            INSERT INTO rss (bot_id, user_id, data)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (bot_id, user_id) DO UPDATE SET data = EXCLUDED.data
-            """,
+            _RSS_UPSERT.format(values=_values_clause(1, 3)),
             (bot_id or TgClient.ID, user_id, _jsonb(rss_dict[user_id])),
         )
 

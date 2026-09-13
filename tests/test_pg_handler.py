@@ -361,14 +361,38 @@ async def test_rss_update_writes_one_users_feeds(dbm):
     assert params == ("123", 7, {"https://x/rss": {"title": "t"}})
 
 
-async def test_rss_update_all_writes_every_user(dbm):
+async def test_rss_update_all_writes_every_user_in_one_statement(dbm):
+    """One statement for the whole map, not one per user.
+
+    What made the per-user loop expensive was not the SQL: an ``_execute``
+    outside a transaction checks out its own pooled connection and commits on
+    its own. Twenty users meant twenty checkouts, twenty commits, and a write
+    that could land half done.
+    """
     rss_dict.update({1: {"one": 1}, 2: {"two": 2}})
 
     await dbm.rss_update_all(bot_id="123")
 
-    written = {params[1]: params[2] for _, params in dbm._recorder.writes}
-    assert written == {1: {"one": 1}, 2: {"two": 2}}
-    assert {params[0] for _, params in dbm._recorder.writes} == {"123"}
+    assert len(dbm._recorder.writes) == 1
+    sql, params = dbm._recorder.writes[0]
+    assert "INSERT INTO rss (bot_id, user_id, data)" in sql
+    # two rows in one VALUES, each a (bot, user, document) triple
+    assert sql.count("(%s, %s, %s)") == 2
+    assert params == ("123", 1, {"one": 1}, "123", 2, {"two": 2})
+
+
+async def test_rss_update_all_with_no_subscribers_writes_nothing(dbm):
+    """``save_everyone`` runs for bots nobody has subscribed to.
+
+    Pinned because the one-statement form has to be *guarded* rather than left
+    to match nothing: ``VALUES`` with no row after it does not run as a no-op,
+    it fails to parse. The per-user loop it replaces was a no-op by itself.
+    """
+    rss_dict.clear()
+
+    await dbm.rss_update_all(bot_id="123")
+
+    assert dbm._recorder.writes == []
 
 
 async def test_rss_delete_targets_one_user_of_one_bot(dbm):

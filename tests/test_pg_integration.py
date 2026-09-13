@@ -4,7 +4,8 @@ The hermetic suite pins the SQL each DbManager method emits; here the store is
 actually there, so the properties that depend on it are proven: ``||`` jsonb
 merge vs whole-document replace, one bot's rows never leaking into another's,
 the global ``users`` table, blob revision-upserts, the notifier's read-then-
-forget, and the per-user copy-record prune. Every test writes under its own bot
+forget, the per-user copy-record prune, and every subscriber's feeds going in
+as one write. Every test writes under its own bot
 id and user id so none collides with another, and the whole module is skipped
 unless ``PG_TEST_URL`` points at a reachable server:
 
@@ -21,7 +22,7 @@ from uuid import uuid4
 
 import pytest
 
-from bot import user_data
+from bot import rss_dict, user_data
 from bot.core.config_manager import Config
 from bot.core.telegram_manager import TgClient
 from bot.helper.storage.copy_records import MAX_TASK_RECORDS
@@ -271,6 +272,64 @@ async def test_a_pruned_album_takes_its_units_and_media_with_it(dbm):
     # pruned album's four child rows went with it
     assert await _count(dbm, "copy_units", dbm._bot) == MAX_TASK_RECORDS * 2
     assert await _count(dbm, "copy_unit_media", dbm._bot) == MAX_TASK_RECORDS * 2
+
+
+# ── rss: every subscriber's feeds in one write ────────────────────────
+
+
+async def test_rss_update_all_writes_and_then_updates_every_user(dbm):
+    """The whole map in one statement, and a second call replaces rather than adds.
+
+    The upsert is the load-bearing part: writing every user in one ``VALUES``
+    only holds if ``ON CONFLICT`` still fires for the ones already stored, and
+    the unit tests pin that clause as text, not as behaviour.
+    """
+    rss_dict.update({
+        1: {"https://a/rss": {"title": "one"}},
+        2: {"https://b/rss": {"title": "two"}},
+    })
+    await dbm.rss_update_all(bot_id=dbm._bot)
+
+    assert dict(await dbm.read_rss_rows(dbm._bot)) == {
+        1: {"https://a/rss": {"title": "one"}},
+        2: {"https://b/rss": {"title": "two"}},
+    }
+
+    rss_dict[2] = {"https://b/rss": {"title": "renamed"}}
+    await dbm.rss_update_all(bot_id=dbm._bot)
+
+    rows = dict(await dbm.read_rss_rows(dbm._bot))
+    assert rows[2] == {"https://b/rss": {"title": "renamed"}}
+    # Replaced in place: a second row for user 2 would have been collapsed by
+    # the dict above, and the primary key would not have caught it here -- the
+    # bot id is part of that key, and every run of this test brings a new one.
+    assert await _count_where(
+        dbm, "rss", "bot_id = %s AND user_id = %s", (dbm._bot, 2)
+    ) == 1
+    rss_dict.clear()  # shared with the rest of the session, like user_data
+
+
+async def _count_where(dbm: DbManager, table: str, where: str, params) -> int:
+    """Rows matching *where* in a table -- ``_count`` for a narrower question."""
+    rows = await dbm._fetchall(
+        f"SELECT count(*) AS n FROM {table} WHERE {where}", params
+    )
+    return rows[0]["n"]
+
+
+async def test_rss_update_all_with_no_subscribers_is_accepted(dbm):
+    """The guard, against a server that would reject the statement without it.
+
+    ``VALUES`` with no row after it does not run as a no-op -- PostgreSQL fails
+    to parse it at the ``ON`` -- so this is the case that separates "writes
+    nothing" from "raises". A bot whose users have no feeds reaches this on
+    every ``save_everyone``.
+    """
+    rss_dict.clear()
+
+    await dbm.rss_update_all(bot_id=dbm._bot)
+
+    assert await dbm.read_rss_rows(dbm._bot) == []
 
 
 async def test_connect_lets_database_name_pick_the_database(monkeypatch):
