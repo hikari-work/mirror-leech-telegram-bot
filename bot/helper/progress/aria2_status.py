@@ -120,6 +120,17 @@ class Aria2Status:
     def gid(self):
         return self._gid
 
+    def known_gid(self) -> str | None:
+        """Never one: this task's gid is not settled, so it has to be asked for.
+
+        ``update()`` follows a ``followedBy`` to a new gid -- a magnet or a
+        metalink hands its download off once the metadata is in -- so the gid this
+        task answers to now is only knowable from aria2. Where a qBittorrent task
+        can settle a lookup by comparing hashes, this one is what the lookup
+        refreshes.
+        """
+        return None
+
     async def cancel_task(self):
         self.listener.is_cancelled = True
         await self.update()

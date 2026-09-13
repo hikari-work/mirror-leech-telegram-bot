@@ -45,10 +45,37 @@ STATUSES = {
 
 
 async def get_task_by_gid(gid: str):
+    """The task *gid* names, or None.
+
+    Two passes, both under the lock. The first settles every task whose gid can
+    be read off the object itself: all but the torrents hold theirs from
+    construction, and a qBittorrent task holds a hash its server never
+    reassigns. A lookup that lands there costs nothing, which is the common case
+    for the qBittorrent listener -- it finds one task per torrent event, and used
+    to pay a ``torrents.info`` call for every *other* torrent in the dict to do
+    it.
+
+    Whatever is left has to be asked, because its gid is what the answer moves:
+    aria2 hands a followed download a new one, and the status object only learns
+    it by looking. Those are refreshed in place, in the order the dict holds them
+    and stopping at the first match -- which is exactly what this function did
+    before the first pass existed, so a lookup that gets this far answers what it
+    always did. Two passes cannot disagree about *which* task that is: a gid
+    names one download, so at most one task here can match it.
+    """
     async with task_dict_lock:
+        unsettled = []
         for tk in task_dict.values():
-            if hasattr(tk, "seeding"):
-                await tk.update()
+            if hasattr(tk, "known_gid"):
+                known = tk.known_gid()
+                if known is None:
+                    unsettled.append(tk)
+                elif known == gid:
+                    return tk
+            elif tk.gid() == gid:
+                return tk
+        for tk in unsettled:
+            await tk.update()
             if tk.gid() == gid:
                 return tk
         return None

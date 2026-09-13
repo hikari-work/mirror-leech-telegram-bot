@@ -101,6 +101,18 @@ class QbittorrentStatus:
     def gid(self):
         return self.hash()[:12]
 
+    def known_gid(self) -> str | None:
+        """This task's gid, when it can be given without asking qBittorrent.
+
+        A torrent's hash is assigned once and never reassigned, and it is in hand
+        from the first successful ``update()``, so a lookup can settle on one by
+        comparison alone rather than by a ``torrents.info`` call per task standing
+        in its way. ``None`` means there is no info to answer from -- the window
+        between being built and that first ``update()`` -- which tells the caller
+        to ask rather than to guess.
+        """
+        return self.gid() if self._info is not None else None
+
     def hash(self):
         return self._info.hash
 
