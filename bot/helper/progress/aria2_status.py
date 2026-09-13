@@ -75,6 +75,15 @@ class Aria2Status:
 
     async def status(self):
         await self.update()
+        return self.cached_status()
+
+    def cached_status(self) -> str:
+        """The status of the info ``update()`` last fetched.
+
+        Split from ``status()`` for the same reason ``QbittorrentStatus`` splits
+        it: a caller holding a batch of tasks refreshes them once, together, and
+        then reads the answers off the objects instead of asking again per task.
+        """
         if self._download.get("status", "") == "waiting" or self.queued:
             if self.seeding:
                 return MirrorStatus.STATUS_QUEUEUP

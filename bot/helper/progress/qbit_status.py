@@ -63,6 +63,17 @@ class QbittorrentStatus:
 
     async def status(self):
         await self.update()
+        return self.cached_status()
+
+    def cached_status(self) -> str:
+        """The status of the info ``update()`` last fetched.
+
+        Split from ``status()`` so that a caller holding a batch of tasks can
+        refresh them all at once and then read every answer off the object it just
+        refreshed, instead of paying a round trip per task inside the loop that
+        renders them. Reading it before any ``update()`` has run is the same
+        mistake calling ``status()`` first used to be.
+        """
         state = self._info.state
         if state == "queuedDL" or self.queued:
             return MirrorStatus.STATUS_QUEUEDL

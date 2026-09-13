@@ -1,7 +1,9 @@
+from collections.abc import Iterable
 from html import escape
 from psutil import virtual_memory, cpu_percent, disk_usage
 from time import time
-from asyncio import iscoroutinefunction, gather
+from typing import Any
+from asyncio import gather
 
 from ... import task_dict, task_dict_lock, bot_start_time, status_dict, DOWNLOAD_DIR
 from ...core.config_manager import Config
@@ -42,6 +44,30 @@ STATUSES = {
     "PA": MirrorStatus.STATUS_PAUSED,
     "CK": MirrorStatus.STATUS_CHECK,
 }
+
+
+def _task_status(tk: Any) -> str:
+    """What *tk* last reported, without asking its tool for anything newer.
+
+    A torrent status answers out of the info its own ``update()`` fetched; every
+    other tool holds its status in process. Either way this is a read, so a caller
+    that has refreshed the torrent tasks can classify and render a whole page of
+    them without a round trip in between.
+    """
+    cached = getattr(tk, "cached_status", None)
+    return cached() if cached is not None else tk.status()
+
+
+async def _refresh_torrent_statuses(tasks: Iterable[Any]) -> None:
+    """Ask every torrent task in *tasks* for its info, all of them at once.
+
+    ``update()`` is the only member of the status protocol that talks to a
+    server -- ``torrents.info`` for a qBittorrent task, ``tellStatus`` for an
+    aria2 one -- so this is where the waiting in a status view lives, and it is
+    one wait rather than one per task. Every other tool has no ``update`` at all:
+    it knows its status without being asked.
+    """
+    await gather(*(tk.update() for tk in tasks if hasattr(tk, "update")))
 
 
 async def get_task_by_gid(gid: str):
@@ -92,17 +118,15 @@ async def get_specific_tasks(status, user_id):
         if user_id
         else list(task_dict.values())
     )
-    coro_tasks = []
-    coro_tasks.extend(tk for tk in tasks_to_check if iscoroutinefunction(tk.status))
-    coro_statuses = await gather(*[tk.status() for tk in coro_tasks])
+    # One round trip per torrent task, all of them in flight together, and then
+    # every answer read back off the object that just fetched it. The statuses
+    # used to be gathered into a list of results that the loop below matched tasks
+    # against by searching that list, which was a scan per task to find something
+    # it already knew.
+    await _refresh_torrent_statuses(tasks_to_check)
     result = []
-    coro_index = 0
     for tk in tasks_to_check:
-        if tk in coro_tasks:
-            st = coro_statuses[coro_index]
-            coro_index += 1
-        else:
-            st = tk.status()
+        st = _task_status(tk)
         if (st == status) or (
             status == MirrorStatus.STATUS_DOWNLOAD and st not in STATUSES.values()
         ):
@@ -208,16 +232,21 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         page_no = pages - (abs(page_no) % pages)
         status_dict[sid]["page_no"] = page_no
     start_position = (page_no - 1) * STATUS_LIMIT
+    page = tasks[start_position : STATUS_LIMIT + start_position]
 
-    for index, task in enumerate(
-        tasks[start_position : STATUS_LIMIT + start_position], start=1
-    ):
+    if status == "All":
+        # The "All" filter hands the dict over without reading a status off
+        # anything, so the page about to be rendered is the only part of it that
+        # has to be refreshed -- and it refreshes in flight, where asking each
+        # task for its status inside the loop below was one round trip after
+        # another. Every other status was refreshed by the filter itself.
+        await _refresh_torrent_statuses(page)
+
+    for index, task in enumerate(page, start=1):
         if status != "All":
             tstatus = status
-        elif iscoroutinefunction(task.status):
-            tstatus = await task.status()
         else:
-            tstatus = task.status()
+            tstatus = _task_status(task)
         if task.listener.is_super_chat:
             msg += f"<b>{index + start_position}.<a href='{task.listener.message.link}'>{tstatus}</a>: </b>"
         else:
