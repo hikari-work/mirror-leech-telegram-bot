@@ -232,9 +232,20 @@ async def restore_users(bot_id):
     A user may own files without holding any scalar setting, since uploading a
     thumbnail only calls update_user_doc. Those ids exist solely as blob names,
     so both sources are merged here.
+
+    The listing is asked for with no prefix so that the names arrive in the
+    ``users/<uid>/<KEY>`` shape the merge below matches on. A prefix comes back
+    stripped, and with ``"users/"`` every name was two parts long, so the merge
+    silently did nothing: a user whose only stored data was a thumbnail never
+    re-entered ``user_data`` and never had their file written back.
     """
     rows = {user_id: data for user_id, data in await database.read_user_rows()}
-    for name in await database.list_blobs("users/", bot_id=bot_id):
+    # The listing is also what says a user has a file worth fetching: a name
+    # that is not in it has no blob behind it, so asking for one is a round trip
+    # that can only come back empty. There used to be one of those per user, on
+    # the path that runs before the bot answers anything.
+    stored = set(await database.list_blobs(bot_id=bot_id))
+    for name in stored:
         # users/<uid>/<KEY>
         parts = name.split("/")
         if len(parts) == 3 and parts[1].lstrip("-").isdigit():
@@ -251,8 +262,9 @@ async def restore_users(bot_id):
     if not await aiopath.exists("thumbnails"):
         await makedirs("thumbnails")
     for uid, row in rows.items():
+        name = f"users/{uid}/THUMBNAIL"
         path_ = f"thumbnails/{uid}.jpg"
-        if blob := await database.get_blob(f"users/{uid}/THUMBNAIL", bot_id=bot_id):
+        if name in stored and (blob := await database.get_blob(name, bot_id=bot_id)):
             async with aiopen(path_, "wb+") as f:
                 await f.write(blob)
             row["THUMBNAIL"] = path_

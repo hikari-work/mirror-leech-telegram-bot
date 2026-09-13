@@ -23,6 +23,7 @@ from uuid import uuid4
 import pytest
 
 from bot import rss_dict, user_data
+from bot.core import startup
 from bot.core.config_manager import Config
 from bot.core.telegram_manager import TgClient
 from bot.helper.storage.copy_records import MAX_TASK_RECORDS
@@ -340,6 +341,67 @@ async def test_rss_update_all_with_no_subscribers_is_accepted(dbm):
     await dbm.rss_update_all(bot_id=dbm._bot)
 
     assert await dbm.read_rss_rows(dbm._bot) == []
+
+
+async def test_a_user_whose_only_record_is_a_thumbnail_comes_back(
+    dbm, monkeypatch, tmp_path
+):
+    """The boot restore, through the real ``list_blobs`` rather than a stub.
+
+    A user who only ever uploaded a thumbnail owns a blob and no row: the
+    upload calls ``update_user_doc``, never ``update_user_data``. ``load_settings``
+    wipes ``thumbnails/`` at every start, so if this merge misses them their
+    thumbnail is gone from disk and from ``user_data`` until they upload it
+    again -- which is what the prefix handed to ``list_blobs`` used to cause.
+    That prefix's effect on the names is exactly what a stub cannot show, so
+    this asserts against the store that defines it.
+    """
+    uid = -int(uuid4().hex[:8], 16)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(startup, "user_data", {})
+    monkeypatch.setattr(startup, "database", dbm)
+    await dbm.save_blob(f"users/{uid}/THUMBNAIL", b"pixels", bot_id=dbm._bot)
+
+    await startup.restore_users(dbm._bot)
+
+    assert startup.user_data[uid]["THUMBNAIL"] == f"thumbnails/{uid}.jpg"
+    assert (tmp_path / "thumbnails" / f"{uid}.jpg").read_bytes() == b"pixels"
+
+
+async def test_restoring_users_fetches_only_the_thumbnails_that_exist(
+    dbm, monkeypatch, tmp_path
+):
+    """One row per user, one blob for two of them: two fetches, not four.
+
+    The listing is the same query the merge already needs, so the users holding
+    nothing cost nothing. Pinned against the store because the property is
+    about what the database answers, not about the SQL this module wrote.
+    """
+    with_thumb = -int(uuid4().hex[:8], 16)
+    without = -int(uuid4().hex[:8], 16)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(startup, "user_data", {})
+    monkeypatch.setattr(startup, "database", dbm)
+    await dbm.save_user_row(with_thumb, {"AS_DOCUMENT": True})
+    await dbm.save_user_row(without, {"AS_DOCUMENT": False})
+    await dbm.save_blob(f"users/{with_thumb}/THUMBNAIL", b"one", bot_id=dbm._bot)
+
+    fetches = []
+    real_get_blob = dbm.get_blob
+
+    async def counting_get_blob(path, bot_id=None):
+        fetches.append(path)
+        return await real_get_blob(path, bot_id=bot_id)
+
+    monkeypatch.setattr(dbm, "get_blob", counting_get_blob)
+
+    await startup.restore_users(dbm._bot)
+
+    assert fetches == [f"users/{with_thumb}/THUMBNAIL"]
+    assert startup.user_data[with_thumb]["THUMBNAIL"] == (
+        f"thumbnails/{with_thumb}.jpg"
+    )
+    assert startup.user_data[without] == {"AS_DOCUMENT": False}
 
 
 async def test_connect_lets_database_name_pick_the_database(monkeypatch):
