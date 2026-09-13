@@ -110,6 +110,16 @@ async def test_copy_presets_live_in_rows_not_the_users_doc(dbm):
             "anime": ["pm", "@updates", "-1001501001|2"],
             "empty": [],
         }
+
+        # A second save replaces the set rather than adding to it: "anime" loses
+        # a destination and "empty" is dropped. This is the ordering the two
+        # inserts have to get right -- parents before children -- against a
+        # server that enforces the foreign key, and the delete has to clear the
+        # old destination rows before their replacements arrive.
+        user_data[uid]["COPY_PRESETS"] = {"anime": ["pm"]}
+        await dbm.update_user_data(uid)
+
+        assert (await dbm.read_copy_presets_all()).get(uid) == {"anime": ["pm"]}
     finally:
         del user_data[uid]
 

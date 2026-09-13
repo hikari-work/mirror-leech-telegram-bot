@@ -254,6 +254,12 @@ async def test_update_user_data_strips_doc_keys_then_saves(dbm):
 
 
 async def test_update_user_data_funnels_presets_into_their_rows(dbm):
+    """A whole preset set in two inserts, not one per row.
+
+    The per-row statements this pins against were each a round trip inside the
+    transaction ``update_user_data`` opens, so the count is the property: five
+    writes for a two-preset user however many destinations those presets hold.
+    """
     user_data[5] = {
         "COPY_PRESETS": {"a": ["pm", "@chan"], "b": []},
         "AS_DOCUMENT": True,
@@ -269,15 +275,66 @@ async def test_update_user_data_funnels_presets_into_their_rows(dbm):
     del_sql, (del_uid,) = dbm._recorder.writes[1]
     assert "DELETE FROM copy_presets" in del_sql
     assert del_uid == 5
-    # preset "a": a parent row, then its destinations in typed order
+    # every parent row in one statement -- "b" holds no destinations and still
+    # gets its row, the destinations being a separate insert
     parent_sql, parent_params = dbm._recorder.writes[2]
-    assert "INSERT INTO copy_presets" in parent_sql
-    assert parent_params == (5, "a")
-    assert dbm._recorder.writes[3][1] == (5, "a", 0, "pm")
-    assert dbm._recorder.writes[4][1] == (5, "a", 1, "@chan")
-    # preset "b" holds no destinations: the parent row stands alone
-    assert dbm._recorder.writes[5][1] == (5, "b")
-    assert len(dbm._recorder.writes) == 6
+    assert "INSERT INTO copy_presets (user_id, name)" in parent_sql
+    assert parent_sql.count("(%s, %s)") == 2
+    assert parent_params == (5, "a", 5, "b")
+    # and every destination in one, in typed order
+    dest_sql, dest_params = dbm._recorder.writes[3]
+    assert "INSERT INTO copy_preset_dests" in dest_sql
+    assert dest_sql.count("(%s, %s, %s, %s)") == 2
+    assert dest_params == (5, "a", 0, "pm", 5, "a", 1, "@chan")
+    assert len(dbm._recorder.writes) == 4
+
+
+async def test_a_preset_set_with_no_destinations_inserts_only_its_parents(dbm):
+    """The destination insert is skipped rather than sent empty.
+
+    ``_values_clause(0, 4)`` spells no row at all, so ``VALUES`` with nothing
+    after it would not be a no-op -- it would fail to parse. A user who has
+    named presets but given none of them a chat reaches this on every write.
+    """
+    user_data[5] = {"COPY_PRESETS": {"a": [], "b": []}}
+
+    await dbm.update_user_data(5)
+
+    kinds = [sql for sql, _ in dbm._recorder.writes]
+    assert any("INSERT INTO copy_presets " in sql for sql in kinds)
+    assert not any("INSERT INTO copy_preset_dests" in sql for sql in kinds)
+    assert len(dbm._recorder.writes) == 3  # user row, delete, parent rows
+
+
+async def test_an_empty_preset_mapping_still_clears_what_was_stored(dbm):
+    """An empty dict is a real set that says "no presets", not an absent key.
+
+    This is the shape ``_stored_presets`` leaves behind, so it is the one most
+    settings toggles carry: the delete has to run (the user may have removed
+    their last preset) while neither insert does.
+    """
+    user_data[5] = {"COPY_PRESETS": {}}
+
+    await dbm.update_user_data(5)
+
+    assert len(dbm._recorder.writes) == 2
+    assert "INSERT INTO users" in dbm._recorder.writes[0][0]
+    assert "DELETE FROM copy_presets" in dbm._recorder.writes[1][0]
+
+
+async def test_a_user_with_no_presets_at_all_skips_the_preset_rows(dbm):
+    """No ``COPY_PRESETS`` key in memory means the rows are left alone.
+
+    ``_stored_presets`` creates the key, but a user who has never opened the
+    presets menu has no key at all -- and must not have their stored presets
+    deleted by an unrelated settings toggle.
+    """
+    user_data[5] = {"AS_DOCUMENT": True}
+
+    await dbm.update_user_data(5)
+
+    assert len(dbm._recorder.writes) == 1
+    assert "INSERT INTO users" in dbm._recorder.writes[0][0]
 
 
 async def test_read_copy_presets_all_groups_dests_by_user_and_name(dbm):

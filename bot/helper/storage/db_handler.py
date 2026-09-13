@@ -228,6 +228,22 @@ A single user is a one-row ``VALUES``, so ``rss_update`` and ``rss_update_all``
 only ever differ in how many rows they name.
 """
 
+_PRESET_INSERT = """
+    INSERT INTO copy_presets (user_id, name)
+    VALUES {values}
+"""
+
+_DEST_INSERT = """
+    INSERT INTO copy_preset_dests (user_id, name, dst_seq, dest)
+    VALUES {values}
+"""
+"""A whole preset set in two statements: the parents, then their destinations.
+
+Split in two rather than one statement, because the destination rows carry a
+foreign key to the preset rows and both go in together -- the parent insert has
+to be visible before the child one runs.
+"""
+
 
 def _values_clause(rows: int, columns: int) -> str:
     """``(%s, %s), (%s, %s)`` -- one placeholder group per row.
@@ -676,23 +692,32 @@ class DbManager:
         Called from ``update_user_data`` inside its transaction. A preset with
         no destinations keeps its parent row alone; the cascade clears the
         destination rows of a preset (or user) that is being deleted.
+
+        Both writes are multi-row, which is what this is shaped around: the
+        per-row statements it used to issue were each a round trip inside a
+        transaction that holds a pooled connection for its whole length, so a
+        five-preset, three-destination user paid sixteen of them to save one
+        mapping.
         """
         await self._execute(
             "DELETE FROM copy_presets WHERE user_id = %s", (user_id,)
         )
-        for name, dests in presets.items():
+        preset_rows = [(user_id, name) for name in presets]
+        if preset_rows:
             await self._execute(
-                "INSERT INTO copy_presets (user_id, name) VALUES (%s, %s)",
-                (user_id, name),
+                _PRESET_INSERT.format(values=_values_clause(len(preset_rows), 2)),
+                [value for row in preset_rows for value in row],
             )
-            for seq, dest in enumerate(dests or []):
-                await self._execute(
-                    """
-                    INSERT INTO copy_preset_dests (user_id, name, dst_seq, dest)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (user_id, name, seq, dest),
-                )
+        dest_rows = [
+            (user_id, name, seq, dest)
+            for name, dests in presets.items()
+            for seq, dest in enumerate(dests or [])
+        ]
+        if dest_rows:
+            await self._execute(
+                _DEST_INSERT.format(values=_values_clause(len(dest_rows), 4)),
+                [value for row in dest_rows for value in row],
+            )
 
     async def read_copy_presets_all(self) -> dict[int, dict[str, list[str]]]:
         """Every user's presets keyed by user id, for the boot restore.
