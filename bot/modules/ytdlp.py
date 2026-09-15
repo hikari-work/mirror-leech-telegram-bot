@@ -29,6 +29,7 @@ from ..helper.telegram.message_utils import (
     edit_message,
     delete_message,
 )
+from ..helper.telegram.task_options import ask_options
 
 
 @new_task
@@ -308,6 +309,12 @@ class YtDlp(CommandTask):
             return
 
         if not await self._resolve_special_links(opt):
+            return
+
+        # Last chance to change the options, and the last moment it is free to
+        # take: the link is already known to be usable, and nothing has been
+        # downloaded yet. Everything below reads the args as they come back.
+        if not await ask_options(self, args, "ytdl"):
             return
 
         try:

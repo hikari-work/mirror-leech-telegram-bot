@@ -10,6 +10,8 @@ leech = """<b>Send link along with command line or </b>
 
 /cmd -n new name -e
 
+<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it; -e and -z show a lock instead of the password they carry, and switching one off and on again loses that password.
+
 <b>NOTE:</b>
 1. Commands that start with <b>qb</b> are ONLY for torrents."""
 
@@ -18,6 +20,8 @@ yt = """<b>Send link along with command line</b>:
 /cmd link
 <b>By replying to link</b>:
 /cmd -n new name -z password -opt x:y|x1:y1
+
+<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it.
 
 Check here all supported <a href='https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md'>SITES</a>
 Check all yt-dlp api options from this <a href='https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/YoutubeDL.py#L212'>FILE</a> or use this <a href='https://t.me/mltb_official_channel/177'>script</a> to convert cli arguments to api options."""

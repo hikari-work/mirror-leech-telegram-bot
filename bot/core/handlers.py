@@ -31,6 +31,11 @@ from pyrogram.types import BotCommand
 
 from ..helper.telegram.bot_commands import BotCommands
 from ..helper.telegram.filters import CustomFilters
+
+# Not from ``..modules`` like the rest: the option keyboard is a helper that
+# ``/leech`` and ``/ytdl`` already import, and routing it through the module
+# package as well would make it reachable from two directions for no gain.
+from ..helper.telegram.task_options import task_options_callback
 from ..modules import (
     add_sudo,
     aioexecute,
@@ -157,6 +162,7 @@ CALLBACK_HANDLERS: tuple[_Callback, ...] = (
     _Callback(torrent_search_update, "^torser"),
     _Callback(edit_user_settings, "^userset"),
     _Callback(copy_choice, "^copyt"),
+    _Callback(task_options_callback, "^lopt"),
 )
 
 

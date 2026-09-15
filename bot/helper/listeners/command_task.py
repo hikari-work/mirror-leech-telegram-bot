@@ -47,6 +47,17 @@ class CommandTask(TaskListener):
         # after super(), which defaults it to False
         self.is_qbit = is_qbit
 
+    def apply_options(self, args):
+        """Re-settle this task from *args* after something changed them.
+
+        The option keyboard mutates the parsed arguments and calls this, so the
+        flags it toggles travel the same one mapping everything else does. The
+        contract is the one ``_apply_args`` already has: the args are the whole
+        answer, and applying them twice has to leave the task where applying
+        them once did.
+        """
+        self._apply_args(args)
+
     def _apply_args(self, args):
         """Transfer the arguments both commands accept onto *self*.
 

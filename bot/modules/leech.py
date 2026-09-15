@@ -42,6 +42,7 @@ from ..helper.download.yt_dlp_download import (
     add_ytdlp_download,
 )
 from ..helper.telegram.message_utils import send_message, get_tg_link_message
+from ..helper.telegram.task_options import ask_options
 
 
 class Leech(CommandTask):
@@ -80,6 +81,12 @@ class Leech(CommandTask):
 
         if len(self.link) > 0:
             LOGGER.info(self.link)
+
+        # Last chance to change the options, and the last moment it is free to
+        # take: the link is already known to be usable, and nothing has been
+        # downloaded yet. Everything below reads the args as they come back.
+        if not await ask_options(self, args, "leech"):
+            return
 
         try:
             await self.before_start()

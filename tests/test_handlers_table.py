@@ -88,6 +88,7 @@ EXPECTED_CALLBACKS = [
     ("torrent_search_update", "^torser", None),
     ("edit_user_settings", "^userset", None),
     ("copy_choice", "^copyt", None),
+    ("task_options_callback", "^lopt", None),
 ]
 
 # Runs inside the subprocess. Filter trees are only ever a match filter or
