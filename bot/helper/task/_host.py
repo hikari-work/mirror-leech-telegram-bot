@@ -124,6 +124,11 @@ class TaskConfigHost:
     # and ``-s3`` / ``-tg`` override it; the uploader table in ``task_listener``
     # is keyed by it, so a value nobody serves is rejected in ``before_start``.
     destination: str
+    # The same value before any flag had a say. Kept apart from ``destination``
+    # because ``_apply_args`` is re-runnable -- the option keyboard calls it
+    # again after every toggle -- and dropping a ``-s3`` needs the config's
+    # answer to fall back to.
+    configured_destination: str
 
     # The child process an ffmpeg or 7z step currently has running. ``FFMpeg``
     # and ``SevenZ`` are handed the task and leave it here rather than keeping it

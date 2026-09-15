@@ -52,6 +52,16 @@ def ytdlp(*tokens):
     return listener
 
 
+def reapply(listener, *tokens):
+    """Hand *listener* a second set of args, the way the option keyboard does.
+
+    The keyboard mutates the parsed args after every toggle and then re-runs
+    ``_apply_args``, so this pass is not the first one the listener ever sees.
+    """
+    listener._apply_args(parse_leech_args(list(tokens)))
+    return listener
+
+
 # ── the flag beats the setting ──────────────────────────────────────
 
 
@@ -93,6 +103,58 @@ def test_ytdlp_honours_the_same_flags(monkeypatch):
     monkeypatch.setattr(Config, "UPLOAD_DESTINATION", "tg")
 
     assert ytdlp("http://example.com/v", "-s3").destination == "s3"
+
+
+# ── a second pass can always take the flag back off ──────────────────
+
+
+def test_dropping_the_bucket_flag_returns_to_the_configured_destination(monkeypatch):
+    """``destination`` used to keep whatever the first pass wrote, because the
+    flag branch only ever ran when a flag was present."""
+    monkeypatch.setattr(Config, "UPLOAD_DESTINATION", "tg")
+    listener = leech("http://example.com/a.mkv", "-s3")
+
+    reapply(listener, "http://example.com/a.mkv")
+
+    assert listener.destination == "tg"
+
+
+def test_dropping_the_telegram_flag_returns_to_the_configured_destination(monkeypatch):
+    monkeypatch.setattr(Config, "UPLOAD_DESTINATION", "s3")
+    listener = leech("http://example.com/a.mkv", "-tg")
+
+    reapply(listener, "http://example.com/a.mkv")
+
+    assert listener.destination == "s3"
+
+
+def test_a_second_pass_restores_what_the_bucket_had_turned_off(monkeypatch):
+    """``-su`` is dropped for a bucket task; coming back to telegram has to
+    bring it back, or the toggled-off ``-s3`` would still cost the option."""
+    monkeypatch.setattr(Config, "UPLOAD_DESTINATION", "tg")
+    listener = leech("http://example.com/a.mkv", "-su", "-s3")
+    assert listener.stream_upload is False
+
+    reapply(listener, "http://example.com/a.mkv", "-su")
+
+    assert listener.destination == "tg"
+    assert listener.stream_upload is True
+
+
+def test_a_second_pass_is_idempotent(monkeypatch):
+    """Applying the same args twice leaves the listener as one pass left it."""
+    monkeypatch.setattr(Config, "UPLOAD_DESTINATION", "tg")
+    tokens = ("http://example.com/a.mkv", "-su", "-ss", "-doc")
+    once = leech(*tokens)
+
+    twice = reapply(leech(*tokens), *tokens)
+
+    assert (twice.destination, twice.stream_upload, twice.screen_shots) == (
+        once.destination,
+        once.stream_upload,
+        once.screen_shots,
+    )
+    assert twice.as_doc == once.as_doc is True
 
 
 # ── the flags are booleans, not a value slot ────────────────────────

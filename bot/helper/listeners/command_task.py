@@ -62,9 +62,16 @@ class CommandTask(TaskListener):
         # The flags override the destination the config chose, and -s3 wins if
         # both are given. Which of the two the user typed last is not something
         # the parser records, so a rule that can be stated beats one that
-        # depends on the order of tokens.
-        if args.is_s3 or args.is_tg:
-            self.destination = "s3" if args.is_s3 else "tg"
+        # depends on the order of tokens. Writing all three cases -- rather than
+        # only the flagged ones -- is what lets this run more than once: the
+        # option keyboard re-applies the args after every toggle, and a task
+        # that was put on s3 by hand has to be able to come back off it.
+        if args.is_s3:
+            self.destination = "s3"
+        elif args.is_tg:
+            self.destination = "tg"
+        else:
+            self.destination = self.configured_destination
         if self.destination == "s3":
             # Both of these exist to feed the telegram uploader, and both do
             # their work *during* the download: -su picks TelegramUploader
