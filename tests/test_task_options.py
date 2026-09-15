@@ -602,6 +602,24 @@ async def close_unpressed(task):
         await task
 
 
+def reading_prompt(wire):
+    """The prompt still on screen, for the read it may have started."""
+    return opts.pending[(DEST, wire.prompt.id)]
+
+
+async def press_and_read(wire, action, flag=""):
+    """Press a button that asks for a value, and wait for the read behind it.
+
+    The press returns before the answer does -- that is the point of the read
+    being a task -- so a test that wants to see the value land waits here.
+    """
+    query = await press(wire, action, flag)
+    reading = reading_prompt(wire).reading
+    if reading is not None:
+        await reading
+    return query
+
+
 async def test_starting_lets_the_task_run(wire):
     listener = FakeListener()
     task = await opening(listener, leech_args(), wire)
@@ -755,7 +773,7 @@ async def test_pressing_a_password_flag_asks_for_one(wire, flag):
     task = await opening(listener, args, wire)
     wire.reply = "hunter2"
 
-    await press(wire, "t:", flag)
+    await press_and_read(wire, "t:", flag)
 
     assert getattr(args, opts.OPTIONS[flag].field) == "hunter2"
     asked = wire.edits[0][0]  # the prompt, before the reply was taken
@@ -774,7 +792,7 @@ async def test_a_flag_whose_password_never_arrives_stays_on(wire, flag):
     task = await opening(listener, args, wire)
     wire.reply = None
 
-    await press(wire, "t:", flag)
+    await press_and_read(wire, "t:", flag)
 
     assert getattr(args, opts.OPTIONS[flag].field) is True
     await press(wire, "x")
@@ -801,7 +819,7 @@ async def test_a_value_prompt_stores_what_was_typed(wire):
     task = await opening(listener, args, wire)
     wire.reply = "  renamed  "
 
-    await press(wire, "v:", "-n")
+    await press_and_read(wire, "v:", "-n")
 
     assert args.name == "renamed"
     assert listener.applied[-1]["name"] == "renamed"
@@ -815,7 +833,7 @@ async def test_a_value_that_never_arrives_changes_nothing(wire):
     task = await opening(listener, args, wire)
     wire.reply = None
 
-    await press(wire, "v:", "-n")
+    await press_and_read(wire, "v:", "-n")
 
     assert args.name == "kept"
     assert "nothing changed" in wire.edits[-1][0]
@@ -829,10 +847,78 @@ async def test_a_refused_value_says_so_and_keeps_the_old_one(wire):
     task = await opening(listener, args, wire)
     wire.reply = "abc"
 
-    await press(wire, "v:", "-sp")
+    await press_and_read(wire, "v:", "-sp")
 
     assert args.split_size == "2gb"
     assert "not a size" in wire.edits[-1][0]
+    await press(wire, "x")
+    assert await task is False
+
+
+@pytest.mark.parametrize(
+    "action, flag", [("t:", "-e"), ("v:", "-n")], ids=["password", "value"]
+)
+async def test_the_ask_says_to_reply_to_it(wire, action, flag):
+    """In a group telegram hands the bot no plain message, only a reply to it."""
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+    wire.reply = "hunter2"
+
+    await press_and_read(wire, action, flag)
+
+    assert "Reply to this message" in wire.edits[0][0]
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_the_keyboard_stays_while_a_value_is_asked_for(wire):
+    """The ask points at those buttons; taking them away is a dead end."""
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+    wire.reply = None
+
+    await press_and_read(wire, "v:", "-n")
+
+    assert wire.edits[0][1] is not None
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_asking_for_a_value_lets_the_press_return(wire):
+    """A handler that awaited the answer would sit on a dispatcher worker for
+    the whole timeout -- with nobody able to answer it in the meantime."""
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+    wire.hold_reply = True
+    wire.reply = "renamed"
+
+    await wait_for(press(wire, "v:", "-n"), 1)
+
+    reading = reading_prompt(wire).reading
+    assert reading is not None and not reading.done()
+    wire.reply_ready.set()
+    await reading
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_a_second_press_while_asking_only_re_asks(wire):
+    """One message answers one question; the read already running takes it."""
+    listener = FakeListener()
+    args = leech_args()
+    task = await opening(listener, args, wire)
+    wire.hold_reply = True
+    wire.reply = "hunter2"
+
+    await wait_for(press(wire, "t:", "-e"), 1)
+    first = reading_prompt(wire).reading
+    await wait_for(press(wire, "t:", "-z"), 1)
+
+    assert reading_prompt(wire).reading is first
+    wire.reply_ready.set()
+    await first
+    assert args.extract == "hunter2"
+    assert args.compress is True  # on, without a password of its own
     await press(wire, "x")
     assert await task is False
 
@@ -910,13 +996,14 @@ async def test_a_value_that_arrives_after_start_does_not_reopen_the_keyboard(wir
     task = await opening(listener, args, wire)
     wire.hold_reply = True
     wire.reply = "late"
-    typing = create_task(press(wire, "v:", "-n"))
-    await wait_for(wire.reply_started.wait(), 1)
+
+    await wait_for(press(wire, "v:", "-n"), 1)
+    reading = reading_prompt(wire).reading
 
     await press(wire, "go")
     assert await task is True
     wire.reply_ready.set()
-    await typing
+    await reading
 
     assert args.name == ""  # the value never reached the args
     assert "-n late" not in wire.edits[-1][0]

@@ -21,7 +21,7 @@ there, so the flag-to-attribute mapping stays in one place
 
 from __future__ import annotations
 
-from asyncio import Future, get_running_loop, wait_for
+from asyncio import Future, Task, get_running_loop, sleep, wait_for
 from dataclasses import dataclass
 from html import escape
 from time import time
@@ -348,6 +348,8 @@ class Prompt:
     future: Future[bool]
     at: float
     view: str = MAIN_VIEW
+    reading: Task[None] | None = None
+    """The message read in flight for a value flag, if any -- see ``_ask_value``."""
 
 
 pending: dict[tuple[int | None, int], Prompt] = {}
@@ -530,40 +532,80 @@ async def _close(query: CallbackQuery, prompt: Prompt, run: bool) -> None:
 async def _ask_value(
     client: Client, query: CallbackQuery, prompt: Prompt, flag: str
 ) -> None:
-    """Take the text behind ``-n`` / ``-sp``, or the password behind ``-e`` / ``-z``.
+    """Ask for the text behind ``-n`` / ``-sp``, or the password behind ``-e`` / ``-z``.
 
     The two kinds ask for different things and answer nothing arriving in
     different ways: a name that never arrives leaves the flag as it was, while a
     password that never arrives leaves an extract switched on without one --
     which is a task that may well run, and a nested archive that may not need it.
+
+    Two things about this are load-bearing, and both are about where the answer
+    comes from. The prompt says *reply to this message*: in a group, telegram
+    hands a bot only the messages that answer it -- a command, a reply to
+    something it said, or an @mention -- unless the bot's privacy mode has been
+    turned off, so a plain ``secret`` typed into the chat never reaches anyone
+    here. And the read itself is started as a task rather than awaited: this runs
+    inside a callback handler, and a handler that waited here would be holding
+    one of the few dispatcher workers for the whole timeout, on a keyboard any
+    number of people can have open at once.
     """
     spec = OPTIONS[flag]
     password = spec.kind == EXTRA
     await query.answer()
     ask = (
-        f"Send the password for <code>{escape(spec.label)}</code>, or press a"
-        " button on the keyboard to run it without one."
+        f"Reply to this message with the password for"
+        f" <code>{escape(spec.label)}</code>, or press a button below to run it"
+        " without one."
         if password
-        else f"Send the <code>{escape(spec.label)}</code> for this task, or"
-        " press a button on the keyboard when you are done."
+        else f"Reply to this message with the <code>{escape(spec.label)}</code>,"
+        " or press a button below when you are done."
     )
-    await edit_message(query.message, f"{ask} Waiting {VALUE_TIMEOUT}s.")
-    value = await wait_for_reply(
-        client, query.message, prompt.user_id, VALUE_TIMEOUT
+    # The keyboard stays under the ask: the buttons are what the sentence points
+    # at, and closing one while asking for the other leaves a dead end.
+    _, buttons = render(
+        prompt.state,
+        prompt.presets,
+        prompt.link,
+        prompt.command,
+        prompt.user_id,
+        prompt.view,
     )
+    await edit_message(query.message, f"{ask} Waiting {VALUE_TIMEOUT}s.", buttons)
+    if prompt.reading is not None and not prompt.reading.done():
+        # One message answers one question: a second press only refreshes the
+        # ask, and the read already running takes what the user sends.
+        return
+    prompt.reading = get_running_loop().create_task(
+        _catch_value(client, query.message, prompt, flag)
+    )
+    # One turn of the loop, so the read has registered its message handler before
+    # this callback returns and the answer can arrive.
+    await sleep(0)
+
+
+async def _catch_value(
+    client: Client, message: Message, prompt: Prompt, flag: str
+) -> None:
+    """Take the next message from the user and put it behind *flag*."""
+    spec = OPTIONS[flag]
+    password = spec.kind == EXTRA
+    value = await wait_for_reply(client, message, prompt.user_id, VALUE_TIMEOUT)
     if value is None:
+        LOGGER.info(f"Option {flag} was left without a value")
         note = (
             f"No password arrived, so {spec.label} runs without one."
             if password
             else "No value arrived, so nothing changed."
         )
-        await _redraw(query.message, prompt, note)
+        await _redraw(message, prompt, note)
         return
+    # What arrived is what the user typed, so it never reaches the log.
+    LOGGER.info(f"Option {flag} took a value from the chat")
     error = set_value(prompt.state, flag, value)
     note = error or (
         f"{spec.label} password set." if password else f"{spec.label} set."
     )
-    await _redraw(query.message, prompt, note)
+    await _redraw(message, prompt, note)
 
 
 async def _redraw(message: Message, prompt: Prompt, note: str = "") -> None:

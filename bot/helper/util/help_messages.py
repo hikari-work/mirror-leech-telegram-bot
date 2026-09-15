@@ -10,7 +10,7 @@ leech = """<b>Send link along with command line or </b>
 
 /cmd -n new name -e
 
-<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it; -e and -z ask for their password when you switch them on, and show a lock instead of it afterwards -- switching one off and on again loses that password. Copy preset (-c) has a page of its own, reached from the Copy Destination button.
+<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it, and -e and -z ask for their password when you switch them on: answer both by replying to the keyboard message, which is the only shape of answer a bot is sure to receive in a group. Copy preset (-c) has a page of its own, reached from the Copy Destination button.
 
 <b>NOTE:</b>
 1. Commands that start with <b>qb</b> are ONLY for torrents."""
@@ -21,7 +21,7 @@ yt = """<b>Send link along with command line</b>:
 <b>By replying to link</b>:
 /cmd -n new name -z password -opt x:y|x1:y1
 
-<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it, -z asks for its password when you switch it on, and Copy preset (-c) has a page of its own, reached from the Copy Destination button.
+<b>Options before the task starts</b>: the command is answered with a keyboard of these options, with the ones already in your command switched on. Toggle them, press Start, and the task runs with what the keyboard says. An option that needs a value (-n, -sp) asks you to type it, and -z asks for its password when you switch it on: answer both by replying to the keyboard message, which is the only shape of answer a bot is sure to receive in a group. Copy preset (-c) has a page of its own, reached from the Copy Destination button.
 
 Check here all supported <a href='https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md'>SITES</a>
 Check all yt-dlp api options from this <a href='https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/YoutubeDL.py#L212'>FILE</a> or use this <a href='https://t.me/mltb_official_channel/177'>script</a> to convert cli arguments to api options."""
