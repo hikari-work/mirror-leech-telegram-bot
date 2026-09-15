@@ -197,6 +197,25 @@ def test_a_split_size_the_resolver_would_ignore_is_refused(junk):
     assert state["-sp"] == "2gb"
 
 
+@pytest.mark.parametrize("flag", ["-e", "-z"], ids=["extract", "zip"])
+def test_the_flags_that_carry_a_password_ask_for_one(flag):
+    """``-e password`` and ``-z password`` are what the pipeline reads."""
+    assert opts.OPTIONS[flag].kind == opts.EXTRA
+
+
+def test_a_screenshot_count_is_not_asked_for():
+    """``-ss`` takes a number, but the default is a usable answer."""
+    assert opts.OPTIONS["-ss"].kind == opts.BOOL
+
+
+@pytest.mark.parametrize("flag", ["-e", "-z"], ids=["extract", "zip"])
+def test_a_password_is_taken_as_typed(flag):
+    state = state_of()
+
+    assert opts.set_value(state, flag, " hunter2 ") == ""
+    assert state[flag] == "hunter2"
+
+
 # ── writing back ────────────────────────────────────────────────────
 
 
@@ -289,9 +308,9 @@ def data_for(markup, action):
     raise AssertionError(f"no button for action {action!r}")
 
 
-def rendered(*tokens, command="leech", presets=PRESETS):
+def rendered(*tokens, command="leech", presets=PRESETS, view=opts.MAIN_VIEW):
     state = state_of(*tokens, command=command)
-    text, markup = opts.render(state, presets, LINK, command, UID)
+    text, markup = opts.render(state, presets, LINK, command, UID, view)
     return state, text, markup
 
 
@@ -319,7 +338,7 @@ def test_a_typed_value_is_shown_on_its_button():
 
 
 def test_every_preset_gets_a_button_and_only_one_is_marked():
-    _, _, markup = rendered(LINK, "-c", "movies")
+    _, _, markup = rendered(LINK, "-c", "movies", view=opts.PRESET_VIEW)
 
     assert labelled(markup, "movies").text.startswith("✅")
     assert labelled(markup, "music").text.startswith("⬜")
@@ -327,7 +346,7 @@ def test_every_preset_gets_a_button_and_only_one_is_marked():
 
 def test_a_preset_named_in_the_command_but_not_saved_still_gets_a_button():
     """Otherwise a typo'd ``-c`` could not be switched off."""
-    _, _, markup = rendered(LINK, "-c", "typo")
+    _, _, markup = rendered(LINK, "-c", "typo", view=opts.PRESET_VIEW)
 
     assert labelled(markup, "typo") is not None
 
@@ -337,6 +356,61 @@ def test_the_user_without_presets_is_told_where_they_are_made():
 
     assert not state["-c"]
     assert "no copy presets" in text
+
+
+def button_texts(markup):
+    """Every button's text, for the tests that assert something is *not* there."""
+    return [button.text for button in buttons_of(markup)]
+
+
+def test_the_main_page_keeps_the_presets_behind_one_button():
+    """A user with five presets would otherwise push Start off the keyboard."""
+    _, _, markup = rendered()
+
+    assert labelled(markup, "Copy Destination") is not None
+    assert not any("movies" in text for text in button_texts(markup))
+
+
+def test_a_user_without_presets_is_offered_no_preset_page():
+    """A button with nothing behind it is a dead end; the text says how."""
+    _, _, markup = rendered(presets={})
+
+    assert not any("Copy Destination" in text for text in button_texts(markup))
+
+
+def test_the_copy_button_names_what_is_selected():
+    _, _, markup = rendered(LINK, "-c", "movies")
+
+    assert "movies" in labelled(markup, "Copy Destination").text
+
+
+def test_the_preset_page_carries_a_way_back():
+    _, _, markup = rendered(view=opts.PRESET_VIEW)
+
+    assert data_for(markup, "b")
+    assert [button.text for button in markup.inline_keyboard[-1]] == [
+        "↩️ Back",
+        "✖️ Cancel",
+    ]
+
+
+def test_the_preset_page_says_what_is_selected():
+    _, text, _ = rendered(LINK, "-c", "movies", view=opts.PRESET_VIEW)
+
+    assert "<b>Copy Destination:</b> <code>movies</code>" in text
+
+
+def test_the_preset_page_says_when_nothing_is_selected():
+    _, text, _ = rendered(view=opts.PRESET_VIEW)
+
+    assert "<b>Copy Destination:</b> <code>none</code>" in text
+
+
+def test_the_flags_are_not_on_the_preset_page():
+    _, _, markup = rendered("-z", view=opts.PRESET_VIEW)
+
+    assert not any("Zip" in text for text in button_texts(markup))
+    assert labelled(markup, "movies") is not None
 
 
 def test_start_and_cancel_sit_on_the_last_row():
@@ -475,6 +549,9 @@ class Wire:
     async def auto_delete_message(self, message, *args, **kwargs):
         self.deleted.append(message)
 
+    async def delete_message(self, message, *args, **kwargs):
+        self.deleted.append(message)
+
     async def wait_for_reply(self, client, message, user_id, timeout=60):
         if self.hold_reply:
             self.reply_started.set()
@@ -486,7 +563,12 @@ class Wire:
 def wire(monkeypatch):
     """A recorder standing in for every telegram call the keyboard makes."""
     recorder = Wire(FakeMessage())
-    for name in ("send_message", "edit_message", "auto_delete_message"):
+    for name in (
+        "send_message",
+        "edit_message",
+        "auto_delete_message",
+        "delete_message",
+    ):
         monkeypatch.setattr(opts, name, getattr(recorder, name))
     monkeypatch.setattr(opts, "wait_for_reply", recorder.wait_for_reply)
     return recorder
@@ -527,6 +609,18 @@ async def test_starting_lets_the_task_run(wire):
     await press(wire, "go")
 
     assert await task is True
+
+
+async def test_starting_takes_the_keyboard_away(wire):
+    """The task's own status message is the next thing in the chat."""
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+
+    await press(wire, "go")
+
+    assert await task is True
+    assert wire.deleted == [wire.prompt]
+    assert wire.edits == []
 
 
 async def test_cancelling_drops_the_task(wire):
@@ -592,6 +686,111 @@ async def test_pressing_a_preset_reaches_the_task(wire):
     await press(wire, "p:", "music")
 
     assert args.copy_preset == "music"
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_the_copy_button_opens_the_preset_page(wire):
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+
+    await press(wire, "c")
+
+    _, markup = wire.edits[-1]
+    assert labelled(markup, "music") is not None
+    assert labelled(markup, "Back") is not None
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_a_preset_picked_on_its_page_stays_there(wire):
+    """Picking one is not the end of the errand: a second one may follow."""
+    listener = FakeListener()
+    args = leech_args()
+    task = await opening(listener, args, wire)
+
+    await press(wire, "c")
+    await press(wire, "p:", "music")
+
+    assert args.copy_preset == "music"
+    _, markup = wire.edits[-1]
+    assert labelled(markup, "music").text.startswith("✅")
+    assert labelled(markup, "Back") is not None
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_back_returns_to_the_flags(wire):
+    listener = FakeListener()
+    task = await opening(listener, leech_args(), wire)
+
+    await press(wire, "c")
+    await press(wire, "b")
+
+    _, markup = wire.edits[-1]
+    assert labelled(markup, "S3") is not None
+    assert not any("music" in text for text in button_texts(markup))
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_starting_from_the_preset_page_works_too(wire):
+    """Start and Cancel are on both pages, so neither is a trap."""
+    listener = FakeListener()
+    args = leech_args()
+    task = await opening(listener, args, wire)
+
+    await press(wire, "c")
+    await press(wire, "p:", "music")
+    await press(wire, "go")
+
+    assert await task is True
+    assert args.copy_preset == "music"
+
+
+@pytest.mark.parametrize("flag", ["-e", "-z"], ids=["extract", "zip"])
+async def test_pressing_a_password_flag_asks_for_one(wire, flag):
+    listener = FakeListener()
+    args = leech_args()
+    task = await opening(listener, args, wire)
+    wire.reply = "hunter2"
+
+    await press(wire, "t:", flag)
+
+    assert getattr(args, opts.OPTIONS[flag].field) == "hunter2"
+    asked = wire.edits[0][0]  # the prompt, before the reply was taken
+    assert "password" in asked
+    assert "hunter2" not in asked
+    assert "hunter2" not in wire.edits[-1][0]
+    await press(wire, "x")
+    assert await task is False
+
+
+@pytest.mark.parametrize("flag", ["-e", "-z"], ids=["extract", "zip"])
+async def test_a_flag_whose_password_never_arrives_stays_on(wire, flag):
+    """No password is a usable answer; the archive may not have one."""
+    listener = FakeListener()
+    args = leech_args()
+    task = await opening(listener, args, wire)
+    wire.reply = None
+
+    await press(wire, "t:", flag)
+
+    assert getattr(args, opts.OPTIONS[flag].field) is True
+    await press(wire, "x")
+    assert await task is False
+
+
+async def test_the_extract_button_switches_a_password_off(wire):
+    listener = FakeListener()
+    args = leech_args("-e", "hunter2")
+    task = await opening(listener, args, wire)
+
+    await press(wire, "t:", "-e")
+
+    assert args.extract is False
+    # one redraw for the press, and no prompt for a password it is not taking
+    assert len(wire.edits) == 1
     await press(wire, "x")
     assert await task is False
 
