@@ -1,4 +1,5 @@
 from asyncio import Lock, sleep
+from os import path as ospath
 from time import time
 from typing import TYPE_CHECKING
 
@@ -67,17 +68,43 @@ class TelegramDownloadHelper:
                 TgClient.bot.stop_transmission()
         self._processed_bytes = current
 
-    async def _on_download_error(self, error):
+    async def _forget_gid(self):
+        """Let go of the file's id, now that this task is done downloading it.
+
+        Held from the moment the download starts so a second task cannot fetch
+        the same file at the same time. Releasing it before the upload is what
+        the queued path does too -- by then the bytes are on disk.
+        """
         async with global_lock:
             if self._id in GLOBAL_GID:
                 GLOBAL_GID.remove(self._id)
+
+    async def _on_download_error(self, error):
+        await self._forget_gid()
         await self._listener.on_download_error(error)
 
     async def _on_download_complete(self):
-        async with global_lock:
-            if self._id in GLOBAL_GID:
-                GLOBAL_GID.remove(self._id)
+        await self._forget_gid()
         await self._listener.on_download_complete()
+
+    async def _stream_download(self, file_path):
+        """Send the file now instead of queueing it for upload behind others.
+
+        A replied file is one file, so this buys latency rather than disk space:
+        the task ends with the send instead of waiting for an upload slot. The
+        uploader is built here rather than before the download because
+        ``_download`` calls itself again after a flood wait, and an uploader
+        built up front would announce the task a second time -- and leave the
+        first one holding a file nobody would ever send.
+        """
+        from ..upload.stream_uploader import StreamUploader
+
+        await self._forget_gid()
+        stream = StreamUploader(self._listener, ospath.dirname(file_path))
+        if not await stream.start():
+            return
+        await stream.submit(file_path)
+        await stream.finalize()
 
     async def _download(self, message, path):
         try:
@@ -96,6 +123,9 @@ class TelegramDownloadHelper:
             await self._on_download_error(str(e))
             return
         if download is not None:
+            if self._listener.stream_upload:
+                await self._stream_download(download)
+                return
             await self._on_download_complete()
         elif not self._listener.is_cancelled:
             await self._on_download_error("Internal error occurred")
