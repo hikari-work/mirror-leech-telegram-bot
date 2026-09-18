@@ -99,7 +99,13 @@ def uploader_module(monkeypatch):
         "bot.core": _pkg("bot.core"),
         "bot.core.config_manager": _stub(
             "bot.core.config_manager",
-            Config=SimpleNamespace(DATABASE_URL=""),
+            # the four settings ``_user_settings`` reads, so a test can drive it
+            Config=SimpleNamespace(
+                DATABASE_URL="",
+                MEDIA_GROUP=False,
+                LEECH_FILENAME_PREFIX="",
+                FILES_LINKS=False,
+            ),
         ),
         "bot.core.telegram_manager": _stub(
             "bot.core.telegram_manager",
@@ -412,3 +418,100 @@ def test_reply_args_target_the_anchor_chat_and_topic(uploader_module):
     assert args["message_thread_id"] == 77
     assert args["reply_parameters"].message_id == uploader._sent_msg.id
 
+
+# --- the delete that follows a successful send -----------------------------
+
+
+async def _drive_one_file(uploader_module, monkeypatch, *, cancelled=False):
+    """Run ``_upload_one`` over one file that is sent without any network."""
+    uploader = _make_uploader(uploader_module)
+    uploader._up_path = "/tmp/task/a.mkv"
+    uploader._listener.is_cancelled = cancelled
+    monkeypatch.setattr(
+        sys.modules["aiofiles.os"].path, "exists", AsyncMock(return_value=True)
+    )
+    sent = []
+
+    async def prepare(file_, dirpath):
+        return f"<code>{file_}</code>"
+
+    async def upload_file(cap_mono, file_, f_path):
+        sent.append(file_)
+
+    async def pace():
+        pass
+
+    monkeypatch.setattr(uploader, "_prepare_file", prepare)
+    monkeypatch.setattr(uploader, "_upload_file", upload_file)
+    monkeypatch.setattr(uploader, "_pacer", SimpleNamespace(pace=pace))
+    await uploader._upload_one("a.mkv", "/tmp/task", "/tmp/task/a.mkv")
+    return uploader, sent
+
+
+async def test_a_file_that_cannot_be_deleted_is_still_uploaded(
+    uploader_module, monkeypatch
+):
+    """Deleting is cleanup: a failed unlink must not turn a sent file corrupt."""
+    removed = []
+
+    async def unlinkable(path):
+        removed.append(path)
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(uploader_module, "remove", unlinkable)
+
+    uploader, sent = await _drive_one_file(uploader_module, monkeypatch)
+
+    assert sent == ["a.mkv"]
+    assert removed == ["/tmp/task/a.mkv"]
+    assert uploader._total_files == 1
+    assert uploader._corrupted == 0
+    assert uploader._error == ""
+
+
+async def test_a_sent_file_is_deleted(uploader_module, monkeypatch):
+    removed = []
+
+    async def unlink(path):
+        removed.append(path)
+
+    monkeypatch.setattr(uploader_module, "remove", unlink)
+
+    uploader, _ = await _drive_one_file(uploader_module, monkeypatch)
+
+    assert removed == ["/tmp/task/a.mkv"]
+    assert uploader._corrupted == 0
+
+
+async def test_a_cancelled_task_keeps_what_it_did_not_send(
+    uploader_module, monkeypatch
+):
+    """The cancel lands while the file is being paced, after it has been sent."""
+    removed = []
+
+    async def unlink(path):
+        removed.append(path)
+
+    async def cancel_now():
+        uploader._listener.is_cancelled = True
+
+    uploader = _make_uploader(uploader_module)
+    uploader._up_path = "/tmp/task/a.mkv"
+    monkeypatch.setattr(uploader_module, "remove", unlink)
+    monkeypatch.setattr(
+        sys.modules["aiofiles.os"].path, "exists", AsyncMock(return_value=True)
+    )
+
+    async def prepare(file_, dirpath):
+        return "<code>a.mkv</code>"
+
+    async def upload_file(cap_mono, file_, f_path):
+        pass
+
+    monkeypatch.setattr(uploader, "_prepare_file", prepare)
+    monkeypatch.setattr(uploader, "_upload_file", upload_file)
+    monkeypatch.setattr(uploader, "_pacer", SimpleNamespace(pace=cancel_now))
+
+    await uploader._upload_one("a.mkv", "/tmp/task", "/tmp/task/a.mkv")
+
+    assert removed == []

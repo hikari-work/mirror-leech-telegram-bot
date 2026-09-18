@@ -512,8 +512,25 @@ class TelegramUploader:
             self._corrupted += 1
             if self._listener.is_cancelled:
                 return
-        if not self._listener.is_cancelled and await aiopath.exists(self._up_path):
-            await remove(self._up_path)
+        await self._delete_uploaded()
+
+    async def _delete_uploaded(self):
+        """Remove the file that has just been sent, if it is still there.
+
+        Deleting is cleanup, not part of the upload: a file that cannot be
+        removed has been sent all the same, and a task that reports it as
+        corrupt because of a missing permission bit is lying to the user. The
+        file stays on disk instead, where ``clean_download`` sweeps it with the
+        rest of the task's directory. An error escaping from here used to cost
+        the caller every remaining file of the batch.
+        """
+        if self._listener.is_cancelled:
+            return
+        try:
+            if await aiopath.exists(self._up_path):
+                await remove(self._up_path)
+        except Exception as e:
+            LOGGER.error(f"Could not delete {self._up_path}. Error: {e}")
 
     async def _finish(self, stream=False):
         """Flush what is still buffered and report the outcome of the task."""

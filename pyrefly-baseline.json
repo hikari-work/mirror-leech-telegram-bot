@@ -1,9 +1,9 @@
 {
   "errors": [
     {
-      "line": 530,
+      "line": 645,
       "column": 19,
-      "stop_line": 530,
+      "stop_line": 645,
       "stop_column": 32,
       "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
@@ -13,9 +13,9 @@
       "severity": "error"
     },
     {
-      "line": 565,
+      "line": 680,
       "column": 19,
-      "stop_line": 565,
+      "stop_line": 680,
       "stop_column": 32,
       "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
@@ -25,9 +25,9 @@
       "severity": "error"
     },
     {
-      "line": 584,
+      "line": 699,
       "column": 23,
-      "stop_line": 584,
+      "stop_line": 699,
       "stop_column": 29,
       "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
@@ -37,9 +37,9 @@
       "severity": "error"
     },
     {
-      "line": 585,
+      "line": 700,
       "column": 19,
-      "stop_line": 585,
+      "stop_line": 700,
       "stop_column": 24,
       "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
@@ -49,9 +49,9 @@
       "severity": "error"
     },
     {
-      "line": 586,
+      "line": 701,
       "column": 19,
-      "stop_line": 586,
+      "stop_line": 701,
       "stop_column": 32,
       "path": "bot/helper/upload/telegram_uploader.py",
       "code": -2,
