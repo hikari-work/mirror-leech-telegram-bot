@@ -48,6 +48,11 @@ class TaskConfig(
         # uploader as messages go out and written to the database when the
         # task completes. Empty for a task with no database configured.
         self.copy_units = []
+        # What a streamed (``-su``) task had to drop because each file leaves
+        # the disk as soon as it is sent, one line per group of flags. Written
+        # by ``StreamUploader`` and read back into the task's own message, so a
+        # user who asked for a zip learns why they did not get one.
+        self.stream_notices = []
         self.dir = f"{DOWNLOAD_DIR}{self.mid}"
         self.up_dir = ""
         self.link = ""

@@ -64,6 +64,8 @@ class FakeTask:
         self.tag = "@me"
         self.is_super_chat = False
         self.copy_units = []
+        # what streaming had to drop; a task that does not stream has none
+        self.stream_notices = []
         self.seed = False
         self.dir = "/downloads/10032"
         self.message = SimpleNamespace(chat=SimpleNamespace(id=-100123))

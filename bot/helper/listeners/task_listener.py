@@ -443,6 +443,20 @@ class TaskListener(TaskConfig):
         del uploader
 
     async def on_upload_complete(self, link, files, folders, mime_type):
+        # A streamed task never reaches ``_start_upload``, so nothing else gives
+        # its download slot back. Every other task has already lost the slot by
+        # the time it gets here -- ``_release_download_slot`` on the way in, or
+        # ``check_running_tasks`` when ``QUEUE_ALL`` is what holds it -- which
+        # makes this a no-op for them. Either way the invariant is the same:
+        # once this method has run, the mid holds no download slot.
+        released = False
+        async with queue_dict_lock:
+            if self.mid in non_queued_dl:
+                non_queued_dl.discard(self.mid)
+                released = True
+        if released:
+            await start_from_queued()
+
         if (
             self.is_super_chat
             and Config.INCOMPLETE_TASK_NOTIFIER
@@ -481,6 +495,9 @@ class TaskListener(TaskConfig):
                     # each child of a bulk has a mid of its own, and the
                     # summary is the only place they are all listed
                     "mid": self.mid,
+                    # the summary is also where a child says what streaming
+                    # cost it, since it has no message of its own
+                    "notices": self.stream_notices,
                 }
             )
         else:
@@ -489,6 +506,8 @@ class TaskListener(TaskConfig):
             if mime_type != 0:
                 msg += f"\n<b>Corrupted Files: </b>{mime_type}"
             msg += f"\n<b>Task ID: </b><code>{self.mid}</code>"
+            for notice in self.stream_notices:
+                msg += f"\n{notice}"
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
             if not files:
                 await send_message(self.message, msg)

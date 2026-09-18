@@ -149,6 +149,7 @@ class BatchTrackerMixin(TaskConfigHost):
         total_corrupted = 0
         total_size = 0
         all_files = {}
+        notices = []
 
         for res in batch["results"]:
             total_files += res["folders"]
@@ -156,6 +157,11 @@ class BatchTrackerMixin(TaskConfigHost):
             total_size += res["size"]
             if res["files"]:
                 all_files.update(res["files"])
+            # children of one bulk share a command string, so the same note
+            # arrives once per child and has to be folded back into one line
+            for notice in res.get("notices", ()):
+                if notice not in notices:
+                    notices.append(notice)
 
         head += f"<b>Total Files:</b> {total_files}"
         head += f"\n<b>Total Size:</b> {get_readable_file_size(total_size)}"
@@ -168,6 +174,8 @@ class BatchTrackerMixin(TaskConfigHost):
         if mids:
             head += f"\n<b>Task IDs:</b> {', '.join(mids)}"
         head += self._error_digest(batch["errors"])
+        for notice in notices:
+            head += f"\n{notice}"
         head += f"\n<b>cc:</b> {self.tag}\n\n"
 
         await self._send_chunked(batch["anchor"], head, all_files)

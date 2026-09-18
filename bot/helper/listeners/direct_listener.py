@@ -1,4 +1,4 @@
-from asyncio import create_task, sleep, TimeoutError
+from asyncio import sleep, TimeoutError
 from aiohttp.client_exceptions import ClientError
 from os import path as ospath
 
@@ -105,61 +105,56 @@ class DirectListener:
         await self.listener.on_download_complete()
 
     async def _download_stream(self, contents):
-        """Stream mode: download and upload run in parallel.
+        """Stream mode: each file is uploaded while the next one downloads.
 
-        While file N uploads, file N+1 resolves and downloads concurrently.
-        Disk usage = max 2 files at a time.  Bunkr URLs are resolved lazily
-        (one at a time) to avoid stale signed CDN links.
+        Disk usage stays at the file being sent plus the one being fetched.
+        Bunkr URLs are resolved lazily (one at a time) to avoid stale signed
+        CDN links. The uploader itself lives in ``StreamUploader``, which also
+        clears the flags streaming cannot honour and reports them in the task's
+        message -- and which is why this task never calls
+        ``on_download_complete``: that is the switch back into the queued,
+        upload-at-the-end pipeline.
         """
-        from ..upload.telegram_uploader import TelegramUploader
+        from ..upload.stream_uploader import StreamUploader
 
-        tg = TelegramUploader(self.listener, self._path)
-        if not await tg.init_stream():
+        stream = StreamUploader(self.listener, self._path)
+        if not await stream.start():
             return
 
         total = len(contents)
-        upload_task = None
+        try:
+            for content in contents:
+                if self.listener.is_cancelled:
+                    break
 
-        for idx, content in enumerate(contents):
-            if self.listener.is_cancelled:
-                break
+                if self._bunkr_lazy:
+                    content = await self._resolve_one_bunkr(content)
+                    if content is None:
+                        continue
 
-            if self._bunkr_lazy:
-                content = await self._resolve_one_bunkr(content)
-                if content is None:
+                file_path = await self._download_one(content)
+                if file_path is None:
                     continue
+                await stream.submit(file_path)
+        finally:
+            self.download_task = None
+            # in a finally so a cancellation, or the SystemExit a progress hook
+            # can raise, still hands the uploader back what it was sent
+            await stream.drain()
 
-            file_path = await self._download_one(content)
-            if file_path is None:
-                continue
-            if self.listener.is_cancelled:
-                break
-
-            if upload_task is not None:
-                await upload_task
-
-            if self.listener.is_cancelled:
-                break
-
-            LOGGER.info(f"Stream upload [{idx + 1}/{total}]: {ospath.basename(file_path)}")
-            upload_task = create_task(tg.upload_single(file_path))
-
-        if upload_task is not None:
-            await upload_task
-
-        self.download_task = None
         if self.listener.is_cancelled:
             return
         if self._failed == total:
             await self.listener.on_download_error("All files are failed to download!")
             return
-        await tg.finalize_stream()
+        await stream.finalize()
 
     async def _resolve_one_bunkr(self, content):
         """Lazily resolve a single bunkr file URL just before download."""
         from ..download.direct_link_generators.hosts.bunkr import (
             bunkr_resolve_download,
         )
+
         dl_url, filename, file_size = await bunkr_resolve_download(content["url"])
         if dl_url:
             content["url"] = dl_url
