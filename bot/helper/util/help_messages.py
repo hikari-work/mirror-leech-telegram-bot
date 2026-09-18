@@ -268,10 +268,17 @@ YT_HELP_DICT = {
 
 stream_upload = """<b>Stream Upload</b>: -su
 
-Upload each file immediately after it finishes downloading, then delete it from disk before downloading the next file.
-Useful for large albums (e.g. Bunkr) that exceed disk space.
-Disk usage = size of largest single file instead of total album size.
-Note: Post-processing (extract, compress, ffmpeg) is skipped in this mode.
+Upload each file the moment it finishes downloading, then delete it from disk
+before the next one starts. The task never waits for an upload slot, so
+QUEUE_UPLOAD does not apply to it.
+Useful for large albums (e.g. Bunkr) that exceed disk space: what is on disk is
+the largest single file rather than the whole album.
+The task message names everything this mode had to skip, so nothing you asked
+for is dropped silently.
+Skipped: -e -z -j -sv -ss -ca -cv -ns -ff (a file is sent before any of them
+could run), -sp (files are sent as they land), -m (files are sent one by one, so
+there is nothing to merge), -d (the files do not stay on disk).
+Torrents are unaffected: a magnet downloads and seeds as usual.
 
 /cmd link -su"""
 
