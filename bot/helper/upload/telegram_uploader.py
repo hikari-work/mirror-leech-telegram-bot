@@ -829,19 +829,37 @@ class TelegramUploader:
         await self._listener.on_upload_error("your upload has been stopped!")
 
     async def init_stream(self):
-        """Initialize uploader for stream mode (one file at a time)."""
+        """Initialize uploader for stream mode (one file at a time).
+
+        The album batcher is switched off, and after ``_user_settings`` because
+        that is the one thing that can switch it on. A streamed file is sent the
+        moment it finishes downloading, so holding it back would delete the
+        message the user is already reading when the album finally goes out at
+        the end of the task -- and the file it was sent from is long gone by
+        then. Grouping has to be off before the first file, not after.
+        """
         await self._user_settings()
+        self._batcher.enabled = False
         return await self._msg_to_reply()
 
     async def upload_single(self, file_path):
         """Upload a single file. Call init_stream() once before first use."""
         if self._listener.is_cancelled:
             return
-        file_ = ospath.basename(file_path)
         dirpath = ospath.dirname(file_path)
+        # Neither directory holds media: one is yt-dlp's thumbnails and the
+        # other the screenshots of a sample, and ``upload`` walks past both the
+        # same way. A stream hands over whatever path its downloader produced,
+        # so unlike ``upload`` it cannot rely on the walk to filter them.
+        stripped = dirpath.strip()
+        if stripped.endswith("/yt-dlp-thumb") or stripped.endswith("_mltbss"):
+            return
+        file_ = ospath.basename(file_path)
         self._error = ""
         self._up_path = f_path = file_path
         if not await aiopath.exists(self._up_path):
+            if intervals["stopAll"]:
+                return
             LOGGER.error(f"{self._up_path} not exists! Skipping.")
             return
         await self._upload_one(file_, dirpath, f_path)

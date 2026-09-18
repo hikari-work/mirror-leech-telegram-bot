@@ -515,3 +515,107 @@ async def test_a_cancelled_task_keeps_what_it_did_not_send(
     await uploader._upload_one("a.mkv", "/tmp/task", "/tmp/task/a.mkv")
 
     assert removed == []
+
+
+# --- what streaming switches off -------------------------------------------
+
+
+class _Recorder:
+    """The module logger, kept so a test can assert what was *not* written."""
+
+    def __init__(self):
+        self.errors = []
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def info(self, message):
+        pass
+
+    def warning(self, message):
+        pass
+
+
+async def _send_one(uploader_module, monkeypatch, path, *, exists=True, logger=None):
+    """Call ``upload_single`` on a file, recording what it decides to send."""
+    uploader = _make_uploader(uploader_module)
+    sent = []
+
+    async def upload_one(file_, dirpath, f_path):
+        sent.append(f_path)
+
+    monkeypatch.setattr(uploader, "_upload_one", upload_one)
+    monkeypatch.setattr(
+        sys.modules["aiofiles.os"].path, "exists", AsyncMock(return_value=exists)
+    )
+    if logger is not None:
+        monkeypatch.setattr(uploader_module, "LOGGER", logger)
+    await uploader.upload_single(path)
+    return uploader, sent
+
+
+@pytest.mark.parametrize("route", ["the setting", "a copy preset"])
+async def test_init_stream_switches_the_album_batcher_off(
+    uploader_module, monkeypatch, route
+):
+    """A streamed file stays its own message, whatever the settings ask for.
+
+    Both routes are covered because ``_user_settings`` is the thing that turns
+    grouping on, and a copy preset turns it on unconditionally: the switch has
+    to come after that call, not before it. Holding a file back would delete the
+    message the user is already reading when the album finally goes out, at the
+    end of a task whose files are gone by then.
+    """
+    uploader = _make_uploader(uploader_module)
+    if route == "a copy preset":
+        uploader._listener.copy_preset = "preset"
+    else:
+        monkeypatch.setattr(
+            sys.modules["bot.core.config_manager"].Config, "MEDIA_GROUP", True
+        )
+
+    assert await uploader.init_stream() is True
+
+    assert uploader._batcher.enabled is False
+
+
+async def test_a_streamed_upload_skips_what_is_not_media(uploader_module, monkeypatch):
+    """A thumbnail or a screenshot is not a file to send.
+
+    ``upload`` gets that for free by walking the task directory; a stream is
+    handed paths by its downloader, so it has to recognise them by name.
+    """
+    _, sent = await _send_one(uploader_module, monkeypatch, "/tmp/task/a.mkv")
+
+    assert sent == ["/tmp/task/a.mkv"]  # a plain file still goes out
+
+    for dirname in ("yt-dlp-thumb", "movie_mltbss"):
+        _, sent = await _send_one(
+            uploader_module, monkeypatch, f"/tmp/task/{dirname}/a.jpg"
+        )
+        assert sent == []
+
+
+async def test_a_file_that_vanished_during_a_shutdown_is_not_an_error(
+    uploader_module, monkeypatch
+):
+    """``intervals["stopAll"]`` means the bot is going down mid-task.
+
+    The file not being there is the shutdown, not a fault, and logging it would
+    put one line per remaining file in ``log.txt``.
+    """
+    logger = _Recorder()
+    stop_all = sys.modules["bot"].intervals
+
+    monkeypatch.setitem(stop_all, "stopAll", True)
+    await _send_one(
+        uploader_module, monkeypatch, "/tmp/task/a.mkv", exists=False, logger=logger
+    )
+    assert logger.errors == []
+
+    monkeypatch.setitem(stop_all, "stopAll", False)
+    await _send_one(
+        uploader_module, monkeypatch, "/tmp/task/a.mkv", exists=False, logger=logger
+    )
+    assert len(logger.errors) == 1
+    assert "not exists" in logger.errors[0]
