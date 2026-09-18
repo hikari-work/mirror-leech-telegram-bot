@@ -1,8 +1,11 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from logging import getLogger
 from os import path as ospath, listdir
 from re import search as re_search
 from secrets import token_urlsafe
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
 
@@ -14,6 +17,10 @@ from ..util.task_manager import check_running_tasks
 from ..progress.queue_status import QueueStatus
 from ..telegram.message_utils import send_status_message
 from ..progress.yt_dlp_status import YtDlpStatus
+from .yt_dlp_hooks import final_paths_hook
+
+if TYPE_CHECKING:
+    from ..upload.stream_uploader import StreamUploader
 
 LOGGER = getLogger(__name__)
 
@@ -62,6 +69,9 @@ class YoutubeDLHelper:
         # importable; it is also mutated in place during a download, so a
         # ``Mapping`` here would claim more than holds.
         self._ie_result: Any = None
+        # Streaming (``-su``): the uploader the finished files are handed to as
+        # they land. None unless the flag is on -- see ``add_download``.
+        self._stream: StreamUploader | None = None
         # yt-dlp options are heterogeneous by design -- flags, counts, hooks,
         # nested dicts of callables -- and the setup below adds lists and more
         # callables to it, so the values cannot be narrowed to what this literal
@@ -193,6 +203,23 @@ class YoutubeDLHelper:
                 # the file lands.
                 self._ie_result = result
 
+    def _stream_hook(self, stream: StreamUploader) -> Callable[[dict[str, Any]], None]:
+        """Hand each finished file over, from the thread yt-dlp downloads on.
+
+        The hook is called on that thread, so handing a path over means putting
+        the upload on the event loop and waiting for it. ``submit`` answers only
+        once the consumer has taken the path, and that wait is the backpressure:
+        a playlist does not pull its next video down while the previous one is
+        still being sent. It cannot deadlock either -- the loop this thread
+        waits on is the one running the consumer, and the thread holds nothing
+        the consumer needs.
+        """
+
+        def hand_over(path: str) -> None:
+            async_to_sync(stream.submit, path)
+
+        return final_paths_hook(hand_over)
+
     def _download(self, path):
         try:
             # Same runtime-assembled opts as in ``_extract_meta_data``.
@@ -216,6 +243,10 @@ class YoutubeDLHelper:
                     if not self._listener.is_cancelled:
                         self._on_download_error(str(e))
                     return
+            # A playlist leaves its directory on disk even when a stream has
+            # taken every file out of it -- the guard looks at the task's own
+            # directory, and the playlist's is still in there. An empty one
+            # therefore still means what it always did: nothing was downloaded.
             if self.is_playlist and (
                 not ospath.exists(path) or len(listdir(path)) == 0
             ):
@@ -225,9 +256,19 @@ class YoutubeDLHelper:
                 return
             if self._listener.is_cancelled:
                 return
+            if self._stream is not None:
+                # the uploader reports the task: every file is already sent
+                async_to_sync(self._stream.finalize)
+                return
             async_to_sync(self._listener.on_download_complete)
         except Exception:
             pass
+        finally:
+            # whichever way the above ended -- the guard above, a cancel, a
+            # download that failed -- the uploader is stopped rather than left
+            # holding a file, so the task can end
+            if self._stream is not None:
+                async_to_sync(self._stream.drain)
         return
 
     async def add_download(self, path, qual, playlist, options):
@@ -373,6 +414,24 @@ class YoutubeDLHelper:
 
         if not add_to_queue:
             LOGGER.info(f"Download with YT_DLP: {self._listener.name}")
+
+        if self._listener.stream_upload:
+            # imported here: this is the download side of the package the
+            # component uploads through. Built after the queue wait, so a task
+            # that is still waiting for its download slot has not announced an
+            # uploader yet.
+            from ..upload.stream_uploader import StreamUploader
+
+            base = f"{path}/{self._listener.name}" if self.is_playlist else path
+            stream = StreamUploader(self._listener, base)
+            if not await stream.start():
+                return
+            self._stream = stream
+            # extended rather than set: ``-opt`` can name this option too, and
+            # dropping a hook the user asked for would drop their work silently
+            self.opts.setdefault("postprocessor_hooks", []).append(
+                self._stream_hook(stream)
+            )
 
         await sync_to_async(self._download, path)
 
