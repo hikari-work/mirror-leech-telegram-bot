@@ -336,6 +336,18 @@ class MegaDownloadHelper:
         base = path if single else f"{path}/{self._listener.name}"
         failed = []
         sem = Semaphore(len(self._worker_sems))
+        stream = None
+        if self._listener.stream_upload:
+            # Imported here rather than at the top: the component is the upload
+            # side of the same package that this module is the download side of.
+            from ..upload.stream_uploader import StreamUploader
+
+            # ``base`` and not the task directory: a thumbnail is looked for
+            # beside the file, so the uploader has to be pointed at where the
+            # files ended up.
+            stream = StreamUploader(self._listener, base)
+            if not await stream.start():
+                return
 
         async def _download_item(item, idx):
             if self._listener.is_cancelled:
@@ -359,14 +371,33 @@ class MegaDownloadHelper:
                     failed.append(f"{item['name']} ({e})")
                     if await aiopath.exists(dest):
                         await remove(dest)
+                    return
+                if stream is not None:
+                    # Every one of these coroutines arrives here at once; the
+                    # component's single consumer is what keeps the uploader --
+                    # which holds one file's state at a time -- from being
+                    # written by two of them. Waiting is the backpressure: a
+                    # file is handed over only once there is room for it.
+                    await stream.submit(dest)
 
+        error = None
         try:
             async with self._session() as session:
                 await gather(*[_download_item(item, idx) for idx, item in enumerate(files)])
         except CancelledError:
             return
         except Exception as e:
-            await self._listener.on_download_error(f"Mega: {e}")
+            error = e
+        finally:
+            # in a finally so a cancellation still gives the uploader back what
+            # it was sent, and before the outcome is reported: reporting it ends
+            # the task, which sweeps the directory an upload may still be
+            # reading from.
+            if stream is not None:
+                await stream.drain()
+
+        if error is not None:
+            await self._listener.on_download_error(f"Mega: {error}")
             return
 
         if self._listener.is_cancelled:
@@ -382,6 +413,9 @@ class MegaDownloadHelper:
             LOGGER.info(f"Mega: {len(failed)} of {len(files)} file(s) failed")
             self._listener.size = self._processed
 
+        if stream is not None:
+            await stream.finalize()
+            return
         await self._listener.on_download_complete()
 
     async def cancel_task(self):
