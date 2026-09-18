@@ -28,6 +28,7 @@ from bot.helper.util.task_args import (
 import bot.helper.listeners.task_listener as tl
 import bot.helper.task.batch_tracker as bt
 from bot.helper.task.multi_link import MultiLinkMixin
+from bot.helper.upload.stream_uploader import StreamUploader
 
 FOLDER = "/bulk-tst"
 
@@ -82,6 +83,8 @@ class FakeTask:
         self.same_dir = same_dir
         self.dir = f"{tl.DOWNLOAD_DIR}{mid}"
         self.is_cancelled = False
+        # where stream mode leaves the flags it had to drop
+        self.stream_notices = []
 
 
 @pytest.fixture
@@ -245,6 +248,65 @@ class TestSameDirMerge:
         stranger = FakeTask(999, "/other", tasks[0].same_dir)
 
         assert await stranger._await_same_dir_merge() is False
+
+
+# ── streaming members ───────────────────────────────────────────────
+
+
+class FakeTgUploader:
+    """Just enough of ``TelegramUploader`` for the component to start."""
+
+    async def init_stream(self):
+        return True
+
+    async def upload_single(self, file_path):
+        pass
+
+    async def finalize_stream(self):
+        pass
+
+
+async def start_streaming(task):
+    """Put one member of a group into the mode ``-su`` downloads run in."""
+    stream = StreamUploader(task, task.dir, uploader=FakeTgUploader())
+    assert await stream.start()
+    return stream
+
+
+class TestStreamingMembers:
+    async def test_a_streaming_member_leaves_its_group(self, fs):
+        """A member that sends its files as they land has nothing to merge."""
+        tasks, group = build_group(fs, 3)
+
+        await start_streaming(tasks[0])
+
+        assert tasks[0].mid not in group[FOLDER]["tasks"]
+        assert group[FOLDER]["total"] == 2
+
+    async def test_the_siblings_left_behind_still_merge(self, fs):
+        tasks, group = build_group(fs, 3)
+        await start_streaming(tasks[0])
+
+        results = await run_group(fs, tasks[1:])
+
+        assert results.count(False) == 1
+        assert fs.files_under(group[FOLDER]["stage"]) == 2
+
+    async def test_the_staging_dir_is_cleaned_when_a_streamer_is_the_last_member(
+        self, fs
+    ):
+        """Nobody is left to upload what earlier siblings staged, so it goes."""
+        tasks, group = build_group(fs, 2)
+        stage = group[FOLDER]["stage"]
+        fs.dirs[f"{stage}{FOLDER}"] = {"staged.mkv": 0}
+        # the sibling already handed its files over, leaving only the streamer
+        await tasks[0].remove_from_same_dir()
+
+        await start_streaming(tasks[1])
+
+        assert tasks[1].mid not in group[FOLDER]["tasks"]
+        assert group[FOLDER]["total"] == 0
+        assert fs.files_under(stage) == 0
 
 
 # ── batch accounting ────────────────────────────────────────────────
