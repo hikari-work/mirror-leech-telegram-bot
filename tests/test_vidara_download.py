@@ -43,7 +43,7 @@ class _Lock:
 class _Listener:
     """The slice of TaskListener the downloader touches."""
 
-    def __init__(self, link, name=""):
+    def __init__(self, link, name="", stream_upload=False):
         self.link = link
         self.name = name
         self.size = 0
@@ -55,6 +55,12 @@ class _Listener:
         self.started = False
         self.completed = False
         self.error = ""
+        # what streaming reads and writes: the flag, the notes it collects for
+        # the task's message, and the same-dir group it may have to leave
+        self.stream_upload = stream_upload
+        self.stream_notices = []
+        self.same_dir = {}
+        self.folder_name = ""
 
     async def on_download_start(self):
         self.started = True
@@ -66,15 +72,48 @@ class _Listener:
         self.error = str(error)
 
 
+class _RecordingUploader:
+    """Stands in for ``TelegramUploader``, which the stream component builds."""
+
+    built: list = []
+
+    def __init__(self, listener, path):
+        self.listener = listener
+        self.path = path
+        self.sent = []
+        self.finalized = 0
+        _RecordingUploader.built.append(self)
+
+    async def init_stream(self):
+        return True
+
+    async def upload_single(self, file_path):
+        self.sent.append(file_path)
+
+    async def finalize_stream(self):
+        self.finalized += 1
+
+
 class _FakeYoutubeDL:
     """Writes the file ``outtmpl`` asks for and reports its bytes.
 
     Registered per test through ``calls``, which records what each download was
     handed -- the URL, the headers and the path that came out of the template.
+
+    It also fires the postprocessing hook the way yt-dlp does once the file is
+    on disk: the payload's info dict is a copy whose ``filepath`` is the path
+    before the move, and the move is recorded in ``__files_to_move``.
+
+    Two knobs stand in for what the real yt-dlp does around that hook:
+    ``on_move``, because the container is yt-dlp's choice and the template is
+    only a request, and ``silent``, for a download it decides to report nothing
+    about.
     """
 
     calls: list[dict] = []
     on_download = None
+    on_move = None
+    silent = False
 
     def __init__(self, opts):
         self.opts = opts
@@ -100,6 +139,21 @@ class _FakeYoutubeDL:
         Path(dest).write_bytes(b"x" * 1024)
         for hook in self.opts.get("progress_hooks") or []:
             hook({"status": "downloading", "downloaded_bytes": 1024})
+        if _FakeYoutubeDL.on_move:
+            moved = {dest: _FakeYoutubeDL.on_move(dest)}
+            Path(dest).rename(next(iter(moved.values())))
+        else:
+            moved = {dest: dest}
+        if _FakeYoutubeDL.silent:
+            return
+        for hook in self.opts.get("postprocessor_hooks") or []:
+            hook(
+                {
+                    "status": "finished",
+                    "postprocessor": "MoveFiles",
+                    "info_dict": {"filepath": dest, "__files_to_move": moved},
+                }
+            )
 
 
 async def _sync_to_async(func, *args, **kwargs):
@@ -178,6 +232,13 @@ def _stub_modules(resolved):
             "bot.helper.download.direct_link_generators",
             vidara_resolve=_vidara_resolve,
         ),
+        # the stream component is loaded for real from disk, so the uploader it
+        # builds -- and only that -- is replaced
+        "bot.helper.upload": _module("bot.helper.upload", package=True),
+        "bot.helper.upload.telegram_uploader": _module(
+            "bot.helper.upload.telegram_uploader",
+            TelegramUploader=_RecordingUploader,
+        ),
     }
     for name in (
         "bot.helper",
@@ -190,11 +251,11 @@ def _stub_modules(resolved):
     return modules
 
 
-def _load(monkeypatch, name):
-    """Load one real ``download`` module under the stubbed package tree."""
-    path = _ROOT / "bot" / "helper" / "download" / f"{name}.py"
+def _load(monkeypatch, name, where="download"):
+    """Load one real module under the stubbed package tree."""
+    path = _ROOT / "bot" / "helper" / where / f"{name}.py"
     spec = importlib.util.spec_from_file_location(
-        f"bot.helper.download.{name}", path
+        f"bot.helper.{where}.{name}", path
     )
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -207,17 +268,25 @@ def vidara_dl(monkeypatch, tmp_path):
     """Load ``vidara_download.py`` with the bot package stubbed to what it uses."""
     _FakeYoutubeDL.calls = []
     _FakeYoutubeDL.on_download = None
+    _FakeYoutubeDL.on_move = None
+    _FakeYoutubeDL.silent = False
+    _RecordingUploader.built = []
 
     resolved = {}
     for name, mod in _stub_modules(resolved).items():
         monkeypatch.setitem(sys.modules, name, mod)
 
-    # the queue slot, the counters and the cancel path come from the shared base
+    # the queue slot, the counters and the cancel path come from the shared base,
+    # and the file paths a stream hands over come from the hook
     _load(monkeypatch, "multi_video_download")
+    _load(monkeypatch, "yt_dlp_hooks")
+    _load(monkeypatch, "stream_uploader", where="upload")
     module = _load(monkeypatch, "vidara_download")
     monkeypatch.setattr(module, "YoutubeDL", _FakeYoutubeDL)
 
-    return SimpleNamespace(module=module, resolved=resolved, path=str(tmp_path))
+    return SimpleNamespace(
+        module=module, resolved=resolved, path=str(tmp_path), uploads=_RecordingUploader
+    )
 
 
 def _entry(name, code="aaa", subpath=""):
@@ -436,4 +505,57 @@ async def test_a_cancel_before_the_first_video_downloads_nothing(vidara_dl):
     await _run(vidara_dl, listener)
 
     assert _FakeYoutubeDL.calls == []
+    assert listener.completed is False
+
+
+# ── streaming (-su) ──────────────────────────────────────────────────
+
+
+async def test_a_streamed_folder_sends_each_video_as_it_is_muxed(vidara_dl):
+    """The upload does not wait for the folder: the muxed file goes out now.
+
+    The path matters as much as the timing: the mux is asked for a stem, and
+    only yt-dlp knows where it put the file -- here it muxed the ladder into a
+    container of its own choosing, as it does whenever the ladder does not fit
+    the one that was asked for.
+    """
+    listener = _Listener(
+        _folder(_entry("clip 1", "aaa"), _entry("clip 2", "bbb")), stream_upload=True
+    )
+    vidara_dl.resolved.update(
+        {
+            "https://vidara.to/v/aaa": _stream("aaa"),
+            "https://vidara.to/v/bbb": _stream("bbb"),
+        }
+    )
+    _FakeYoutubeDL.on_move = lambda dest: dest.replace(".mp4", ".mkv")
+
+    await _run(vidara_dl, listener)
+
+    folder = f"{vidara_dl.path}/ZILVIAZU"
+    uploader = vidara_dl.uploads.built[-1]
+    assert uploader.sent == [f"{folder}/clip 1.mkv", f"{folder}/clip 2.mkv"]
+    assert uploader.path == folder
+    assert uploader.finalized == 1
+    # the queued pipeline is never entered: that is the switch -su replaces
+    assert listener.completed is False
+    assert not listener.error
+
+
+async def test_a_dead_video_does_not_stop_a_streamed_folder(vidara_dl):
+    listener = _Listener(
+        _folder(_entry("gone", "aaa"), _entry("clip", "bbb")), stream_upload=True
+    )
+    vidara_dl.resolved.update(
+        {
+            "https://vidara.to/v/aaa": RuntimeError("ERROR: video not found"),
+            "https://vidara.to/v/bbb": _stream("bbb"),
+        }
+    )
+
+    await _run(vidara_dl, listener)
+
+    uploader = vidara_dl.uploads.built[-1]
+    assert uploader.sent == [f"{vidara_dl.path}/ZILVIAZU/clip.mp4"]
+    assert uploader.finalized == 1
     assert listener.completed is False

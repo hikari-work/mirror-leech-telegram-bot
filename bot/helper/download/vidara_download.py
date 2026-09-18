@@ -24,6 +24,7 @@ from ... import LOGGER
 from ..util.bot_utils import sync_to_async
 from ..util.resolve_gate import resolve_gate
 from .multi_video_download import MultiVideoDownloadHelper
+from .yt_dlp_hooks import final_paths_hook
 
 
 class VidaraDownloadHelper(MultiVideoDownloadHelper):
@@ -34,13 +35,16 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
 
         return VidaraStatus(self._listener, self, self._gid)
 
-    def _download_one(self, url: str, stem: str, headers: dict):
+    def _download_one(self, url: str, stem: str, headers: dict, finished: list[str]):
         """Mux one HLS stream to *stem* with yt-dlp (blocking).
 
         The extension comes from yt-dlp rather than from the title: it decides
         what container the ladder was muxed into, and a name handed over whole
         lands as "clip.mp4.mp4". A ``%`` in a title is escaped -- ``outtmpl`` is
         a template, and "100%(real)" would otherwise expand to something else.
+
+        *finished* collects the path each file ended up at, which is the one
+        thing about the file that cannot be worked out from *stem*.
         """
         opts: dict[str, Any] = {
             "format": "bv*+ba/b",
@@ -52,6 +56,7 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
             "retries": 10,
             "concurrent_fragment_downloads": 4,
             "progress_hooks": [self._on_progress],
+            "postprocessor_hooks": [final_paths_hook(finished.append)],
             "quiet": True,
             "no_warnings": True,
         }
@@ -74,12 +79,15 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
         async with resolve_gate():
             return await sync_to_async(vidara_resolve, entry["url"], entry["name"])
 
-    async def _fetch_entry(self, entry, base):
+    async def _fetch_entry(self, entry, base, stream=None):
         """Resolve one entry and mux it into *base*.
 
         Returns the reason it could not be fetched, or None when the file
         landed. One dead video does not fail the folder: it is counted, named in
         the log, and the rest of the listing carries on.
+
+        With *stream* the muxed file is handed over as soon as it exists, which
+        is one entry from now rather than one folder from now.
         """
         dest_dir = f"{base}/{entry['subpath']}" if entry["subpath"] else base
         if not await aiopath.exists(dest_dir):
@@ -91,6 +99,9 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
             LOGGER.error(f"Vidara: can't resolve {entry['url']}: {exc}")
             return str(exc)
 
+        # filled by the mux itself, on the worker thread it runs on; read here
+        # once that call has returned, so it needs no lock
+        finished: list[str] = []
         self._current_downloaded = 0
         try:
             await sync_to_async(
@@ -98,6 +109,7 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
                 link,
                 ospath.join(dest_dir, entry["name"] or name),
                 headers,
+                finished,
             )
         except Exception as exc:
             LOGGER.error(f"Vidara: failed {entry['name']}: {exc}")
@@ -105,7 +117,35 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
         finally:
             self._processed += self._current_downloaded
             self._current_downloaded = 0
+
+        if stream is not None:
+            for path in finished:
+                await stream.submit(path)
         return None
+
+    async def _walk_entries(self, entries, base, stream):
+        """Mux every entry in turn, and answer what could not be fetched.
+
+        One dead video does not fail the folder: it is counted, named in the
+        log, and the rest of the listing carries on.
+        """
+        failures = []
+        for entry in entries:
+            if self._listener.is_cancelled:
+                return failures
+            try:
+                failure = await self._fetch_entry(entry, base, stream)
+            except SystemExit:
+                # the progress hook raises this when the user cancels mid-mux
+                return failures
+            if failure:
+                failures.append(failure)
+                continue
+            self._done_count += 1
+            LOGGER.info(
+                f"Vidara: [{self._done_count}/{self._total_count}] {entry['name']}"
+            )
+        return failures
 
     async def add_download(self, path: str):
         details = self._listener.link
@@ -129,23 +169,23 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
         # the folder stays a folder: a bulk merges every task into one directory,
         # and loose files from a dozen folders would be indistinguishable there
         base = f"{path}/{self._listener.name}"
-        failures = []
+        stream = None
+        if self._listener.stream_upload:
+            # imported here: this is the download side of the package the
+            # component uploads through
+            from ..upload.stream_uploader import StreamUploader
 
-        for entry in videos:
-            if self._listener.is_cancelled:
+            stream = StreamUploader(self._listener, base)
+            if not await stream.start():
                 return
-            try:
-                failure = await self._fetch_entry(entry, base)
-            except SystemExit:
-                # the progress hook raises this when the user cancels mid-mux
-                return
-            if failure:
-                failures.append(failure)
-                continue
-            self._done_count += 1
-            LOGGER.info(
-                f"Vidara: [{self._done_count}/{self._total_count}] {entry['name']}"
-            )
+
+        try:
+            failures = await self._walk_entries(videos, base, stream)
+        finally:
+            # in a finally so a cancelled folder still gives the uploader back
+            # what it was sent, before the outcome below ends the task
+            if stream is not None:
+                await stream.drain()
 
         if self._listener.is_cancelled:
             return
@@ -164,6 +204,9 @@ class VidaraDownloadHelper(MultiVideoDownloadHelper):
                 f"{len(failures)}/{self._total_count} video(s) missing"
             )
 
+        if stream is not None:
+            await stream.finalize()
+            return
         await self._listener.on_download_complete()
 
 
