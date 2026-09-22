@@ -131,3 +131,74 @@ def vidara(monkeypatch):
     monkeypatch.setitem(sys.modules, "dlg_stub.hosts.vidara", module)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def seedbox(monkeypatch):
+    """Load ``hosts/seedbox.py`` with its package stubbed out.
+
+    Same reason as the ``vidara`` fixture -- the real package pulls in the whole
+    generator chain -- and the same recipe, with one difference: this module's
+    ``Config`` starts empty and the tests fill it in, because the seedbox host
+    is configuration rather than a constant.
+
+    Used by ``test_seedbox.py``, which replaces ``Session`` with one that
+    replays a canned listing and records what it was asked for.
+    """
+    path = (
+        _ROOT
+        / "bot" / "helper" / "download" / "direct_link_generators" / "hosts"
+        / "seedbox.py"
+    )
+
+    pkg = ModuleType("seedbox_stub")
+    pkg.__path__ = []
+    hosts_pkg = ModuleType("seedbox_stub.hosts")
+    hosts_pkg.__path__ = []
+
+    class _Logger:
+        """Keeps what it was told, so a test can assert on it.
+
+        The other stubs swallow; this one records, because half of what this
+        module does with a listing is decide what *not* to download, and a
+        silence is only evidence of that if the log is readable.
+        """
+
+        def __init__(self):
+            self.messages: list[str] = []
+
+        def _record(self, msg):
+            self.messages.append(str(msg))
+
+        info = warning = error = debug = _record
+
+    class Config:
+        SEEDBOX_HOSTS = ""
+        SEEDBOX_USERNAME = ""
+        SEEDBOX_PASSWORD = ""
+
+    class DirectDownloadLinkException(Exception):
+        pass
+
+    common = ModuleType("seedbox_stub._common")
+    common.LOGGER = _Logger()
+    common.Config = Config
+    common.DirectDownloadLinkException = DirectDownloadLinkException
+    common.user_agent = "UA"
+
+    registry = ModuleType("seedbox_stub.registry")
+    registry.register = lambda **kwargs: (lambda func: func)
+
+    for name, mod in {
+        "seedbox_stub": pkg,
+        "seedbox_stub.hosts": hosts_pkg,
+        "seedbox_stub._common": common,
+        "seedbox_stub.registry": registry,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    spec = importlib.util.spec_from_file_location("seedbox_stub.hosts.seedbox", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "seedbox_stub.hosts.seedbox", module)
+    spec.loader.exec_module(module)
+    return module

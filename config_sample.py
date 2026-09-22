@@ -120,3 +120,11 @@ SEARCH_PLUGINS = [
     "https://raw.githubusercontent.com/msagca/qbittorrent_plugins/main/uniondht.py",
     "https://raw.githubusercontent.com/khensolomon/leyts/master/yts.py",
 ]
+# Private Seedbox
+# One or more hosts (comma/space separated) of a private seedbox behind HTTP
+# basic auth, e.g. "swift-010.seedbox.vip". A link to a directory there is
+# downloaded as the files the listing shows; a link to a single file is
+# downloaded with the same credentials. Leave empty to switch it off.
+SEEDBOX_HOSTS = ""
+SEEDBOX_USERNAME = ""
+SEEDBOX_PASSWORD = ""

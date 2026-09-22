@@ -31,6 +31,13 @@ from .hosts.imgbb import (
 # Re-exported for call sites that import them directly (ytdlp.py) and for
 # tests that reach for the handlers by name.
 from .hosts.mega import MEGA_DOMAINS, is_mega_link, mega
+from .hosts.seedbox import (
+    SEEDBOX_MAX_FILES,
+    is_seedbox_link,
+    seedbox,
+    seedbox_auth_header,
+    seedbox_hosts,
+)
 from .hosts.vidara import (
     VIDARA_ATTEMPTS,
     VIDARA_DOMAINS,
@@ -130,4 +137,9 @@ __all__ = [
     "IMGBB_DOMAINS",
     "is_imgbb_link",
     "imgbb",
+    "is_seedbox_link",
+    "seedbox",
+    "seedbox_hosts",
+    "seedbox_auth_header",
+    "SEEDBOX_MAX_FILES",
 ]

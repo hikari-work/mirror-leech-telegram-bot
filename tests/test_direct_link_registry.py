@@ -374,7 +374,14 @@ def test_registry_covers_every_handler(dlg):
     """All 41 branches of the old chain are registered -- 38 by domain, plus
     the three predicate-only ones (vidoy, mega, share_link)."""
     handlers = {entry.handler.__name__ for entry in dlg.registered_entries()}
-    assert handlers == set(EXPECTED.values()) | {"vidoy", "mega", "share_link", "vidara", "bunkr"}
+    assert handlers == set(EXPECTED.values()) | {
+        "vidoy",
+        "mega",
+        "share_link",
+        "vidara",
+        "bunkr",
+        "seedbox",
+    }
 
 
 # The branches of the old if/elif chain, top to bottom. filepress/sharer_scraper
@@ -427,6 +434,9 @@ CHAIN_ORDER.insert(CHAIN_ORDER.index("mega") + 1, "vidara")
 # imgbb (order=42) appended after all old-chain entries
 CHAIN_ORDER.append("imgbb")
 CHAIN_ORDER.append("bunkr")
+# seedbox (order=44) matches on the hosts named in Config, so it is registered
+# as a predicate too -- and last, since it is the newest branch of all.
+CHAIN_ORDER.append("seedbox")
 
 
 def test_dispatch_order_matches_the_old_chain(dlg):

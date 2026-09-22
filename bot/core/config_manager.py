@@ -80,6 +80,21 @@ class Config:
     SEARCH_API_LINK = ""
     SEARCH_LIMIT = 0
     SEARCH_PLUGINS = []
+    # A private seedbox behind HTTP basic auth, whose nginx directory listings
+    # the bot will walk. Any host named here (comma or space separated) is
+    # scraped with the credentials below, and every file the listing shows is
+    # downloaded with them; a link to a single file on the same host takes the
+    # same credentials. Empty means the feature is off, and the links are left
+    # to whatever else claims them.
+    #
+    # One string rather than a list because the settings menu asks for a Python
+    # literal when editing a list attribute, and typing a hostname is the whole
+    # point of it being editable there.
+    SEEDBOX_HOSTS = ""
+    SEEDBOX_USERNAME = ""
+    # Shown in the settings menu like every other Config value, including this
+    # one. Rotate it if that matters more than the convenience.
+    SEEDBOX_PASSWORD = ""
     STATUS_LIMIT = 4
     STATUS_UPDATE_INTERVAL = 15
     STREAMWISH_API = ""

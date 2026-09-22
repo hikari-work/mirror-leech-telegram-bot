@@ -153,7 +153,10 @@ using asynchronous programming in Python.
 > sharedisk.io), akmfiles.com, wetransfer.com, pcloud.link, gofile.io (file/folders), easyupload.io, mdisk.me (with
 > ytdl),
 > tmpsend.com, qiwi.gg, berkasdrive.com, mp4upload.com, terabox.com (videos only file/folders),
-> mega.nz / mega.co.nz (folder shares and single files).
+> mega.nz / mega.co.nz (folder shares and single files),
+> a private seedbox (an nginx directory listing behind HTTP basic auth: list its hosts in `SEEDBOX_HOSTS` and set
+> `SEEDBOX_USERNAME` / `SEEDBOX_PASSWORD`. One link per folder, every file the listing shows is downloaded; a link
+> to a single file on the same host is downloaded with the same credentials).
 
 </details>
 </details>

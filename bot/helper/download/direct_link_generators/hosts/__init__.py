@@ -21,6 +21,7 @@ from . import (
     lockers,  # noqa: F401
     mediafire,  # noqa: F401
     mega,  # noqa: F401
+    seedbox,  # noqa: F401
     sendcm,  # noqa: F401
     sharelinks,  # noqa: F401
     streaming,  # noqa: F401
