@@ -21,6 +21,7 @@ are busy stubbing ``bot.*`` entries out of ``sys.modules``.
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -81,3 +82,38 @@ def test_handlers_module_is_importable():
         timeout=300,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_a_fatal_signal_leaves_a_traceback_in_crash_log(tmp_path):
+    """The abort that killed the bot on 2026-09-23 left no Python traceback at
+    all -- in ``log.txt``, in ``docker logs``, anywhere. The only record was
+    "Aborted (core dumped)" from ``start.sh``, which names no line of code and
+    no thread, and the run before it died the same way.
+
+    faulthandler is what turns the next one into a stack dump. It has to be
+    armed at import time, before uvloop, TgCrypto and cryptography are loaded,
+    so this arms nothing itself: it imports ``bot`` and then sends the process
+    the signal that actually killed it. The core limit is zeroed first, because
+    a core file here would be a few hundred megabytes in a pytest tmpdir.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import resource\n"
+            "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+            "import bot, faulthandler\n"
+            "faulthandler._sigabrt()\n",
+        ],
+        cwd=tmp_path,  # crash.log (and log.txt) are opened in the cwd
+        env={"PYTHONPATH": str(_ROOT), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert proc.returncode == -signal.SIGABRT, proc.stderr
+    dump = (tmp_path / "crash.log").read_text()
+    # The header alone would not prove the handler ran on this thread's stack.
+    assert "Fatal Python error" in dump
+    assert 'File "<string>"' in dump

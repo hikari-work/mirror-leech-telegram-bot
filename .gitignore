@@ -3,6 +3,7 @@ mltbenv/*
 config.py
 .netrc
 log.txt
+crash.log
 thumbnails/*
 cookies.txt
 downloads/*

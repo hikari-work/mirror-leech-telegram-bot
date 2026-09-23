@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from faulthandler import enable as enable_faulthandler
+from sys import stderr
 from uvloop import install
 
 install()
@@ -16,7 +18,33 @@ from logging import (
 )
 from time import time
 from os import cpu_count
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TextIO, TYPE_CHECKING, Literal, TypedDict
+
+
+def _crash_log() -> TextIO:
+    """Where a native crash dump is written.
+
+    ``stderr`` would be the obvious choice, and it is the fallback. But the
+    abort this exists for came after the event loop had started losing track of
+    its own descriptors, so the dump is not something to hand to a descriptor
+    the process may no longer be able to write. A file of its own, opened once
+    at import and appended to, is one nothing else can close or reuse.
+    """
+    try:
+        return open("crash.log", "a")
+    except OSError:
+        return stderr
+
+
+# Enabled before anything below can start a thread or load a C extension. A
+# SIGABRT or SIGSEGV inside uvloop, TgCrypto or cryptography kills the process
+# with no Python traceback at all: on 2026-09-23 the only record of the death
+# was "Aborted (core dumped)" from start.sh, with no line of Python in it. With
+# faulthandler on, any of those signals dumps every thread's stack first.
+# Held in the module so the handle outlives the call -- the dump is written from
+# a signal handler, long after import.
+_CRASH_LOG = _crash_log()
+enable_faulthandler(file=_CRASH_LOG)
 
 if TYPE_CHECKING:
     # For ``_Intervals`` only; importing it for real would be a cycle, since
