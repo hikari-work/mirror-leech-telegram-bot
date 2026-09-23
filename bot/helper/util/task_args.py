@@ -303,7 +303,7 @@ def load_args(data: dict[str, Any]) -> CommonArgs:
     if data.get("schema") != ARGS_SCHEMA:
         raise ValueError(f"Unknown argument schema: {data.get('schema')}")
     name = data.get("type")
-    cls = _ARGS_TYPES.get(name)
+    cls = _ARGS_TYPES.get(name) if isinstance(name, str) else None
     if cls is None:
         raise ValueError(f"Unknown argument type: {name}")
     known = {f.name for f in fields(cls)}
