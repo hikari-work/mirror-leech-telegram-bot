@@ -25,8 +25,10 @@ from bot.core import fast_upload
 def _clean_pools():
     """Keep the module-level session pool from leaking between tests."""
     fast_upload._pools.clear()
+    fast_upload._refused_until.clear()
     yield
     fast_upload._pools.clear()
+    fast_upload._refused_until.clear()
 
 
 class _Session:
@@ -429,6 +431,189 @@ async def test_purepath_is_accepted(tmp_path, fallback, tiny):
     result = await fast_upload._save_file(client, PurePath(str(path)))
     assert result.parts == 2
     assert not fallback
+
+
+# --- what a connection that stopped answering must not be able to do ---
+#
+# Every wait these cover used to be unbounded. A hang there is not a slow
+# upload: the task keeps the upload slot it was given, and with ``QUEUE_UPLOAD``
+# at one every later upload waits behind it -- for hours, with nothing logged,
+# because a coroutine parked on a socket raises nothing and prints no traceback.
+# Production sat in exactly that state: no bytes read off disk, no bytes on the
+# wire, no error, two tasks queued behind one that had stopped moving.
+
+
+async def test_a_pool_that_will_not_open_still_uploads(tmp_path, fallback, tiny, monkeypatch):
+    """kurigram's ``connect`` has no timeout, and this await holds a shared lock."""
+    monkeypatch.setattr(fast_upload, "_POOL_TIMEOUT", 0.05)
+    path = _write(tmp_path, fast_upload._PART_SIZE * 4)
+    client = _Client(sessions=_make_sessions(0))
+
+    async def _never_answers(dc_id, is_media=False, temporary=False):
+        await asyncio.sleep(3600)
+
+    client.get_session = _never_answers
+
+    started = time.monotonic()
+    result = await asyncio.wait_for(
+        fast_upload._save_file(client, str(path)), timeout=30
+    )
+
+    assert result == "fell-back"
+    assert fallback, "a pool that opened nothing must still go up, over kurigram"
+    assert time.monotonic() - started < 5, "the stall was waited out, not bounded"
+
+
+async def test_a_pool_that_will_not_open_does_not_hold_the_next_upload(
+    tmp_path, fallback, tiny, monkeypatch
+):
+    """The guard is shared by every client, so this stall was the whole bot's."""
+    monkeypatch.setattr(fast_upload, "_POOL_TIMEOUT", 0.05)
+    path = _write(tmp_path, fast_upload._PART_SIZE * 2)
+    stuck = _Client(sessions=_make_sessions(0))
+
+    async def _never_answers(dc_id, is_media=False, temporary=False):
+        await asyncio.sleep(3600)
+
+    stuck.get_session = _never_answers
+    other = _Client(sessions=_make_sessions(2))
+
+    await asyncio.wait_for(fast_upload._save_file(stuck, str(path)), timeout=5)
+    result = await asyncio.wait_for(fast_upload._save_file(other, str(path)), timeout=5)
+
+    assert result.parts == 2, "a second client must still get its own pool"
+
+
+async def test_a_datacenter_that_refused_is_not_asked_again_yet(
+    tmp_path, fallback, tiny, monkeypatch
+):
+    """The bound above is paid while holding the guard every client shares, so
+    a route that is down must cost one stall for the run, not one per file."""
+    monkeypatch.setattr(fast_upload, "_POOL_TIMEOUT", 0.05)
+    monkeypatch.setattr(fast_upload, "_POOL_RETRY_AFTER", 300.0)
+    path = _write(tmp_path, fast_upload._PART_SIZE * 2)
+    client = _Client(sessions=_make_sessions(0))
+    asked = []
+
+    async def _never_answers(dc_id, is_media=False, temporary=False):
+        asked.append(dc_id)
+        await asyncio.sleep(3600)
+
+    client.get_session = _never_answers
+
+    first = await asyncio.wait_for(
+        fast_upload._save_file(client, str(path)), timeout=5
+    )
+    assert first == "fell-back"
+    assert len(asked) == 1, "the pool was never opened, so nothing was refused"
+
+    started = time.monotonic()
+    result = await asyncio.wait_for(fast_upload._save_file(client, str(path)), timeout=5)
+
+    assert result == "fell-back"
+    assert len(asked) == 1, "the second file paid the same stall all over again"
+    assert time.monotonic() - started < 1, "the file waited on a known-dead route"
+
+
+async def test_a_datacenter_is_asked_again_once_the_refusal_expires(
+    tmp_path, fallback, tiny, monkeypatch
+):
+    """The cooldown is a delay and not a decision: a route that comes back has
+    to be picked up again without a restart."""
+    monkeypatch.setattr(fast_upload, "_POOL_TIMEOUT", 0.05)
+    path = _write(tmp_path, fast_upload._PART_SIZE * 2)
+    client = _Client(sessions=_make_sessions(0))
+    asked = []
+
+    async def _never_answers(dc_id, is_media=False, temporary=False):
+        asked.append(dc_id)
+        await asyncio.sleep(3600)
+
+    client.get_session = _never_answers
+
+    await asyncio.wait_for(fast_upload._save_file(client, str(path)), timeout=5)
+    assert len(asked) == 1
+
+    # Asking again is what a live route needs; only the delay was standing in
+    # the way. ``loop.time`` is monotonic and well clear of zero by now.
+    fast_upload._refused_until[client][2] = 0.0
+    await asyncio.wait_for(fast_upload._save_file(client, str(path)), timeout=5)
+
+    assert len(asked) == 2, "a pool that came back was never asked for again"
+
+
+async def test_a_session_that_will_not_stop_is_left_behind(fallback, monkeypatch):
+    """``Session.stop`` awaits kurigram's tasks rather than cancelling them."""
+    monkeypatch.setattr(fast_upload, "_STOP_TIMEOUT", 0.05)
+    client = _Client(sessions=_make_sessions(1))
+
+    class _Stuck:
+        stopped = False
+
+        async def stop(self):
+            await asyncio.sleep(3600)
+
+    fast_upload._pools[client] = {2: [_Stuck()]}
+
+    await asyncio.wait_for(fast_upload.discard(client), timeout=5)
+
+    assert client not in fast_upload._pools
+
+
+async def test_a_part_that_never_answers_fails_the_upload(tmp_path, fallback, tiny, monkeypatch):
+    """``run`` waits for every part still in flight, so one that never returns
+    would hold the task's upload slot for good."""
+    monkeypatch.setattr(fast_upload, "_SEND_TIMEOUT", 0.05)
+    path = _write(tmp_path, fast_upload._PART_SIZE * 4)
+    sessions = _make_sessions(2)
+    for session in sessions:
+
+        async def _never_answers(rpc):
+            await asyncio.sleep(3600)
+
+        session.invoke = _never_answers
+    client = _Client(sessions=list(sessions))
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(fast_upload._save_file(client, str(path)), timeout=30)
+
+    assert time.monotonic() - started < 5, "the stall was waited out, not bounded"
+    assert client not in fast_upload._pools, "a wedged pool must not be reused"
+    assert all(s.stopped for s in sessions)
+
+
+async def test_the_file_is_closed_before_the_pool_is_dropped(
+    tmp_path, fallback, tiny, monkeypatch
+):
+    """Cleanup can stall; the descriptor must not be left behind it."""
+    path = _write(tmp_path, fast_upload._PART_SIZE * 4)
+    sessions = _make_sessions(2)
+    sessions[1].fail_on = 3
+    client = _Client(sessions=list(sessions))
+
+    handles = []
+    real_open = open
+
+    def _tracking_open(file, *args, **kwargs):
+        handle = real_open(file, *args, **kwargs)
+        if str(file) == str(path):
+            handles.append(handle)
+        return handle
+
+    seen = []
+
+    async def _slow_discard(some_client):
+        seen.append(handles[0].closed)
+
+    monkeypatch.setattr("builtins.open", _tracking_open)
+    monkeypatch.setattr(fast_upload, "discard", _slow_discard)
+
+    with pytest.raises(OSError, match="connection reset"):
+        await fast_upload._save_file(client, str(path))
+
+    assert handles, "the test did not observe the upload's own file handle"
+    assert seen == [True], "the pool was dropped while the file was still open"
 
 
 # --- installation ---

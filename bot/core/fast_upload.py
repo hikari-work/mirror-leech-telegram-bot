@@ -63,6 +63,43 @@ _MAX_SESSIONS = 8
 # which keeps the pipe full across a round trip of well over a second.
 _PARTS_PER_SESSION = 4
 
+# Every wait below is bounded, because each one is a place where a connection
+# telegram has stopped answering turns into a task that never finishes. That
+# task holds the upload slot it was given, and with ``QUEUE_UPLOAD`` at its
+# default of one it holds every other upload behind it -- for hours, with
+# nothing in the log to say so, because a coroutine waiting on a socket raises
+# no exception and prints no traceback. The numbers are all far above anything
+# a working connection needs; they exist to end a hang, not to time a transfer.
+
+# How long a single part may take, start to finish. kurigram's own
+# ``Session.invoke`` waits 15s per attempt and retries five times, so roughly
+# 90s is the longest a part can legitimately be silent.
+_SEND_TIMEOUT = 300.0
+
+# How long opening the pool may take, all sessions together. A media session
+# is a fresh TCP connect to a telegram datacenter and kurigram's ``connect``
+# has no timeout of its own. This runs while holding ``_pools_guard``, which
+# every client shares, so an unbounded connect here stalls every upload in the
+# process rather than just the one.
+_POOL_TIMEOUT = 60.0
+
+# How long closing one session may take. ``Session.stop`` awaits kurigram's
+# ping and receive tasks instead of cancelling them, and the ping worker
+# reconnects with no timeout of its own -- so a session whose connection died
+# can hold its own shutdown forever. This one runs while a task is being
+# failed or a client is being restarted, neither of which can afford to wait.
+_STOP_TIMEOUT = 15.0
+
+# A datacenter that would not open the pool a moment ago will not open it for
+# the next file either, and every attempt pays the deadline above while holding
+# the guard every client shares -- a stall per file rather than one for the
+# run. The refusal is remembered for this long: long enough that a route that
+# is down costs one stall instead of one per file, short enough that a route
+# that comes back is picked up again without a restart. An upload that gets no
+# pool still goes up, through kurigram, so this is a speed trade and not a
+# correctness one.
+_POOL_RETRY_AFTER = 300.0
+
 # kurigram's own ``save_file``, kept so the paths this module declines -- and
 # any upload whose extra sessions could not be opened -- still work.
 _original_save_file: Callable[..., Any] | None = None
@@ -73,6 +110,10 @@ _original_save_file: Callable[..., Any] | None = None
 # points where a client stops or restarts.
 _pools: WeakKeyDictionary[Client, dict[int, list[Session]]] = WeakKeyDictionary()
 _pools_guard = asyncio.Lock()
+
+# client -> datacenter -> the loop time before which asking for the pool again
+# is not worth the wait. Weak for the same reason ``_pools`` is.
+_refused_until: WeakKeyDictionary[Client, dict[int, float]] = WeakKeyDictionary()
 
 
 def _session_count() -> int:
@@ -97,16 +138,31 @@ async def _media_sessions(client: Client, dc_id: int, size: int) -> list[Session
     async with _pools_guard:
         by_dc = _pools.setdefault(client, {})
         sessions = by_dc.setdefault(dc_id, [])
-        while len(sessions) < size:
-            try:
-                sessions.append(
-                    await client.get_session(dc_id, is_media=True, temporary=True)
-                )
-            except Exception as e:
-                # One connection short is worth uploading over; the pool is
-                # whatever did open, and the next file tries for the rest.
-                LOGGER.warning(f"Could not open a media session to DC {dc_id}: {e}")
-                break
+        refused_until = _refused_until.setdefault(client, {})
+        loop = asyncio.get_running_loop()
+        if not sessions and refused_until.get(dc_id, 0.0) > loop.time():
+            # Told recently; going back costs the deadline below and holds the
+            # guard while it does. kurigram carries the file instead.
+            return []
+        try:
+            # Whatever opened before the deadline is kept: a shorter pool is
+            # worth uploading over, and the next file asks for the rest.
+            async with asyncio.timeout(_POOL_TIMEOUT):
+                while len(sessions) < size:
+                    sessions.append(
+                        await client.get_session(dc_id, is_media=True, temporary=True)
+                    )
+        except Exception as e:
+            # One connection short is worth uploading over; the pool is
+            # whatever did open, and the next file tries for the rest. An empty
+            # one sends the caller back to kurigram, which is a slow upload
+            # rather than none -- and is what makes the next attempt worth
+            # postponing rather than paying for again.
+            LOGGER.warning(f"Could not open a media session to DC {dc_id}: {e!r}")
+            if not sessions:
+                refused_until[dc_id] = loop.time() + _POOL_RETRY_AFTER
+        else:
+            refused_until.pop(dc_id, None)
         return list(sessions)
 
 
@@ -123,9 +179,14 @@ async def discard(client: Client) -> None:
     for sessions in (by_dc or {}).values():
         for session in sessions:
             try:
-                await session.stop()
+                async with asyncio.timeout(_STOP_TIMEOUT):
+                    await session.stop()
             except Exception as e:
-                LOGGER.warning(f"While closing a media session: {e}")
+                # A session that would not close is one connection's worth of
+                # leak in a process that is dropping the pool anyway. Waiting
+                # on it is the worse trade: this runs on the way out of a
+                # failed upload and while a client is being restarted.
+                LOGGER.warning(f"While closing a media session: {e!r}")
 
 
 class _Progress:
@@ -199,7 +260,12 @@ class _PartSender:
 
     async def _send(self, session: Session, rpc: Any) -> None:
         try:
-            await session.invoke(rpc)
+            # Bounded past kurigram's own wait, so this is the belt to its
+            # braces: ``run`` waits for every send still running, and a part
+            # that never came back would keep it -- and the task's only upload
+            # slot -- waiting for good.
+            async with asyncio.timeout(_SEND_TIMEOUT):
+                await session.invoke(rpc)
             await self._reporter.part_done()
         except BaseException as e:
             # Kept rather than raised: this runs in its own task, so the only
@@ -312,9 +378,15 @@ async def _save_file(
         # result is built. kurigram sends the path it opened, so this does too.
         file_name = getattr(fp, "name", "file.jpg")
         try:
-            parts = await _upload_parts(
-                self, fp, file_size, new_file_id, sessions, progress, progress_args
-            )
+            try:
+                parts = await _upload_parts(
+                    self, fp, file_size, new_file_id, sessions, progress, progress_args
+                )
+            finally:
+                # Closed before anything else runs, ``discard`` below included.
+                # A descriptor left open behind a stalled cleanup is one the
+                # process never gets back, and the bot uploads for weeks.
+                fp.close()
         except StopTransmission:
             # The upload was cancelled on purpose; the sessions are fine.
             raise
@@ -323,8 +395,6 @@ async def _save_file(
             # every later upload too. Drop the pool so the next one reconnects.
             await discard(self)
             raise
-        finally:
-            fp.close()
 
         return raw.types.InputFileBig(
             id=new_file_id,
