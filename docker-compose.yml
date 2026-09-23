@@ -3,6 +3,16 @@ services:
     build: .
     command: bash start.sh
     restart: on-failure
+    # One download task holds a socket per segment plus an open handle per
+    # destination file, and a bulk of a few hundred files gets close to the
+    # default soft limit of 1024. `start.sh` raises the limit for the running
+    # process too, and that is the one that takes effect today: a change here
+    # only lands when the container is recreated, and /app is not a volume, so
+    # recreating it would take config.py, the session and the downloads with it.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     network_mode: "host"
     cap_add:
       - NET_ADMIN
