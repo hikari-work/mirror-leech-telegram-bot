@@ -12,7 +12,7 @@ from ..telegram.message_utils import send_status_message
 from ..util.task_manager import check_running_tasks
 
 
-async def add_direct_download(listener, path):
+async def add_direct_download(listener, path, resume=False):
     details = listener.link
     if not (contents := details.get("contents")):
         await listener.on_download_error("There is nothing to download!")
@@ -24,17 +24,19 @@ async def add_direct_download(listener, path):
     path = f"{path}/{listener.name}"
 
     gid = token_urlsafe(10)
-    add_to_queue, event = await check_running_tasks(listener)
-    if add_to_queue:
-        LOGGER.info(f"Added to Queue/Download: {listener.name}")
-        async with task_dict_lock:
-            task_dict[listener.mid] = QueueStatus(listener, gid, "dl")
-        await listener.on_download_start()
-        if listener.multi <= 1 and not listener.is_rss:
-            await send_status_message(listener.message)
-        await event.wait()
-        if listener.is_cancelled:
-            return
+    add_to_queue = False
+    if not resume:
+        add_to_queue, event = await check_running_tasks(listener)
+        if add_to_queue:
+            LOGGER.info(f"Added to Queue/Download: {listener.name}")
+            async with task_dict_lock:
+                task_dict[listener.mid] = QueueStatus(listener, gid, "dl")
+            await listener.on_download_start()
+            if listener.multi <= 1 and not listener.is_rss:
+                await send_status_message(listener.message)
+            await event.wait()
+            if listener.is_cancelled:
+                return
 
     a2c_opt = {"follow-torrent": "false", "follow-metalink": "false"}
     if header := details.get("header"):
@@ -42,6 +44,12 @@ async def add_direct_download(listener, path):
     directListener = DirectListener(
         path, listener, a2c_opt, bunkr_lazy=details.get("bunkr_lazy", False)
     )
+    if resume:
+        # Before the first file, so the loop below finds the engine's downloads
+        # instead of adding a second copy of each. A resumed task skips the
+        # queue entirely: the transfer is already running, and the slot it held
+        # before the restart is one the empty queue has nothing to say about.
+        await directListener.adopt_running()
 
     async with task_dict_lock:
         task_dict[listener.mid] = DirectStatus(listener, directListener, gid)

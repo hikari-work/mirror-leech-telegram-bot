@@ -512,6 +512,149 @@ async def test_trunc_table_maps_to_the_owned_table(dbm, name, expected_table):
         assert params == (TgClient.ID,)
 
 
+# ── restart recovery ──────────────────────────────────────────────────
+
+
+async def test_add_active_task_upserts_the_whole_document(dbm):
+    """One row per task, rewritten in place.
+
+    A task whose download is dispatched twice -- the queue re-entry, the option
+    keyboard applied again -- must not end up with two rows for one mid, and the
+    row that survives has to describe the *current* run.
+    """
+    await dbm.add_active_task(
+        42, -100, 10, 7, "@user", {"schema": 1, "engine": "aria2"}
+    )
+
+    sql, params = dbm._recorder.writes[0]
+    assert "INSERT INTO active_tasks" in sql
+    assert "ON CONFLICT (bot_id, mid) DO UPDATE SET" in sql
+    assert "data = EXCLUDED.data" in sql
+    # written downloading, always: this is the dispatch path
+    assert params[:7] == (TgClient.ID, 42, -100, 10, 7, "@user", "dl")
+    assert params[7] == {"schema": 1, "engine": "aria2"}
+
+
+async def test_set_active_task_state_moves_one_task(dbm):
+    await dbm.set_active_task_state(42, "up")
+
+    sql, params = dbm._recorder.writes[0]
+    assert "UPDATE active_tasks SET state = %s WHERE bot_id = %s AND mid = %s" in sql
+    assert params == ("up", TgClient.ID, 42)
+
+
+async def test_rm_active_task_deletes_one_task_of_this_bot(dbm):
+    await dbm.rm_active_task(42)
+
+    sql, params = dbm._recorder.writes[0]
+    assert "DELETE FROM active_tasks WHERE bot_id = %s AND mid = %s" in sql
+    assert params == (TgClient.ID, 42)
+
+
+async def test_get_active_tasks_does_not_forget_what_it_reads(dbm):
+    """The difference from ``get_incomplete_tasks``, which is the whole point.
+
+    A read that wipes is fine for a notifier that runs once and is done; it is
+    not fine here, where the pass can fail partway and the rows it never reached
+    are exactly what a second attempt needs.
+    """
+    dbm._recorder._results = [[{"mid": 1}]]
+
+    got = await dbm.get_active_tasks()
+
+    assert got == [{"mid": 1}]
+    assert dbm._recorder.writes == []
+    sql, params = dbm._recorder.reads[0]
+    assert "FROM active_tasks" in sql
+    assert "ORDER BY mid" in sql
+    assert params == (TgClient.ID,)
+
+
+async def test_add_uploaded_file_upserts_one_file(dbm):
+    """Per file, keyed by the path inside the task's own directory.
+
+    A file sent twice -- a retry, a second pass over the same directory -- must
+    leave one row, not a second one that the report would then count twice.
+    """
+    await dbm.add_uploaded_file(42, "album/a.mkv", 3, -100, 77, "https://t/1", "a", None)
+
+    sql, params = dbm._recorder.writes[0]
+    assert "INSERT INTO uploaded_files" in sql
+    assert "ON CONFLICT (bot_id, mid, relpath) DO UPDATE SET" in sql
+    assert params == (
+        TgClient.ID,
+        42,
+        "album/a.mkv",
+        3,
+        -100,
+        77,
+        "https://t/1",
+        "a",
+        None,
+    )
+
+
+async def test_an_uploaded_file_unit_is_stored_as_jsonb(dbm):
+    """The unit is what the completion report is rebuilt from, and it is a dict."""
+    await dbm.add_uploaded_file(42, "a.mkv", 1, -100, 77, "", "a", {"m": [1, 2]})
+
+    assert dbm._recorder.writes[0][1][8] == {"m": [1, 2]}
+
+
+async def test_rewrite_uploaded_album_re_points_the_files_it_carried(dbm):
+    """One statement for the whole album, matched on the messages it absorbed."""
+    # a list, not a set: the caller hands over message pairs and the order of
+    # the placeholders follows it, so a set would make the assertion a coin toss
+    await dbm.rewrite_uploaded_album(
+        42, [(-100, 10), (-100, 11)], -100, 99, "https://t/99", {"m": 1}
+    )
+
+    sql, params = dbm._recorder.writes[0]
+    assert "UPDATE uploaded_files" in sql
+    assert "AND (cid, msg_id) IN ((%s, %s), (%s, %s))" in sql
+    assert params == (
+        -100,
+        99,
+        "https://t/99",
+        {"m": 1},
+        TgClient.ID,
+        42,
+        -100,
+        10,
+        -100,
+        11,
+    )
+
+
+async def test_rewriting_with_nothing_carried_touches_nothing(dbm):
+    """An album that absorbed no message -- an album of one, or a task that
+    never got an album -- has nothing to re-point, and an ``IN ()`` is a syntax
+    error rather than an empty match."""
+    await dbm.rewrite_uploaded_album(42, set(), -100, 99, "", None)
+
+    assert dbm._recorder.writes == []
+
+
+async def test_get_uploaded_files_reads_one_task_in_send_order(dbm):
+    dbm._recorder._results = [[{"relpath": "a.mkv", "seq": 1}]]
+
+    got = await dbm.get_uploaded_files(42)
+
+    assert got == [{"relpath": "a.mkv", "seq": 1}]
+    sql, params = dbm._recorder.reads[0]
+    assert "FROM uploaded_files" in sql
+    assert "ORDER BY seq" in sql
+    assert params == (TgClient.ID, 42)
+
+
+async def test_rm_uploaded_files_clears_one_task(dbm):
+    await dbm.rm_uploaded_files(42)
+
+    sql, params = dbm._recorder.writes[0]
+    assert "DELETE FROM uploaded_files WHERE bot_id = %s AND mid = %s" in sql
+    assert params == (TgClient.ID, 42)
+
+
 # ── the disconnected guard ────────────────────────────────────────────
 
 
@@ -549,6 +692,14 @@ async def test_every_method_is_a_noop_when_disconnected():
         await dbm.add_incomplete_task(1, "a", "t")
         await dbm.rm_complete_task("a")
         assert await dbm.get_incomplete_tasks() == {}
+        await dbm.add_active_task(1, -100, 2, 3, "@u", {})
+        await dbm.set_active_task_state(1, "up")
+        assert await dbm.get_active_tasks() == []
+        await dbm.rm_active_task(1)
+        await dbm.add_uploaded_file(1, "a", 1, -100, 2, "", "a", None)
+        assert await dbm.get_uploaded_files(1) == []
+        await dbm.rewrite_uploaded_album(1, {(-100, 2)}, -100, 3, "", None)
+        await dbm.rm_uploaded_files(1)
         await dbm.trunc_table("rss")
 
     await _exercise()

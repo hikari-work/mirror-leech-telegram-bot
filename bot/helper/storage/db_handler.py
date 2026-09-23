@@ -138,6 +138,48 @@ _SCHEMA = (
         PRIMARY KEY (bot_id, link)
     )
     """,
+    # What a restart needs to pick a task back up. ``incomplete_tasks`` above
+    # only remembers a raw link, which is enough to tell a user to send it
+    # again and nothing more; this row carries the *parsed* command instead, so
+    # the task can be rebuilt and handed to the download engine that is still
+    # running. ``data`` holds the argument document, the command text and the
+    # engine handle -- its shape is versioned by the ``schema`` key inside it.
+    """
+    CREATE TABLE IF NOT EXISTS active_tasks (
+        bot_id     text   NOT NULL,
+        mid        bigint NOT NULL,
+        cid        bigint NOT NULL,
+        cmd_msg_id bigint NOT NULL,
+        user_id    bigint NOT NULL,
+        tag        text   NOT NULL,
+        state      text   NOT NULL,
+        data       jsonb  NOT NULL,
+        PRIMARY KEY (bot_id, mid)
+    )
+    """,
+    # One file this task has already sent. Written per file rather than once at
+    # the end, because the restart that matters happens in the middle: a task
+    # that goes down with half its files delivered has to come back and deliver
+    # the other half, not all of them again. Telegram keeps no record of what it
+    # received, so this row is the only thing that knows.
+    #
+    # ``link``/``label`` are the entry the completion message lists and ``unit``
+    # is what /copy replays; both are rewritten when an album absorbs the
+    # messages they name -- see ``rewrite_uploaded_album``.
+    """
+    CREATE TABLE IF NOT EXISTS uploaded_files (
+        bot_id  text    NOT NULL,
+        mid     bigint  NOT NULL,
+        relpath text    NOT NULL,
+        seq     integer NOT NULL,
+        cid     bigint  NOT NULL,
+        msg_id  bigint  NOT NULL,
+        link    text    NOT NULL,
+        label   text    NOT NULL,
+        unit    jsonb,
+        PRIMARY KEY (bot_id, mid, relpath)
+    )
+    """,
     # One finished task is one row here; its units and their media are child
     # rows (below) that a task delete cascades away. ``cid``/``mid`` are the
     # coordinates of the task's result message, unique per chat.
@@ -865,6 +907,170 @@ class DbManager:
         if table is None:
             return
         await self._execute(f"DELETE FROM {table} WHERE bot_id = %s", (TgClient.ID,))
+
+    # ---------------------------------------------------- restart recovery
+
+    async def add_active_task(self, mid, cid, cmd_msg_id, user_id, tag, data):
+        """Record a task the recovery pass can rebuild. One row per task.
+
+        Written when the download is dispatched rather than when the command
+        arrives: a task still parked on the option keyboard has downloaded
+        nothing and holds no engine job, so there is nothing to come back to --
+        and the keyboard it is waiting on lives in the dead process's memory.
+        """
+        if self._return:
+            return
+        await self._execute(
+            """
+            INSERT INTO active_tasks
+                (bot_id, mid, cid, cmd_msg_id, user_id, tag, state, data)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (bot_id, mid) DO UPDATE SET
+                cid = EXCLUDED.cid,
+                cmd_msg_id = EXCLUDED.cmd_msg_id,
+                user_id = EXCLUDED.user_id,
+                tag = EXCLUDED.tag,
+                state = EXCLUDED.state,
+                data = EXCLUDED.data
+            """,
+            (TgClient.ID, mid, cid, cmd_msg_id, user_id, tag, "dl", _jsonb(data)),
+        )
+
+    async def set_active_task_state(self, mid, state):
+        """Move a task along ``dl`` -> ``post`` -> ``up``.
+
+        Nothing else records where a task had got to, and the recovery pass
+        branches on exactly that: a task whose bytes are final must not be sent
+        back through the download funnel, which would split and extract files
+        that have already been processed.
+        """
+        if self._return:
+            return
+        await self._execute(
+            "UPDATE active_tasks SET state = %s WHERE bot_id = %s AND mid = %s",
+            (state, TgClient.ID, mid),
+        )
+
+    async def rm_active_task(self, mid):
+        if self._return:
+            return
+        await self._execute(
+            "DELETE FROM active_tasks WHERE bot_id = %s AND mid = %s",
+            (TgClient.ID, mid),
+        )
+
+    async def get_active_tasks(self) -> list[dict]:
+        """Every task a restart left behind, lowest id first.
+
+        Unlike ``get_incomplete_tasks`` this does not forget what it reads. A
+        row is dropped once recovery has placed its task or decided it cannot be
+        placed -- reading must not be the thing that loses it, because the pass
+        can fail partway and the rows it had not reached yet are exactly what a
+        second attempt needs.
+        """
+        if self._return:
+            return []
+        return await self._fetchall(
+            """
+            SELECT mid, cid, cmd_msg_id, user_id, tag, state, data
+            FROM active_tasks
+            WHERE bot_id = %s
+            ORDER BY mid
+            """,
+            (TgClient.ID,),
+        )
+
+    async def add_uploaded_file(
+        self, mid, relpath, seq, cid, msg_id, link, label, unit
+    ):
+        """Note one file this task has delivered, and where it landed.
+
+        Per file, next to the send that produced it, because the restart worth
+        surviving lands in the middle of a batch: a task that comes back with
+        half its files already delivered has to send the other half, not all of
+        them again.
+        """
+        if self._return:
+            return
+        await self._execute(
+            """
+            INSERT INTO uploaded_files
+                (bot_id, mid, relpath, seq, cid, msg_id, link, label, unit)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (bot_id, mid, relpath) DO UPDATE SET
+                seq = EXCLUDED.seq,
+                cid = EXCLUDED.cid,
+                msg_id = EXCLUDED.msg_id,
+                link = EXCLUDED.link,
+                label = EXCLUDED.label,
+                unit = EXCLUDED.unit
+            """,
+            (
+                TgClient.ID,
+                mid,
+                relpath,
+                seq,
+                cid,
+                msg_id,
+                link,
+                label,
+                _jsonb(unit) if unit is not None else None,
+            ),
+        )
+
+    async def rewrite_uploaded_album(self, mid, carried, cid, msg_id, link, unit):
+        """Re-point the files an album absorbed at the album's own message.
+
+        The messages an album carried are deleted the moment it goes out, so the
+        link recorded for each of them dies with them. The album is what
+        survives, which is why the rows have to name it instead: a resumed task
+        rebuilds its completion message from these rows, and a link to a deleted
+        message is worse than no link at all.
+
+        *carried* is the ``(chat id, message id)`` pairs the album absorbed.
+        """
+        if self._return or not carried:
+            return
+        rows = list(carried)
+        await self._execute(
+            f"""
+            UPDATE uploaded_files
+            SET cid = %s, msg_id = %s, link = %s, unit = %s
+            WHERE bot_id = %s AND mid = %s
+              AND (cid, msg_id) IN ({_values_clause(len(rows), 2)})
+            """,
+            (
+                cid,
+                msg_id,
+                link,
+                _jsonb(unit) if unit is not None else None,
+                TgClient.ID,
+                mid,
+                *[value for row in rows for value in row],
+            ),
+        )
+
+    async def get_uploaded_files(self, mid) -> list[dict]:
+        """What this task already delivered, in the order it delivered it."""
+        if self._return:
+            return []
+        return await self._fetchall(
+            """
+            SELECT relpath, seq, cid, msg_id, link, label, unit
+            FROM uploaded_files
+            WHERE bot_id = %s AND mid = %s
+            ORDER BY seq
+            """,
+            (TgClient.ID, mid),
+        )
+
+    async def rm_uploaded_files(self, mid):
+        if self._return:
+            return
+        await self._execute(
+            "DELETE FROM uploaded_files WHERE bot_id = %s AND mid = %s",
+            (TgClient.ID, mid),
+        )
 
     # -------------------------------------------------------- copy records
 

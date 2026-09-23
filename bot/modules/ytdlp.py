@@ -356,6 +356,10 @@ class YtDlp(CommandTask):
 
         LOGGER.info(f"Downloading with YT-DLP: {self.link}")
         playlist = "entries" in result
+        # After the quality question, which can hold the task for two minutes,
+        # and before the download itself: this is the first moment the task has
+        # a shape a restart could rebuild.
+        await self.record_active_task(args, "ytdl", "ytdlp", "", path)
         ydl = YoutubeDLHelper(self)
         await ydl.add_download(path, qual, playlist, opt)
 

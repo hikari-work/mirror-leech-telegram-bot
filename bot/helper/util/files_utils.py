@@ -13,7 +13,7 @@ from aiofiles.os import (
     makedirs as aiomakedirs,
 )
 
-from ... import LOGGER, DOWNLOAD_DIR
+from ... import LOGGER, DOWNLOAD_DIR, intervals
 from ...core.torrent_manager import TorrentManager
 from .bot_utils import sync_to_async, cmd_exec
 from .exceptions import NotSupportedExtractionArchive
@@ -172,6 +172,29 @@ async def clean_all():
     LOGGER.info("Cleaning Download Directory")
     await (await create_subprocess_exec("rm", "-rf", DOWNLOAD_DIR)).wait()
     await aiomakedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+async def sweep_unless_stopping(clean, opath):
+    """Run *clean* on *opath*, unless the bot is on its way down.
+
+    ``/restart`` sets ``stopAll`` and then spends several seconds running
+    ``update.py`` before it execs. A task that finishes, or fails, inside that
+    window would otherwise delete the directory a recovery pass is about to
+    look for -- and it is the one window in which deleting anything is exactly
+    the wrong thing to do, because a row on disk claims that directory. Left
+    alone, it is swept by the boot after this one, where nothing claims it.
+
+    The same-dir paths -- ``remove_from_same_dir`` clearing a group nobody
+    finished, ``_await_same_dir_merge`` clearing the directory it just moved its
+    files out of -- are deliberately left ungated. A same-dir member is not
+    resumable either way (its files live in the shared staging directory once
+    they move), so holding the delete back would not save a single byte; it
+    would only strand an empty directory, and the boot sweep cannot take the
+    staging one because it is named ``sd<mid>`` rather than a plain mid.
+    """
+    if intervals["stopAll"]:
+        return
+    await clean(opath)
 
 
 async def clean_unwanted(opath):

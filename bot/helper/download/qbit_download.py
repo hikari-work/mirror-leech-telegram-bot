@@ -51,6 +51,18 @@ the caller is about to send would have nothing to select.
 """
 
 
+def qbit_tag(mid) -> str:
+    """The tag qBittorrent files this task's torrent under.
+
+    The task id, which is the only handle a restarted bot has on a torrent the
+    dead process added -- qBittorrent survives the restart, so the torrent does
+    too, but nothing in it names the message that asked for it. One definition
+    for the three places that have to agree on it: the add, the metadata wait,
+    and the recovery pass looking the torrent back up.
+    """
+    return f"{mid}"
+
+
 async def _wait_for_metadata(listener, meta):
     """Poll until qBittorrent has the magnet's metadata, then return the torrent.
 
@@ -59,7 +71,7 @@ async def _wait_for_metadata(listener, meta):
     placeholder *meta* has been deleted by the time this returns.
     """
     while True:
-        tor_info = await TorrentManager.qbittorrent.torrents.info(tag=f"{listener.mid}")
+        tor_info = await TorrentManager.qbittorrent.torrents.info(tag=qbit_tag(listener.mid))
         if len(tor_info) == 0:
             await delete_message(meta)
             return None
@@ -88,7 +100,7 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
                 form = form.include_file(data)
         else:
             form = form.include_url(listener.link)
-        form = form.savepath(path).tags([f"{listener.mid}"])
+        form = form.savepath(path).tags([qbit_tag(listener.mid)])
         add_to_queue, event = await check_running_tasks(listener)
         if add_to_queue:
             form = form.stopped(add_to_queue)
@@ -109,13 +121,13 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
                 f"{e}. {listener.mid}. Already added torrent or unsupported link/file type!"
             )
             return
-        tor_info = await TorrentManager.qbittorrent.torrents.info(tag=f"{listener.mid}")
+        tor_info = await TorrentManager.qbittorrent.torrents.info(tag=qbit_tag(listener.mid))
         if len(tor_info) == 0:
             while True:
                 if add_to_queue and event.is_set():
                     add_to_queue = False
                 tor_info = await TorrentManager.qbittorrent.torrents.info(
-                    tag=f"{listener.mid}"
+                    tag=qbit_tag(listener.mid)
                 )
                 if len(tor_info) > 0:
                     break
@@ -126,7 +138,7 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
 
         async with task_dict_lock:
             task_dict[listener.mid] = QbittorrentStatus(listener, queued=add_to_queue)
-        await on_download_start(f"{listener.mid}")
+        await on_download_start(qbit_tag(listener.mid))
 
         if add_to_queue:
             LOGGER.info(f"Added to Queue/Download: {tor_info.name} - Hash: {ext_hash}")
@@ -162,11 +174,11 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
                 LOGGER.info(
                     f"Start Queued Download from Qbittorrent: {tor_info.name} - Hash: {ext_hash}"
                 )
-            await on_download_start(f"{listener.mid}")
+            await on_download_start(qbit_tag(listener.mid))
             await TorrentManager.qbittorrent.torrents.start([ext_hash])
     except (ClientError, TimeoutError, Exception, AQError) as e:
-        if f"{listener.mid}" in qb_torrents:
-            del qb_torrents[f"{listener.mid}"]
+        if qbit_tag(listener.mid) in qb_torrents:
+            del qb_torrents[qbit_tag(listener.mid)]
         await listener.on_download_error(f"{e}")
     finally:
         if await aiopath.exists(listener.link):

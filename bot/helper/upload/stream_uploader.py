@@ -67,6 +67,44 @@ _DROPPED_BY_STREAM: tuple[tuple[str, tuple[tuple[str, str, Any], ...]], ...] = (
 _MERGE_DROPPED = "files are sent one by one, so they are not merged into one folder"
 
 
+def apply_stream_policy(listener: Any) -> list[str]:
+    """Clear the flags whose work a stream skips, and say which they were.
+
+    Naming them is the point: a user who asked for a zip and did not get one has
+    to read why in the task's own message. Returns the lines it wrote, one per
+    group, so a caller can tell whether anything was dropped.
+
+    Clearing is unconditional once an attribute is truthy, and it has to be --
+    the seed branch of ``on_upload_complete`` expects files still on disk and an
+    upload directory, neither of which a stream has, and it returns before the
+    task is taken off the status list. ``-d``, the only way that attribute
+    becomes true, is therefore in the table rather than handled separately.
+
+    A module function rather than a method because the recovery pass needs the
+    same answer for a ``-su`` task it is rebuilding as a plain one, and it has
+    no uploader to ask. Two callers, one table: a flag that streaming drops
+    cannot be dropped by only one of them.
+    """
+    notices = []
+    for reason, entries in _DROPPED_BY_STREAM:
+        dropped = []
+        for attr, flag, cleared in entries:
+            if getattr(listener, attr, False):
+                dropped.append(flag)
+                setattr(listener, attr, cleared)
+        if dropped:
+            notices.append(_note(listener, dropped, reason))
+    return notices
+
+
+def _note(listener: Any, flags: list[str], reason: str) -> str:
+    """Append one notice to the task's message and to the log."""
+    text = f"Note: {', '.join(flags)} ignored: {reason}."
+    listener.stream_notices.append(text)
+    LOGGER.warning(text)
+    return text
+
+
 class StreamUploader:
     """Drive one ``TelegramUploader`` from a producer that keeps producing files.
 
@@ -163,26 +201,8 @@ class StreamUploader:
     # ── what streaming cannot do ────────────────────────────────────
 
     def _apply_policy(self) -> None:
-        """Clear the flags whose work a stream skips, and say which they were.
-
-        Naming them is the point: a user who asked for a zip and did not get one
-        has to read why in the task's own message.
-
-        Clearing is unconditional once an attribute is truthy, and it has to be
-        -- the seed branch of ``on_upload_complete`` expects files still on disk
-        and an upload directory, neither of which a stream has, and it returns
-        before the task is taken off the status list. ``-d``, the only way that
-        attribute becomes true, is therefore in the table rather than handled
-        separately.
-        """
-        for reason, entries in _DROPPED_BY_STREAM:
-            dropped = []
-            for attr, flag, cleared in entries:
-                if getattr(self._listener, attr, False):
-                    dropped.append(flag)
-                    setattr(self._listener, attr, cleared)
-            if dropped:
-                self._note(dropped, reason)
+        """Apply the streaming policy to this task's listener."""
+        apply_stream_policy(self._listener)
 
     async def _leave_same_dir(self) -> None:
         """Drop out of a same-dir group before anything is downloaded.
@@ -201,12 +221,7 @@ class StreamUploader:
         if not group or listener.mid not in group["tasks"]:
             return
         await listener.remove_from_same_dir()
-        self._note(["-m"], _MERGE_DROPPED)
-
-    def _note(self, flags: list[str], reason: str) -> None:
-        text = f"Note: {', '.join(flags)} ignored: {reason}."
-        self._listener.stream_notices.append(text)
-        LOGGER.warning(text)
+        _note(listener, ["-m"], _MERGE_DROPPED)
 
     # ── the consumer ────────────────────────────────────────────────
 

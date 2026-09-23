@@ -18,6 +18,17 @@ class DirectListener:
         self.download_task = None
         self.name = self.listener.name
         self._bunkr_lazy = bunkr_lazy
+        # Path -> gid for every download aria2 is still running, filled only in
+        # resume mode -- see ``adopt_running``.
+        self._live: dict[str, str] = {}
+        # Relative paths a previous run of this task already delivered, filled
+        # only in resume mode -- see ``adopt_running``.
+        self._delivered: set[str] = set()
+        # Whether this run is picking a previous one back up. It widens what
+        # ``_download_one`` is allowed to skip: a complete file on disk is
+        # something to leave alone when resuming, and something to fetch when
+        # the same album is asked for a second time.
+        self._resume = False
 
     @property
     def processed_bytes(self):
@@ -35,6 +46,37 @@ class DirectListener:
             else 0
         )
 
+    async def adopt_running(self) -> None:
+        """Pick up the aria2 downloads a restart left behind.
+
+        The engine is a daemon and never stopped, so the files this task was
+        pulling are still coming down; what died with the bot was only the
+        process that knew which task they belonged to. Matching on the path each
+        download is writing is what reconnects the two -- the gid is not a
+        handle that survives, and aria2 has no tag to hang a task id on.
+
+        One ``tellActive``/``tellWaiting`` pair covers the whole album, which is
+        what makes this affordable for a task of several hundred files.
+        """
+        from ..storage.db_handler import database
+
+        self._resume = True
+        for download in await TorrentManager.unfinished():
+            gid = download.get("gid", "")
+            for entry in download.get("files", []):
+                if path := entry.get("path", ""):
+                    self._live[path] = gid
+        # And what the previous run had already *sent*. A streamed file is
+        # deleted the moment it goes out, so it is missing from disk for a
+        # reason that has nothing to do with a failed download, and fetching it
+        # again would send the user a second copy of something they have. The
+        # checkpoints are keyed by the path the file was fetched to, which is
+        # the coordinate this loop works in.
+        self._delivered = {
+            row["relpath"]
+            for row in await database.get_uploaded_files(self.listener.mid)
+        }
+
     async def _download_one(self, content):
         """Download a single content entry. Returns file path on success, None on failure."""
         if content["path"]:
@@ -43,6 +85,26 @@ class DirectListener:
             self._a2c_opt["dir"] = self._path
         filename = content["filename"]
         self._a2c_opt["out"] = filename
+        target = ospath.join(self._a2c_opt["dir"], filename)
+        if gid := self._live.pop(target, ""):
+            # Already coming down: poll the download that is already running
+            # rather than adding a second one for the same file.
+            LOGGER.info(f"Resuming aria2 download {filename} on gid {gid}")
+            return await self._await_download(gid, target)
+        if self._resume and ospath.relpath(target, self._path) in self._delivered:
+            # Sent by the run this one continues, and deleted straight after --
+            # which is what a stream does with every file it delivers, and is
+            # why the path is missing rather than merely incomplete. Its message
+            # is already in the report, read back from the same checkpoints.
+            LOGGER.info(f"Already sent, skipping: {target}")
+            return target
+        if self._resume and await self._is_complete(target):
+            # Finished by the run this one is resuming, and still on disk
+            # because nothing swept it. Adding it again would only make aria2
+            # rename the good copy out of the way -- ``--allow-overwrite`` and
+            # ``--auto-file-renaming`` between them.
+            LOGGER.info(f"Already downloaded, skipping: {target}")
+            return target
         try:
             gid = await TorrentManager.aria2.addUri(
                 uris=[content["url"]], options=self._a2c_opt, position=0
@@ -51,6 +113,22 @@ class DirectListener:
             self._failed += 1
             LOGGER.error(f"Unable to download {filename} due to: {e}")
             return None
+        return await self._await_download(gid, target)
+
+    @staticmethod
+    async def _is_complete(target: str) -> bool:
+        """Whether *target* is a finished file rather than one still arriving.
+
+        aria2 leaves a ``.aria2`` control file beside anything it has not
+        finished, and with ``--continue=true`` it picks the bytes up from there.
+        A file without one is what the last run left behind complete.
+        """
+        return await aiopath.exists(target) and not await aiopath.exists(
+            f"{target}.aria2"
+        )
+
+    async def _await_download(self, gid, target):
+        """Wait out one aria2 download and answer the path it produced."""
         self.download_task = await TorrentManager.aria2.tellStatus(gid)
         while True:
             if self.listener.is_cancelled:
@@ -68,9 +146,8 @@ class DirectListener:
             elif self.download_task.get("status", "") == "complete":
                 self._proc_bytes += int(self.download_task.get("totalLength", "0"))
                 await TorrentManager.aria2_remove(self.download_task)
-                file_path = ospath.join(self._a2c_opt["dir"], filename)
                 self.download_task = None
-                return file_path
+                return target
             await sleep(1)
 
     async def download(self, contents):

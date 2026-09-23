@@ -8,7 +8,7 @@ and ``-i`` (multi count) into one place.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 from .bot_utils import arg_parser
@@ -251,7 +251,101 @@ def parse_ytdlp_args(input_list: list[str]) -> YtdlpArgs:
     return ya
 
 
+# ── persistence ─────────────────────────────────────────────────────
+
+_ARGS_TYPES: dict[str, type[CommonArgs]] = {
+    "LeechArgs": LeechArgs,
+    "YtdlpArgs": YtdlpArgs,
+}
+
+ARGS_SCHEMA = 1
+"""Version of a dumped argument document.
+
+A restart runs ``update.py`` before the bot comes back, so the code that reads
+a document may not be the code that wrote it. A reader that does not recognise
+the version refuses the row and reports the task rather than rebuilding it from
+fields it only half understands.
+"""
+
+_SET_TAG = "$set"
+_TUPLE_TAG = "$tuple"
+"""JSON has neither, and ``ffmpeg_cmds`` is a set of tuples. Both go out tagged
+so a round trip cannot turn a set into a list and leave ``_resolve_ffmpeg_commands``
+iterating something it would not have been given."""
+
+
+def dump_args(args: CommonArgs) -> dict[str, Any]:
+    """A task's parsed arguments as a document a jsonb column can hold.
+
+    Taken at dispatch, which is *after* the option keyboard has had its say. A
+    user who toggled ``-s3`` or picked a copy preset changed the arguments
+    without changing the message they sent, so re-parsing the command text on
+    the way back would quietly undo those choices.
+    """
+    name = type(args).__name__
+    if name not in _ARGS_TYPES:
+        raise ValueError(f"Unknown argument type: {name}")
+    return {
+        "schema": ARGS_SCHEMA,
+        "type": name,
+        "args": _encode(asdict(args)),
+    }
+
+
+def load_args(data: dict[str, Any]) -> CommonArgs:
+    """Rebuild the arguments :func:`dump_args` wrote.
+
+    Fields the dataclass no longer has are dropped rather than raising, so a
+    document written before a field was removed still loads -- the recovery
+    pass has a task to save and a missing option is not a reason to drop it.
+    A field that is *new* simply takes its default.
+    """
+    if data.get("schema") != ARGS_SCHEMA:
+        raise ValueError(f"Unknown argument schema: {data.get('schema')}")
+    name = data.get("type")
+    cls = _ARGS_TYPES.get(name)
+    if cls is None:
+        raise ValueError(f"Unknown argument type: {name}")
+    known = {f.name for f in fields(cls)}
+    decoded = _decode(data.get("args") or {})
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Argument document is not an object: {name}")
+    return cls(**{key: value for key, value in decoded.items() if key in known})
+
+
 # ── internal helpers ────────────────────────────────────────────────
+
+
+def _encode(value: Any) -> Any:
+    """Tag the two container types JSON cannot carry, and recurse the rest."""
+    if isinstance(value, set):
+        return {_SET_TAG: [_encode(item) for item in value]}
+    if isinstance(value, tuple):
+        return {_TUPLE_TAG: [_encode(item) for item in value]}
+    if isinstance(value, dict):
+        return {key: _encode(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_encode(item) for item in value]
+    return value
+
+
+def _decode(value: Any) -> Any:
+    """Undo :func:`_encode`.
+
+    A tag is recognised by being a mapping whose only key is the tag, which is
+    what ``_encode`` produces. ``opt`` is the one dict that could in principle
+    collide, and a yt-dlp option actually named ``$set`` is not a case worth
+    losing a set to.
+    """
+    if isinstance(value, dict):
+        if list(value) == [_SET_TAG]:
+            return {_decode(item) for item in value[_SET_TAG]}
+        if list(value) == [_TUPLE_TAG]:
+            return tuple(_decode(item) for item in value[_TUPLE_TAG])
+        return {key: _decode(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode(item) for item in value]
+    return value
 
 
 def _parse_raw(defaults: RawArgs, input_list: list[str]) -> RawArgs:

@@ -7,8 +7,19 @@ two places to edit whenever an option is added, which is how the lists came to
 disagree about which options each command honours.
 """
 
-from ..util.task_args import COMMON_ARG_FIELDS
+from ... import LOGGER
+from ..telegram.message_utils import chat_of
+from ..util.task_args import COMMON_ARG_FIELDS, dump_args
 from .task_listener import TaskListener
+
+ACTIVE_TASK_SCHEMA = 1
+"""Version of an ``active_tasks.data`` document.
+
+A restart runs ``update.py`` before the bot comes back, so the code that reads a
+row may not be the code that wrote it. A reader that does not recognise this
+number refuses the row and leaves the task to the incomplete-task notifier
+rather than rebuilding a listener out of fields it only half understands.
+"""
 
 
 class CommandTask(TaskListener):
@@ -94,3 +105,60 @@ class CommandTask(TaskListener):
             # the upload rather than the option.
             self.stream_upload = False
             self.screen_shots = False
+
+    # ── restart recovery ────────────────────────────────────────────
+
+    async def record_active_task(self, args, handler, engine, engine_tag="", engine_dir=""):
+        """Leave behind what a restart would need to pick this task back up.
+
+        Written where the download is handed to its engine and nowhere else. A
+        task still parked on the option keyboard holds no engine job and
+        nothing on disk, so there is nothing to come back to; a task that has
+        reached this point has already been through ``before_start`` and had
+        its options settled.
+
+        The arguments are the ones the keyboard left behind rather than the
+        command text: a user who toggled ``-s3`` or picked a copy preset changed
+        the arguments without changing the message they sent, and re-parsing the
+        text on the way back would quietly undo those choices.
+
+        Never raises. A database that is down costs the task its resumability,
+        which is worth far less than the task itself -- and this runs on the
+        path that starts the download.
+        """
+        try:
+            from ..storage.db_handler import database
+
+            await database.add_active_task(
+                self.mid,
+                chat_of(self.message).id,
+                self.cmd_msg_id,
+                self.user_id,
+                self.tag,
+                {
+                    "schema": ACTIVE_TASK_SCHEMA,
+                    "handler": handler,
+                    "engine": engine,
+                    # What the engine files the job under, for the engines that
+                    # have such a thing: qBittorrent keeps the task id as its
+                    # tag. aria2 is matched on its ``dir`` instead, because a
+                    # magnet's gid changes the moment its metadata arrives.
+                    "engine_tag": engine_tag,
+                    # The path as it was handed to the engine, not one computed
+                    # again on the way back: aria2 is re-attached by matching
+                    # this against the ``dir`` its downloads were added with.
+                    "engine_dir": engine_dir,
+                    "args": dump_args(args),
+                    "cmd_text": self.cmd_text,
+                    "folder_name": self.folder_name,
+                    "multi": self.multi,
+                    "multi_tag": self.multi_tag,
+                    # A resolved direct link is a dict carrying the file list,
+                    # the headers and the size, and rebuilding it means scraping
+                    # the page again -- possibly after the session that made it
+                    # work has expired.
+                    "link": self.link,
+                },
+            )
+        except Exception as e:
+            LOGGER.error(f"Unable to record active task {self.mid}: {e}")

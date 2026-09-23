@@ -31,7 +31,7 @@ from ..helper.download.mega_download import (
 from ..helper.download.pornhub_download import (
     add_pornhub_download,
 )
-from ..helper.download.qbit_download import add_qb_torrent
+from ..helper.download.qbit_download import add_qb_torrent, qbit_tag
 from ..helper.download.telegram_download import (
     TelegramDownloadHelper,
 )
@@ -269,6 +269,34 @@ class Leech(CommandTask):
 
     async def _dispatch_download(self, path, args, headers, file_, reply_to, session):
         """Start the appropriate downloader."""
+        # Before the first engine call, so a task is on the books before it can
+        # own anything -- and with the arguments as the option keyboard left
+        # them, since the downloaders below never see the command text again.
+        if file_ is not None:
+            engine = "telegram"
+        elif isinstance(self.link, dict):
+            if self.link.get("ytdlp"):
+                engine = "ytdlp"
+            elif self.link.get("mega"):
+                engine = "mega"
+            elif self.link.get("pornhub"):
+                engine = "pornhub"
+            elif self.link.get("vidara"):
+                engine = "vidara"
+            else:
+                engine = "direct"
+        elif self.is_qbit:
+            engine = "qbit"
+        else:
+            engine = "aria2"
+        await self.record_active_task(
+            args,
+            "leech",
+            engine,
+            qbit_tag(self.mid) if engine == "qbit" else "",
+            path,
+        )
+
         if file_ is not None:
             await TelegramDownloadHelper(self).add_download(
                 reply_to, f"{path}/", session

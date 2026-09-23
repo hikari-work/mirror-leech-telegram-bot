@@ -32,7 +32,7 @@ async def main():
         update_qb_options(),
         update_aria2_options(),
     )
-    from .helper.util.files_utils import clean_all
+    from .core.task_recovery import recover_tasks
     from .helper.util.telegraph_helper import telegraph
     from .modules import (
         initiate_search_tools,
@@ -42,12 +42,20 @@ async def main():
 
     await gather(
         save_settings(),
-        clean_all(),
         initiate_search_tools(),
         get_packages_version(),
-        restart_notification(),
         telegraph.create_account(),
     )
+    # Sequentially, and not in the gather above. ``clean_all`` used to run here
+    # on every boot, wiping the download directory and both engines whatever had
+    # happened -- which is what made a restart cost every running task. It is
+    # replaced by a pass that adopts what the engines are still holding and
+    # sweeps only what nothing is coming back for.
+    await recover_tasks()
+    # After recovery, never beside it: the notifier reads the same task tables
+    # and tells users to send again whatever has no row left. Racing the two
+    # means it can read the rows before recovery has cleared the ones it placed.
+    await restart_notification()
 
 
 bot_loop.run_until_complete(main())

@@ -33,6 +33,7 @@ from ... import intervals
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient, user_session
 from ..storage.copy_records import fan_out, group_unit, record, single_unit, strike
+from ..storage.db_handler import database
 from ..telegram.flood import flood_seconds
 from ..telegram.message_utils import chat_of, delete_message
 from ..util.bot_utils import sync_to_async
@@ -120,6 +121,11 @@ class TelegramUploader:
         # from `Config.DATABASE_URL` in `_user_settings`: with no database
         # there is nowhere to hand the units to, so none are collected.
         self._record_units = False
+        # What a previous run of this task already delivered, as paths relative
+        # to `_path`, and how far its sequence got. Empty for a task that is
+        # not resuming anything -- see `_seed_from_checkpoint`.
+        self._sent_paths = set()
+        self._seq = 0
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -391,13 +397,18 @@ class TelegramUploader:
         # to be deleted -- there is nothing left to copy one at a time.
         carried = {(msg.chat.id, msg.id) for msg in originals}
         self._uncopied = [msg for msg in self._uncopied if msg not in carried]
+        unit = group_unit(sent)
         if self._record_units:
             # The album replaces what it carried, so the per-message units
             # already booked for those are struck and one unit for the whole
             # album takes their place -- in send order, which is the order the
             # next file's unit will land after.
             strike(self._listener.copy_units, carried)
-            record(self._listener.copy_units, group_unit(sent))
+            record(self._listener.copy_units, unit)
+        # Same replacement, in the record a restart reads: the messages the
+        # album absorbed are deleted below, and their coordinates are what a
+        # resumed task would rebuild its report from.
+        await self._checkpoint_album(carried, sent[-1], unit)
         for msg in originals:
             if msg.link in self._msgs_dict:
                 del self._msgs_dict[msg.link]
@@ -564,11 +575,48 @@ class TelegramUploader:
             None, self._msgs_dict, self._total_files, self._corrupted
         )
 
+    async def _seed_from_checkpoint(self):
+        """Take back what an earlier run of this task had already delivered.
+
+        Called after ``_msg_to_reply``, which is what settles ``_is_private``
+        and so the one thing the report below branches on.
+
+        Restores the two counters the rest of the uploader runs on. The file
+        total is not book-keeping: a resumed task whose every file was already
+        sent arrives at ``_finish`` with nothing to send, and a total of zero
+        there means "No files to upload" -- a failure message for a task that
+        succeeded. The message map is what the completion report is built from,
+        and telegram is the only other place those messages exist.
+        """
+        rows = await database.get_uploaded_files(self._listener.mid)
+        if not rows:
+            return
+        self._seq = rows[-1]["seq"]
+        self._sent_paths = {row["relpath"] for row in rows}
+        self._total_files = len(rows)
+        links = (
+            self._files_links
+            and (self._listener.is_super_chat or self._listener.up_dest)
+            and not self._is_private
+        )
+        for row in rows:
+            if links and row["link"]:
+                self._msgs_dict[row["link"]] = row["label"]
+            if self._record_units:
+                # same order the units were recorded in, so the album that is
+                # still to come lands after them
+                record(self._listener.copy_units, row["unit"])
+        LOGGER.info(
+            f"Resumed upload with {len(rows)} of this task's files already sent:"
+            f" {self._listener.name}"
+        )
+
     async def upload(self):
         await self._user_settings()
         res = await self._msg_to_reply()
         if not res:
             return
+        await self._seed_from_checkpoint()
         walk_result = await sync_to_async(lambda: list(walk(self._path)))
         for dirpath, _, files in natsorted(walk_result):
             if dirpath.strip().endswith("/yt-dlp-thumb"):
@@ -581,6 +629,13 @@ class TelegramUploader:
             for file_ in natsorted(files):
                 self._error = ""
                 self._up_path = f_path = ospath.join(dirpath, file_)
+                if ospath.relpath(f_path, self._path) in self._sent_paths:
+                    # Sent by the run this one continues, and still on disk
+                    # because the removal that follows a send failed. Its
+                    # message is already in the report built above, so this one
+                    # would be a duplicate in every sense.
+                    LOGGER.info(f"Already uploaded, skipping: {f_path}")
+                    continue
                 if not await aiopath.exists(self._up_path):
                     if intervals["stopAll"]:
                         return
@@ -758,13 +813,65 @@ class TelegramUploader:
             # an album carried, and what survives is copied at the end.
             sent = self.anchor
             self._uncopied.append((chat_of(sent).id, sent.id))
+        unit = single_unit(self.anchor)
         if self._record_units:
             # Same moment as `_uncopied`, but for every task: this is what a
             # later /copy replays, and an album that carries this message
             # strikes the unit below just as it strikes `_uncopied`.
-            record(self._listener.copy_units, single_unit(self.anchor))
+            record(self._listener.copy_units, unit)
+        # And written down for a restart, which is the one thing telegram keeps
+        # no record of. `o_path` and "this file has been sent" are both known
+        # here and nowhere else.
+        await self._checkpoint_sent(o_path, file, unit)
         await self._batcher.track(o_path)
         return True
+
+    async def _checkpoint_sent(self, o_path, label, unit):
+        """Note that ``o_path`` is delivered, and where it landed.
+
+        Written next to the send rather than in any of the callers above it: a
+        task can be restarted between two files of the same album, and a
+        checkpoint taken at the end of the batch would have nothing to say about
+        the ones already gone. The file is deleted right after this, so the row
+        is also the only surviving evidence it was ever uploaded.
+
+        Never raises. A checkpoint that cannot be written costs the task its
+        resumability, which is worth far less than the upload it is part of.
+        """
+        self._seq += 1
+        try:
+            await database.add_uploaded_file(
+                self._listener.mid,
+                ospath.relpath(o_path, self._path),
+                self._seq,
+                chat_of(self.anchor).id,
+                self.anchor.id,
+                self.anchor.link or "",
+                label,
+                unit,
+            )
+        except Exception as e:
+            LOGGER.error(f"Unable to record uploaded file {o_path}: {e}")
+
+    async def _checkpoint_album(self, carried, anchor, unit):
+        """Re-point the files an album absorbed at the album's own message.
+
+        The album is what survives -- the messages it carried are deleted in
+        ``retire_group`` -- so the coordinates each of them was recorded with
+        name a message telegram no longer has. The album's own coordinates are
+        what the next reader of those rows has to see.
+        """
+        try:
+            await database.rewrite_uploaded_album(
+                self._listener.mid,
+                carried,
+                chat_of(anchor).id,
+                anchor.id,
+                anchor.link or "",
+                unit,
+            )
+        except Exception as e:
+            LOGGER.error(f"Unable to record album for {self._listener.mid}: {e}")
 
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),

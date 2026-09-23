@@ -40,6 +40,7 @@ from ..telegram.message_utils import (
 from ..upload.s3_uploader import S3Uploader
 from ..upload.telegram_uploader import TelegramUploader
 from ..util.files_utils import (
+    sweep_unless_stopping,
     clean_download,
     clean_target,
     create_recursive_symlink,
@@ -170,6 +171,13 @@ class TaskListener(TaskConfig):
             )
 
     async def on_download_complete(self):
+        # Before anything else, and before the sleep below rather than after it.
+        # This method is not re-entrant -- the split, extract and join below all
+        # rewrite files in place -- so the moment it starts, the task has left
+        # the stage a restart could put it back into. Recording that first means
+        # a bot that dies mid-post-processing reports the task as unfinished
+        # instead of running the pipeline over half-processed files.
+        await database.set_active_task_state(self.mid, "post")
         await sleep(2)
         if self.is_cancelled:
             # give the slot back, or the last sibling waits for a total that
@@ -418,6 +426,11 @@ class TaskListener(TaskConfig):
 
     async def _start_upload(self, up_dir, gid):
         """Queue the upload if needed, then hand the files to their destination."""
+        # The bytes are final by now: everything the download funnel does is
+        # done, so a restart from here must go straight to the upload and must
+        # not be sent back through ``on_download_complete``, which would split
+        # and extract files that have already been split and extracted.
+        await database.set_active_task_state(self.mid, "up")
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
@@ -522,15 +535,23 @@ class TaskListener(TaskConfig):
                 if fmsg != "":
                     await send_message(self.message, msg + fmsg)
 
+        # The completion message is out, which is what a resumed task would have
+        # been resuming for. Dropped here rather than at the top of the method
+        # so a bot that dies while sending it comes back to a task that is
+        # still on the books -- and, with the uploaded-file record, one that
+        # knows which files it may not send a second time.
+        await database.rm_active_task(self.mid)
+        await database.rm_uploaded_files(self.mid)
+
         if self.seed:
-            await clean_target(self.up_dir)
+            await sweep_unless_stopping(clean_target, self.up_dir)
             async with queue_dict_lock:
                 if self.mid in non_queued_up:
                     non_queued_up.remove(self.mid)
                 upload_chat_of.pop(self.mid, None)
             await start_from_queued()
             return
-        await clean_download(self.dir)
+        await sweep_unless_stopping(clean_download, self.dir)
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
@@ -606,6 +627,13 @@ class TaskListener(TaskConfig):
         after this one was removed, which decides whether the status message is
         torn down or merely refreshed.
         """
+        # Nothing here is worth coming back to -- the task failed, and the
+        # ``clean_download`` below is about to remove what it left on disk.
+        # Dropped first, so a restart cannot adopt a directory this method is in
+        # the middle of deleting.
+        await database.rm_active_task(self.mid)
+        await database.rm_uploaded_files(self.mid)
+
         if count == 0:
             await self.clean()
         else:
@@ -633,9 +661,9 @@ class TaskListener(TaskConfig):
 
         await start_from_queued()
         await sleep(3)
-        await clean_download(self.dir)
+        await sweep_unless_stopping(clean_download, self.dir)
         if self.up_dir:
-            await clean_download(self.up_dir)
+            await sweep_unless_stopping(clean_download, self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
 

@@ -473,6 +473,136 @@ async def test_disconnect_after_connect_returns_to_noop(dbm):
     assert await dbm.get_blob("a", bot_id=dbm._bot) is None
 
 
+# ── the two tables a restart reads ────────────────────────────────────
+
+
+async def test_an_active_task_survives_the_reconnection_it_exists_for(dbm) -> None:
+    """Written before a restart, read after one -- which is a reconnection.
+
+    ``data`` carries the parsed arguments, and one of them is a set of tuples:
+    neither type exists in json, so the serializer tags both. What this checks is
+    that the tag survives the jsonb column rather than being flattened into a
+    list on the way in, because a reader handed a list would give
+    ``_resolve_ffmpeg_commands`` something the task never had.
+    """
+    from bot.helper.util.task_args import LeechArgs, dump_args, load_args
+
+    args = LeechArgs(
+        extract="pw",
+        ffmpeg_cmds={("-vf", "scale=1280:-2"), ("-c:a", "aac")},
+        headers=["cookie: x"],
+    )
+    await dbm.add_active_task(
+        42, -100, 10, 7, "@user",
+        {"schema": 1, "engine": "aria2", "engine_dir": "/d/42", "args": dump_args(args)},
+    )
+
+    await dbm.disconnect()
+    await dbm.connect()
+
+    (row,) = await dbm.get_active_tasks()
+    assert row["mid"] == 42
+    assert row["state"] == "dl"
+    assert row["data"]["engine_dir"] == "/d/42"
+    rebuilt = load_args(row["data"]["args"])
+    assert isinstance(rebuilt.ffmpeg_cmds, set)
+    assert rebuilt.ffmpeg_cmds == args.ffmpeg_cmds
+    assert rebuilt.extract == "pw"
+    assert rebuilt.headers == ["cookie: x"]
+
+
+async def test_a_dispatched_task_is_replaced_rather_than_duplicated(dbm) -> None:
+    """One row per task, describing the run that is happening now.
+
+    A task can reach the dispatch twice -- the option keyboard applied again, a
+    re-queue -- and two rows for one mid would have the recovery pass rebuild it
+    twice, each against the same engine job.
+    """
+    await dbm.add_active_task(42, -100, 10, 7, "@u", {"schema": 1})
+    await dbm.add_active_task(42, -100, 11, 7, "@u", {"schema": 1, "engine": "qbit"})
+
+    rows = await dbm.get_active_tasks()
+
+    assert len(rows) == 1
+    assert rows[0]["cmd_msg_id"] == 11
+    assert rows[0]["data"]["engine"] == "qbit"
+
+
+async def test_one_bots_task_row_is_not_another_bots(dbm, monkeypatch) -> None:
+    """Two bots can share a message id, and the pass reads only its own."""
+    from bot.core.telegram_manager import TgClient
+
+    await dbm.add_active_task(42, -100, 10, 7, "@u", {"schema": 1})
+    monkeypatch.setattr(TgClient, "ID", "another-bot")
+
+    assert await dbm.get_active_tasks() == []
+
+
+async def test_uploaded_files_come_back_in_the_order_they_were_sent(dbm) -> None:
+    """Order is what the completion report is rebuilt from."""
+    for seq, name in enumerate(["album/b.mkv", "album/a.mkv"], start=1):
+        await dbm.add_uploaded_file(
+            42, name, seq, -100, 100 + seq, f"https://t/{seq}", name, None
+        )
+
+    rows = await dbm.get_uploaded_files(42)
+
+    # by send order, not by name: b went out first
+    assert [row["relpath"] for row in rows] == ["album/b.mkv", "album/a.mkv"]
+    assert [row["seq"] for row in rows] == [1, 2]
+
+
+async def test_the_files_an_album_absorbed_are_re_pointed_at_the_album(dbm) -> None:
+    """The messages the album carried are deleted, so their links die with them.
+
+    A resumed task rebuilds its report from these rows, and a link to a message
+    telegram no longer has is worse than no link at all.
+    """
+    await dbm.add_uploaded_file(42, "a.mkv", 1, -100, 10, "https://t/10", "a", None)
+    await dbm.add_uploaded_file(42, "b.mkv", 2, -100, 11, "https://t/11", "b", None)
+
+    await dbm.rewrite_uploaded_album(
+        42,
+        # a list, not a set: the two conditions go into the statement in this
+        # order, and a set would hand them over in an arbitrary one
+        [(-100, 10), (-100, 11)],
+        -100,
+        99,
+        "https://t/99",
+        {"m": 1},
+    )
+
+    rows = await dbm.get_uploaded_files(42)
+    assert [(r["msg_id"], r["link"]) for r in rows] == [(99, "https://t/99")] * 2
+
+
+async def test_rerecording_a_file_updates_it_in_place(dbm) -> None:
+    """A file sent twice must be counted once, or the report says it twice."""
+    await dbm.add_uploaded_file(42, "a.mkv", 1, -100, 10, "https://t/10", "a", None)
+    await dbm.add_uploaded_file(42, "a.mkv", 5, -100, 99, "", "a", None)
+
+    rows = await dbm.get_uploaded_files(42)
+
+    assert len(rows) == 1
+    assert rows[0]["seq"] == 5
+    assert rows[0]["msg_id"] == 99
+
+
+async def test_clearing_one_task_leaves_the_others_alone(dbm) -> None:
+    """Two tasks can be uploading at once, and only one of them is finishing."""
+    await dbm.add_active_task(42, -100, 10, 7, "@u", {"schema": 1})
+    await dbm.add_active_task(43, -100, 11, 7, "@u", {"schema": 1})
+    await dbm.add_uploaded_file(42, "a.mkv", 1, -100, 10, "", "a", None)
+    await dbm.add_uploaded_file(43, "b.mkv", 1, -100, 11, "", "b", None)
+
+    await dbm.rm_active_task(42)
+    await dbm.rm_uploaded_files(42)
+
+    assert [row["mid"] for row in await dbm.get_active_tasks()] == [43]
+    assert await dbm.get_uploaded_files(42) == []
+    assert [row["relpath"] for row in await dbm.get_uploaded_files(43)] == ["b.mkv"]
+
+
 # ── two tasks writing at the same time ────────────────────────────────
 
 _INSERT_TASK = """

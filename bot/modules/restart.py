@@ -12,7 +12,6 @@ from ..helper.telegram.message_utils import (
     delete_message,
 )
 from ..helper.storage.db_handler import database
-from ..helper.util.files_utils import clean_all
 from ..helper.telegram.button_build import ButtonMaker
 from ..core.telegram_manager import TgClient
 from ..core.config_manager import Config
@@ -96,13 +95,19 @@ async def confirm_restart(_, query):
         if st := intervals["status"]:
             for intvl in list(st.values()):
                 intvl.cancel()
-        await clean_all()
         await TorrentManager.close_all()
+        # No ``clean_all``, and the engines are absent from the pattern below.
+        # Both are what made a restart cost every running task: the downloads
+        # are the engines' and they survive this process, so wiping the
+        # directory or killing the daemons threw away work that had nothing
+        # wrong with it. What is left in the pattern is this process's own
+        # children -- gunicorn, and the ffmpeg/7z/split children of a post
+        # processing stage, which really do have to go with it.
         proc1 = await create_subprocess_exec(
             "pkill",
             "-9",
             "-f",
-            "gunicorn|aria2c|qbittorrent-nox|ffmpeg|7z|split",
+            "gunicorn|ffmpeg|7z|split",
         )
         proc2 = await create_subprocess_exec("python3", "update.py")
         await gather(proc1.wait(), proc2.wait())

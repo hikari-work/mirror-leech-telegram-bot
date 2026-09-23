@@ -2,6 +2,7 @@ from aiofiles.os import path as aiopath, makedirs
 from aiofiles import open as aiopen
 from asyncio import create_subprocess_shell
 from os.path import dirname
+from socket import AF_INET, SOCK_STREAM, socket
 
 from .. import (
     aria2_options,
@@ -329,6 +330,39 @@ async def update_variables():
             included_extensions.append(x.strip().lower())
 
 
+ARIA2_RPC_PORT = 6800
+QBITTORRENT_WEBUI_PORT = 8090
+"""The two ports ``aria-nox.sh`` puts behind, as they are fixed in the script.
+
+Everything downstream of this file talks to both over these, so they are named
+once here rather than repeated as literals at each of the three places that
+already hardcode them.
+"""
+
+
+def _listening(port: int) -> bool:
+    """Whether something is already answering on *port* locally.
+
+    A plain connect with a short timeout: a refusal or a timeout both mean
+    nothing is there, which is the only distinction the caller makes. The
+    connection is closed again either way, so a probe cannot hold a slot in a
+    server's backlog.
+    """
+    with socket(AF_INET, SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _engine_running() -> bool:
+    """Whether the download engines this bot was started against are already up.
+
+    Either port answering is enough to say the script has run -- the two are
+    started by the same script and the same shell line, so one surviving means
+    the boot that needed this one is a restart rather than a cold start.
+    """
+    return _listening(ARIA2_RPC_PORT) or _listening(QBITTORRENT_WEBUI_PORT)
+
+
 async def load_configurations():
 
     if not await aiopath.exists(".netrc"):
@@ -337,9 +371,17 @@ async def load_configurations():
 
     await (
         await create_subprocess_shell(
-            "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox.sh && ./aria-nox.sh"
+            "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox.sh"
         )
     ).wait()
+
+    if not _engine_running():
+        # Both engines are daemons and outlive the bot process, so on a restart
+        # -- which is the common case, and the one a resumed task depends on --
+        # they are already up and starting them again would cost a second
+        # daemon or a failed bind. The script also curls a tracker list on every
+        # boot, which is a network round trip this skips along with it.
+        await (await create_subprocess_shell("./aria-nox.sh")).wait()
 
     if Config.BASE_URL:
         await create_subprocess_shell(
