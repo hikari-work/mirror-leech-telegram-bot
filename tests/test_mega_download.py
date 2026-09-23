@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from asyncio import gather, sleep
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -267,6 +268,59 @@ class _CDN:
 
     async def __aexit__(self, *exc):
         return False
+
+
+class _OverlapCDN:
+    """Stands in for aiohttp, counting how many segment requests are open at
+    the same time.
+
+    ``_CDN`` answers in one go, so nothing ever overlaps and a missing ceiling
+    would go unnoticed. This one suspends halfway through the body: every
+    coroutine started alongside it gets to open its own request before this one
+    finishes, which is what makes the running count meaningful.
+    """
+
+    def __init__(self, body):
+        self.body = body
+        self.in_flight = 0
+        self.peak = 0
+
+    def get(self, url, headers=None):
+        return _OverlapResponse(self, headers or {})
+
+
+class _OverlapResponse:
+    def __init__(self, cdn, headers):
+        self._cdn = cdn
+        start, end = 0, len(cdn.body) - 1
+        if (rng := headers.get("Range", "")).startswith("bytes="):
+            first, _, last = rng[6:].partition("-")
+            start = int(first)
+            if last:
+                end = min(end, int(last))
+        self._chunk = cdn.body[start : end + 1]
+        self.status = 206 if start else 200
+
+    async def __aenter__(self):
+        self._cdn.in_flight += 1
+        self._cdn.peak = max(self._cdn.peak, self._cdn.in_flight)
+        return self
+
+    async def __aexit__(self, *exc):
+        self._cdn.in_flight -= 1
+        return False
+
+    @property
+    def content(self):
+        return self
+
+    async def iter_chunked(self, size):
+        take = min(size, max(1, (len(self._chunk) + 1) // 2))
+        at = 0
+        while at < len(self._chunk):
+            await sleep(0)
+            yield self._chunk[at : at + take]
+            at += take
 
 
 @pytest.fixture
@@ -559,3 +613,51 @@ async def test_cancellation_stops_writing(mega_dl, mc, tmp_path, monkeypatch):
     await helper._segment(cdn, "u", str(dest), AES_KEY, NONCE, 0, len(plain) - 1, [0])
 
     assert helper.processed_bytes == 0
+
+
+async def test_session_caps_the_connector(mega_dl, tmp_path, monkeypatch):
+    """The gate keeps requests out of the connector's queue; this is the
+    backstop for anything that reaches it anyway. aiohttp's default is 100, and
+    the queue it builds past that is where a request cancelled by the rotation
+    retry can lose track of its socket."""
+    helper, _ = _helper(mega_dl, tmp_path, monkeypatch)
+
+    async with helper._session() as session:
+        assert session.connector.limit == mega_dl.MAX_CONNECTIONS
+
+
+async def test_segments_never_exceed_the_connection_ceiling(
+    mega_dl, mc, tmp_path, monkeypatch
+):
+    """Sockets are bounded by the pool width times the per-worker semaphore, so
+    it is the pool that decides how many are open -- 102 proxies in production
+    meant hundreds of requests in flight at once, and the run of 2026-09-23
+    died of it."""
+    proxies = " ".join(f"https://proxy-{n}.dev" for n in range(1, 101))
+    monkeypatch.setattr(mega_dl.Config, "MEGA_PROXY_URL", proxies, raising=False)
+
+    plain = bytes(range(256)) * 65536  # 16 MiB
+    cdn = _OverlapCDN(_ciphertext(mc, plain))
+    helper, _ = _helper(mega_dl, tmp_path, monkeypatch)
+
+    # 100 workers x PER_WORKER_CONNECTIONS slots is well past the ceiling, so
+    # nothing but the gate is left to bound the run below.
+    assert len(helper._worker_sems) == 100
+
+    dest = Path(tmp_path / "wide.bin")
+    dest.write_bytes(b"\0" * len(plain))
+    step = 64 * 1024
+    last = len(plain) - 1
+    await gather(
+        *(
+            helper._segment(
+                cdn, "u", str(dest), AES_KEY, NONCE, start, min(start + step - 1, last),
+                [0], n,
+            )
+            for n, start in enumerate(range(0, len(plain), step))
+        )
+    )
+
+    assert Path(dest).read_bytes() == plain
+    assert cdn.peak > 1  # the fake really did hold several open at once
+    assert cdn.peak <= mega_dl.MAX_CONNECTIONS

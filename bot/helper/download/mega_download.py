@@ -19,7 +19,7 @@ from time import time
 from aiofiles import open as aiopen
 from aiofiles.os import makedirs, remove
 from aiofiles.os import path as aiopath
-from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
 
 from ... import LOGGER, task_dict, task_dict_lock
 from ...core.config_manager import Config
@@ -48,6 +48,22 @@ MIN_SPLIT = 8 * 1024 * 1024
 
 # CDN / Proxy statuses that mean rate limiting, quota exhaustion, or worker outage.
 QUOTA_STATUSES = (402, 403, 429, 502, 503, 504, 509)
+
+# Ceiling on sockets this task may hold open at once, across every proxy.
+# The per-worker semaphores below multiply with the pool -- 102 proxies was
+# reaching ~600 concurrent segment requests -- while aiohttp's connector queues
+# everything past its own limit *inside* itself. A quota retry then cancels
+# requests out of that queue and can leave the socket behind, which is how the
+# loop ends up reusing a descriptor that a transport still holds ("File
+# descriptor N is used by transport ... closed=False", then Errno 9 and, on
+# 2026-09-23, an abort). One gate in front of the connector keeps the queue
+# empty, so every request in flight is one this code is actively reading.
+MAX_CONNECTIONS = 64
+
+# Per proxy. Low on purpose: the pool is wide (one worker per ~5 files at this
+# size) and the throughput comes from that width, not from piling connections
+# onto any single worker.
+PER_WORKER_CONNECTIONS = 2
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -79,7 +95,10 @@ class MegaDownloadHelper:
         self._last_time = 0.0
         self._last_bytes = 0
         proxies = _get_proxy_list()
-        self._worker_sems = [Semaphore(6) for _ in range(max(1, len(proxies)))]
+        self._worker_sems = [
+            Semaphore(PER_WORKER_CONNECTIONS) for _ in range(max(1, len(proxies)))
+        ]
+        self._gate = Semaphore(MAX_CONNECTIONS)
 
     @property
     def processed_bytes(self):
@@ -95,9 +114,16 @@ class MegaDownloadHelper:
         return self._speed
 
     def _session(self):
+        # The connector limit is the backstop; ``_gate`` in ``_segment`` is what
+        # normally keeps the queue empty. No per-host limit: this session also
+        # carries the gateway calls (resolve, file_cdn), which all share one
+        # host, and a per-host cap would park them in the connector -- the very
+        # place a cancellation can strand a socket. Per-proxy concurrency is
+        # already capped by the worker semaphores.
         return ClientSession(
             headers={"User-Agent": _USER_AGENT},
             timeout=ClientTimeout(total=None, sock_read=120, sock_connect=60),
+            connector=TCPConnector(limit=MAX_CONNECTIONS),
         )
 
     async def _segment(self, session, cdn_url, path, aes_key, nonce, start, end, done, proxy_n=0):
@@ -116,8 +142,11 @@ class MegaDownloadHelper:
         proxied = proxied_url(cdn_url, proxy_n)
         headers = {"Range": f"bytes={aligned}-{end}"}
         worker_sem = self._worker_sems[proxy_n % len(self._worker_sems)]
-        async with worker_sem:
-            async with session.get(proxied, headers=headers) as resp:
+        # Gate before worker slot, in that order everywhere, so the two can
+        # never deadlock -- a task holding a worker slot is already past the
+        # gate and is doing I/O, so it always gives the slot back.
+        async with self._gate:
+            async with worker_sem, session.get(proxied, headers=headers) as resp:
                 if resp.status in QUOTA_STATUSES:
                     raise _QuotaReached(f"CDN answered HTTP {resp.status}")
                 if resp.status in (404, 410):
@@ -291,7 +320,8 @@ class MegaDownloadHelper:
                 # concurrency) to it.
                 await refresh_proxy_pool()
                 self._worker_sems = [
-                    Semaphore(6) for _ in range(max(1, len(get_proxy_pool())))
+                    Semaphore(PER_WORKER_CONNECTIONS)
+                    for _ in range(max(1, len(get_proxy_pool())))
                 ]
                 async with self._session() as session:
                     files, title, folder_handle = await self._gather_files(
