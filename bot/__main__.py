@@ -1,8 +1,12 @@
 from . import LOGGER, bot_loop
 from .core.telegram_manager import TgClient
 from .core.config_manager import Config
+from .core import fast_upload
 
 Config.load()
+
+# Patches Client.save_file, so it has to happen before any client is built.
+fast_upload.install()
 
 
 async def main():

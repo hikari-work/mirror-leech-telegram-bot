@@ -3,6 +3,7 @@ from pyrogram.types import LinkPreviewOptions, User
 from asyncio import Lock
 
 from .. import LOGGER, user_data, user_clients
+from . import fast_upload
 from .config_manager import Config
 
 
@@ -67,7 +68,20 @@ class TgClient:
             max_concurrent_transmissions=10,
             max_message_cache_size=15000,
             max_topic_cache_size=15000,
-            sleep_threshold=0,
+            # A flood wait on a per-file send arrives from ``messages.SendMedia``,
+            # which telegram only answers *after* every byte of the file is
+            # already on its servers. Raising one instead of waiting it out costs
+            # the whole upload: ``TelegramUploader._upload_file`` retries by
+            # calling ``send_*`` again, which starts ``save_file`` from part zero
+            # and pushes up to 2 GiB a second time. Letting the session absorb
+            # the wait re-sends only the ``SendMedia`` request -- the uploaded
+            # file is still referenced by it -- so the bytes go up once.
+            #
+            # This was 0, so every wait was raised. Telegram asks for 3 or 4
+            # seconds almost every time; each of those re-uploaded a file, which
+            # earned another wait, which re-uploaded again. Flood waits per hour
+            # went 2, 8, 1, 5, 2, 2 and then 51 once the loop took hold.
+            sleep_threshold=60,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cls.bot.start()
@@ -107,16 +121,23 @@ class TgClient:
         async with cls._lock:
             await stop_user_clients()
             if cls.bot:
+                await fast_upload.discard(cls.bot)
                 await cls.bot.stop()
             if cls.user:
+                await fast_upload.discard(cls.user)
                 await cls.user.stop()
             LOGGER.info("Client(s) stopped")
 
     @classmethod
     async def reload(cls):
         async with cls._lock:
+            # The extra media sessions hold their own connections, which a
+            # restart does not go through. Dropped here so the first upload
+            # after it opens sessions that are actually connected.
+            await fast_upload.discard(cls.bot)
             await cls.bot.restart()
             if cls.user:
+                await fast_upload.discard(cls.user)
                 await cls.user.restart()
             LOGGER.info("Client(s) restarted")
 
@@ -177,6 +198,7 @@ async def get_user_client(user_id):
 async def stop_user_client(user_id):
     if client := user_clients.pop(user_id, None):
         try:
+            await fast_upload.discard(client)
             await client.stop()
         except Exception as e:
             LOGGER.error(f"Failed to stop client of {user_id}. {e}")
