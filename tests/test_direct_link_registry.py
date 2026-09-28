@@ -381,6 +381,8 @@ def test_registry_covers_every_handler(dlg):
         "vidara",
         "bunkr",
         "seedbox",
+        "shyav",
+        "kpop",
     }
 
 
@@ -435,8 +437,13 @@ CHAIN_ORDER.insert(CHAIN_ORDER.index("mega") + 1, "vidara")
 CHAIN_ORDER.append("imgbb")
 CHAIN_ORDER.append("bunkr")
 # seedbox (order=44) matches on the hosts named in Config, so it is registered
-# as a predicate too -- and last, since it is the newest branch of all.
+# as a predicate too -- and last of the old chain, which is where its order sits.
 CHAIN_ORDER.append("seedbox")
+# shyav (order=90) and kpop (order=91) are newer than the chain and are
+# registered after it, which is what keeps them from shadowing a domain the old
+# chain already claimed.
+CHAIN_ORDER.append("shyav")
+CHAIN_ORDER.append("kpop")
 
 
 def test_dispatch_order_matches_the_old_chain(dlg):

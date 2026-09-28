@@ -9,7 +9,7 @@ from ...core.torrent_manager import TorrentManager, aria2_name
 
 
 class DirectListener:
-    def __init__(self, path, listener, a2c_opt, bunkr_lazy=False):
+    def __init__(self, path, listener, a2c_opt, lazy=""):
         self.listener = listener
         self._path = path
         self._a2c_opt = a2c_opt
@@ -17,7 +17,11 @@ class DirectListener:
         self._failed = 0
         self.download_task = None
         self.name = self.listener.name
-        self._bunkr_lazy = bunkr_lazy
+        # Which host's resolver turns each entry's page URL into a signed CDN
+        # link, or "" when the entries already carry final links. Named rather
+        # than boolean because several hosts list lazily now, and each mints
+        # its links its own way -- see ``_resolve_entry``.
+        self._lazy = lazy
         # Path -> gid for every download aria2 is still running, filled only in
         # resume mode -- see ``adopt_running``.
         self._live: dict[str, str] = {}
@@ -160,7 +164,11 @@ class DirectListener:
     async def _download_batch(self, contents):
         """Original behavior: download all, then on_download_complete."""
         total = len(contents)
-        if self._bunkr_lazy:
+        # An album is hundreds of files and its links live long enough to be
+        # worth resolving together, a few at a time. The other lazy hosts mint
+        # expiring links, so theirs are resolved per file in the loop below.
+        resolve_all = self._lazy == "bunkr"
+        if resolve_all:
             contents = await self._resolve_all_bunkr(contents)
             if not contents:
                 await self.listener.on_download_error(
@@ -170,6 +178,10 @@ class DirectListener:
         for content in contents:
             if self.listener.is_cancelled:
                 break
+            if self._lazy and not resolve_all:
+                content = await self._resolve_entry(content)
+                if content is None:
+                    continue
             await self._download_one(content)
         if self.listener.is_cancelled:
             return
@@ -185,8 +197,8 @@ class DirectListener:
         """Stream mode: each file is uploaded while the next one downloads.
 
         Disk usage stays at the file being sent plus the one being fetched.
-        Bunkr URLs are resolved lazily (one at a time) to avoid stale signed
-        CDN links. The uploader itself lives in ``StreamUploader``, which also
+        Lazy host URLs are resolved (one at a time) to avoid stale signed CDN
+        links. The uploader itself lives in ``StreamUploader``, which also
         clears the flags streaming cannot honour and reports them in the task's
         message -- and which is why this task never calls
         ``on_download_complete``: that is the switch back into the queued,
@@ -204,8 +216,8 @@ class DirectListener:
                 if self.listener.is_cancelled:
                     break
 
-                if self._bunkr_lazy:
-                    content = await self._resolve_one_bunkr(content)
+                if self._lazy:
+                    content = await self._resolve_entry(content)
                     if content is None:
                         continue
 
@@ -225,6 +237,28 @@ class DirectListener:
             await self.listener.on_download_error("All files are failed to download!")
             return
         await stream.finalize()
+
+    async def _resolve_entry(self, content):
+        """Turn one entry's page URL into the signed CDN link to fetch.
+
+        Each host mints its links its own way, so the resolver is picked by the
+        name the handler left on the task. A resolve that comes back empty is
+        counted as a failure and the entry is skipped: one dead video must not
+        cost the rest of the listing.
+        """
+        if self._lazy == "bunkr":
+            return await self._resolve_one_bunkr(content)
+
+        from ..download.direct_link_generators import LAZY_RESOLVERS
+
+        resolver = LAZY_RESOLVERS.get(self._lazy)
+        url = await resolver(content["url"]) if resolver else ""
+        if url:
+            content["url"] = url
+            return content
+        self._failed += 1
+        LOGGER.error(f"{self._lazy}: failed to resolve {content['filename']}")
+        return None
 
     async def _resolve_one_bunkr(self, content):
         """Lazily resolve a single bunkr file URL just before download."""

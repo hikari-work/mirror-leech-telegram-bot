@@ -17,6 +17,7 @@ from . import (
     filehosts,  # noqa: F401
     gofile,  # noqa: F401
     imgbb,  # noqa: F401
+    kpop,  # noqa: F401
     linkbox,  # noqa: F401
     lockers,  # noqa: F401
     mediafire,  # noqa: F401
@@ -24,6 +25,7 @@ from . import (
     seedbox,  # noqa: F401
     sendcm,  # noqa: F401
     sharelinks,  # noqa: F401
+    shyav,  # noqa: F401
     streaming,  # noqa: F401
     swisstransfer,  # noqa: F401
     terabox,  # noqa: F401

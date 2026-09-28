@@ -1,10 +1,10 @@
 """Bunkr album/file resolver via piyann gateway API.
 
 Album scraping is fast (single request). Individual file download-URL
-resolution is deferred: the handler returns ``bunkr_lazy: True`` in the
-result dict and each ``contents`` entry carries the *file page URL* rather
-than the signed CDN link.  ``DirectListener.download`` resolves them
-just-in-time via ``bunkr_resolve_download`` so the task appears instantly.
+resolution is deferred: the handler returns ``lazy: "bunkr"`` in the result
+dict and each ``contents`` entry carries the *file page URL* rather than the
+signed CDN link.  ``DirectListener.download`` resolves them just-in-time via
+``bunkr_resolve_download`` so the task appears instantly.
 """
 
 from asyncio import Semaphore, gather
@@ -356,7 +356,7 @@ def _handle_album(session, url):
         "contents": contents,
         "title": title,
         "total_size": total_size,
-        "bunkr_lazy": True,
+        "lazy": "bunkr",
     }
 
 

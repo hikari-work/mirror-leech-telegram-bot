@@ -1,6 +1,8 @@
 """Shared helpers for direct link generator host modules."""
 
+from os import path as ospath
 from re import findall
+from re import sub as resub
 
 from lxml.etree import HTML
 from requests import post
@@ -17,6 +19,41 @@ from ..url_shortener_bypass import bypass_shortener, is_url_shortener  # noqa: F
 user_agent = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 )
+
+MEDIA_EXTS = frozenset(
+    (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".m3u8")
+)
+
+
+def safe_name(name, fallback):
+    """One path component, never a path: a title decides a file name, not where
+    the file lands."""
+    cleaned = resub(r'[<>:"/\\|?*\x00-\x1f]', "", (name or "").strip()).strip(" .")
+    return cleaned[:200] or fallback
+
+
+def safe_stem(title, fallback):
+    """A title as a file stem: separator junk dropped, container suffix cut.
+
+    yt-dlp appends the container it muxed into, so a title handed over whole
+    lands as "clip.mp4.mp4".
+    """
+    stem, ext = ospath.splitext(safe_name(title, fallback))
+    return stem if ext.lower() in MEDIA_EXTS else safe_name(title, fallback)
+
+
+def unique_stem(stem, taken, code=""):
+    """*stem*, or one that has not been used in this listing yet.
+
+    Two videos in a listing can carry the same title, and the second would
+    otherwise land on top of the first.
+    """
+    if (key := stem.lower()) not in taken:
+        taken.add(key)
+        return stem
+    stem = f"{stem} {code}" if code else f"{stem} {len(taken)}"
+    taken.add(stem.lower())
+    return stem
 
 
 def header_lines(headers):

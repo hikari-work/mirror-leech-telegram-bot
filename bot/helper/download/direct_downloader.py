@@ -42,7 +42,7 @@ async def add_direct_download(listener, path, resume=False):
     if header := details.get("header"):
         a2c_opt["header"] = header
     directListener = DirectListener(
-        path, listener, a2c_opt, bunkr_lazy=details.get("bunkr_lazy", False)
+        path, listener, a2c_opt, lazy=details.get("lazy", "")
     )
     if resume:
         # Before the first file, so the loop below finds the engine's downloads

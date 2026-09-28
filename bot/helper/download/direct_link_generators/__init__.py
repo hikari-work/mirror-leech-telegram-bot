@@ -27,6 +27,7 @@ from .hosts.imgbb import (
     imgbb,
     is_imgbb_link,
 )
+from .hosts.kpop import is_kpop, kpop, kpop_resolve_download
 
 # Re-exported for call sites that import them directly (ytdlp.py) and for
 # tests that reach for the handlers by name.
@@ -38,6 +39,7 @@ from .hosts.seedbox import (
     seedbox_auth_header,
     seedbox_hosts,
 )
+from .hosts.shyav import is_shyav, shyav, shyav_resolve_download
 from .hosts.vidara import (
     VIDARA_ATTEMPTS,
     VIDARA_DOMAINS,
@@ -71,6 +73,14 @@ from .hosts.vidoy import (
 )
 from .registry import register, registered_entries, resolve
 
+# How a lazily-resolved host turns one entry's page URL into the signed CDN
+# link to fetch. The handler names its host in ``lazy=`` on the result dict and
+# ``DirectListener`` looks the resolver up here, so a new host is one entry.
+LAZY_RESOLVERS = {
+    "shyav": shyav_resolve_download,
+    "kpop": kpop_resolve_download,
+}
+
 
 def direct_link_generator(link):
     """direct links generator"""
@@ -99,6 +109,13 @@ __all__ = [
     "registered_entries",
     "resolve",
     "user_agent",
+    "LAZY_RESOLVERS",
+    "is_kpop",
+    "kpop",
+    "kpop_resolve_download",
+    "is_shyav",
+    "shyav",
+    "shyav_resolve_download",
     "is_mega_link",
     "mega",
     "MEGA_DOMAINS",
