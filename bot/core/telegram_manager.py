@@ -82,7 +82,6 @@ class TgClient:
             # earned another wait, which re-uploaded again. Flood waits per hour
             # went 2, 8, 1, 5, 2, 2 and then 51 once the loop took hold.
             sleep_threshold=60,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cls.bot.start()
         # A bot token always has a username; the `or ""` is for the annotation.
