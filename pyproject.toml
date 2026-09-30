@@ -91,7 +91,6 @@ max-complexity = 10
 "bot/__main__.py"                                                         = ["E402", "I001"]
 "bot/core/config_manager.py"                                              = ["C901", "E501", "I001"]
 "bot/core/startup.py"                                                     = ["C901", "E501", "I001"]
-"bot/core/telegram_manager.py"                                            = ["I001"]
 "bot/core/torrent_manager.py"                                             = ["E722", "I001"]
 "bot/helper/util/bot_utils.py"                                       = ["C901", "E722", "I001", "S307"]
 "bot/helper/storage/db_handler.py"                                      = ["I001"]

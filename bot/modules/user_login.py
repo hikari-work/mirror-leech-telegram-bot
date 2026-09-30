@@ -77,7 +77,7 @@ async def user_login(client, message):
             f"login_{user_id}",
             Config.TELEGRAM_API,
             Config.TELEGRAM_HASH,
-            proxy=Config.TG_PROXY,
+            proxy=Config.TG_PROXY or None,
             in_memory=True,
             no_updates=True,
             parse_mode=enums.ParseMode.HTML,

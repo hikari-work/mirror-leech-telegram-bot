@@ -5,6 +5,7 @@ from .core import fast_upload
 
 Config.load()
 
+# Patches Client.save_file, so it has to happen before any client is built.
 fast_upload.install()
 
 

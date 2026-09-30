@@ -1,8 +1,9 @@
-from pyrogram import Client, enums
-from pyrogram.types import LinkPreviewOptions, User
 from asyncio import Lock
 
-from .. import LOGGER, user_data, user_clients
+from pyrogram import Client, enums
+from pyrogram.types import LinkPreviewOptions, User
+
+from .. import LOGGER, user_clients, user_data
 from . import fast_upload
 from .config_manager import Config
 
@@ -61,7 +62,7 @@ class TgClient:
             cls.ID,
             Config.TELEGRAM_API,
             Config.TELEGRAM_HASH,
-            proxy=Config.TG_PROXY,
+            proxy=Config.TG_PROXY or None,
             bot_token=Config.BOT_TOKEN,
             workdir="/app",
             parse_mode=enums.ParseMode.HTML,
@@ -82,6 +83,7 @@ class TgClient:
             # earned another wait, which re-uploaded again. Flood waits per hour
             # went 2, 8, 1, 5, 2, 2 and then 51 once the loop took hold.
             sleep_threshold=60,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         await cls.bot.start()
         # A bot token always has a username; the `or ""` is for the annotation.
@@ -96,7 +98,7 @@ class TgClient:
                     "user",
                     Config.TELEGRAM_API,
                     Config.TELEGRAM_HASH,
-                    proxy=Config.TG_PROXY,
+                    proxy=Config.TG_PROXY or None,
                     session_string=Config.USER_SESSION_STRING,
                     workdir="/app",
                     parse_mode=enums.ParseMode.HTML,
@@ -170,7 +172,7 @@ async def get_user_client(user_id):
             f"user_{user_id}",
             Config.TELEGRAM_API,
             Config.TELEGRAM_HASH,
-            proxy=Config.TG_PROXY,
+            proxy=Config.TG_PROXY or None,
             session_string=session_string,
             in_memory=True,
             no_updates=True,

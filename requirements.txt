@@ -18,7 +18,7 @@ pillow
 psutil
 psycopg[binary]
 psycopg-pool
-kurigram
+kurigram==2.2.24
 python-magic
 requests
 telegraph
