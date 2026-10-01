@@ -22,6 +22,14 @@ async def main():
 
     await load_settings()
 
+    # A fresh container has no /app/downloads -- nothing creates the base
+    # directory itself, only the per-task subdirectories, so a status message
+    # before the first download crashes on disk_usage(DOWNLOAD_DIR).
+    from aiofiles.os import makedirs as aiomakedirs
+    from . import DOWNLOAD_DIR
+
+    await aiomakedirs(DOWNLOAD_DIR, exist_ok=True)
+
     await gather(TgClient.start_bot(), TgClient.start_user())
     await gather(load_configurations(), update_variables())
 
