@@ -430,7 +430,7 @@ class TaskListener(TaskConfig):
         # done, so a restart from here must go straight to the upload and must
         # not be sent back through ``on_download_complete``, which would split
         # and extract files that have already been split and extracted.
-        await database.set_active_task_state(self.mid, "up")
+        await database.set_active_task_up(self.mid, up_dir)
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
@@ -449,6 +449,37 @@ class TaskListener(TaskConfig):
         uploader = spec.uploader(self, up_dir)
         async with task_dict_lock:
             task_dict[self.mid] = spec.status(self, uploader, gid)
+        await gather(
+            update_status_message(chat_of(self.message).id),
+            uploader.upload(),
+        )
+        del uploader
+
+    async def _resume_upload(self, up_dir):
+        """Pick up a task recovery found mid-upload, and send what is left.
+
+        The download and every post-processing stage are already done -- the
+        files sit final in ``up_dir`` -- so this re-enters at ``_start_upload``'s
+        tail: settle the name and size, then hand the directory to the uploader,
+        whose checkpoint walk skips the files a previous run already sent.
+        """
+        self.dir = up_dir
+        self.name = self.folder_name.strip("/").split("/", 1)[0] if self.folder_name else ""
+        if not self.name or not await aiopath.exists(f"{up_dir}/{self.name}"):
+            try:
+                files = await listdir(up_dir)
+                self.name = files[-1]
+                if self.name == "yt-dlp-thumb":
+                    self.name = files[0]
+            except Exception as e:
+                await self.on_upload_error(str(e))
+                return
+        self.size = await get_path_size(up_dir)
+        LOGGER.info(f"Resumed upload {self.mid}: {self.name}")
+        spec = _DESTINATIONS[self.destination]
+        uploader = spec.uploader(self, up_dir)
+        async with task_dict_lock:
+            task_dict[self.mid] = spec.status(self, uploader, "")
         await gather(
             update_status_message(chat_of(self.message).id),
             uploader.upload(),

@@ -15,13 +15,14 @@ second time) or ``_resolve_links`` (a network round trip that may now fail for
 reasons that have nothing to do with the download). The row's arguments are
 re-applied to a fresh listener and the engine is asked what it still has.
 
-What that rules out is as important as what it does. A task whose bytes are no
-longer in the engine's hands -- one that had finished downloading and was in
-the middle of splitting, extracting or uploading -- cannot be put back: the
-subprocesses doing that work died with the bot, and re-entering
-``on_download_complete`` would run the whole pipeline over files that were
-already half-processed. Those are reported instead, by the incomplete-task
-notifier, which is left to see the rows this pass could not place.
+What that rules out is as important as what it does. A task still *processing*
+-- splitting, extracting -- cannot be put back: the subprocesses doing that
+work died with the bot, and re-entering ``on_download_complete`` would run the
+whole pipeline over files that were already half-processed. A task already
+*uploading* can, though: its files sit final on disk, so recovery re-enters
+the uploader and lets the checkpoint skip what was already sent. Whatever is
+left is reported instead, by the incomplete-task notifier, which is left to see
+the rows this pass could not place.
 """
 
 from __future__ import annotations
@@ -39,10 +40,12 @@ from ..helper.util.task_args import load_args
 # to pick up.
 ADOPTABLE = frozenset({"aria2", "qbit", "direct"})
 
-# The only ``state`` worth coming back to. A task in ``post`` or ``up`` is past
-# the download: its engine job is either finished or gone, and what it was
-# doing when the process died is not something the engine knows about.
+# The two ``state`` values worth coming back to. ``dl`` is re-attached to the
+# engine still holding its bytes; ``up`` re-enters the upload over files that
+# already sit final on disk. ``post`` is past neither -- its subprocesses died
+# with the bot -- so nothing is left of it to pick up.
 STATE_DOWNLOADING = "dl"
+STATE_UPLOADING = "up"
 
 # Where a bulk child's synthetic id starts. Bulk tasks are left to the notifier
 # -- see ``_why``.
@@ -64,6 +67,9 @@ async def recover_tasks() -> None:
         return
 
     recovered: set[int] = set()
+    # Non-numeric directories a resumed task owns, so the sweep must not touch
+    # them: a same-dir batch uploads out of its ``sd*`` staging directory.
+    keep_dirs: set[str] = set()
     unplaced: list[tuple[dict, str]] = []
     # One representative message per chat, for the status message at the end.
     chats: dict[int, object] = {}
@@ -79,13 +85,15 @@ async def recover_tasks() -> None:
         else:
             recovered.add(mid)
             chats.setdefault(row["cid"], listener.message)
+            if listener.up_dir:
+                keep_dirs.add(ospath.basename(listener.up_dir))
         # Either way the row has done its job. It exists to survive the gap
         # between the crash and this pass; a second boot must not find it
         # again, and a task that could not be placed is the notifier's to
         # report rather than this pass's to retry forever.
         await database.rm_active_task(mid)
 
-    await _sweep(recovered)
+    await _sweep(recovered, keep_dirs)
     for row, reason in unplaced:
         LOGGER.warning(f"Task {row['mid']} in chat {row['cid']} not resumed: {reason}")
     # One status message per chat, and only after every task is back: it renders
@@ -109,6 +117,8 @@ async def _rebuild(row: dict):
     data = row["data"] or {}
     if data.get("schema") != ACTIVE_TASK_SCHEMA:
         raise ValueError(f"unknown task schema {data.get('schema')!r}")
+    if row["state"] == STATE_UPLOADING:
+        return await _adopt_upload(row, data)
     if row["state"] != STATE_DOWNLOADING:
         return None
 
@@ -314,6 +324,39 @@ async def _run_direct(listener, target: str) -> None:
         await listener.on_download_error(str(e))
 
 
+async def _adopt_upload(row, data):
+    """Re-enter the upload a task died in, sending only what it had not yet.
+
+    The download is complete and the files sit final in ``up_dir``, so nothing
+    is re-fetched or re-processed -- the listener is rebuilt from the row and
+    the uploader's checkpoint walk skips the files already delivered. The
+    directory is handed to the listener *before* returning so the sweep below
+    knows to leave it alone.
+    """
+    from .. import bot_loop
+
+    up_dir = data.get("up_dir") or ""
+    if not up_dir or not ospath.isdir(up_dir):
+        return None
+    listener = await _make_listener(row, data)
+    if listener is None:
+        return None
+    listener.dir = up_dir
+    listener.up_dir = up_dir
+    bot_loop.create_task(_run_upload(listener, up_dir))
+    LOGGER.info(f"Resumed upload task {row['mid']} from {up_dir}")
+    return listener
+
+
+async def _run_upload(listener, up_dir: str) -> None:
+    """``_resume_upload`` scheduled, with its failures contained."""
+    try:
+        await listener._resume_upload(up_dir)
+    except Exception as e:
+        LOGGER.error(f"Resumed upload for {listener.mid} failed: {e}")
+        await listener.on_upload_error(str(e))
+
+
 async def _announce(message) -> None:
     """Put one chat's status message back, once, for every task recovered.
 
@@ -333,6 +376,8 @@ async def _announce(message) -> None:
 def _why(row: dict) -> str:
     """Why a task could not be placed, in the operator's words."""
     state = row.get("state")
+    if state == STATE_UPLOADING:
+        return "its upload directory is gone, or it predates upload-directory tracking"
     if state != STATE_DOWNLOADING:
         return f"it died in the {state} stage, which runs inside the bot process"
     data = row.get("data") or {}
@@ -343,7 +388,7 @@ def _why(row: dict) -> str:
     return "its engine no longer has it"
 
 
-async def _sweep(keep: set[int]) -> None:
+async def _sweep(keep: set[int], keep_dirs: set[str] = frozenset()) -> None:
     """Clear out what the dead process left and nothing is coming back for.
 
     Deliberately narrower than the ``clean_all`` it replaces, which removed
@@ -355,7 +400,7 @@ async def _sweep(keep: set[int]) -> None:
     """
     from ..core.torrent_manager import TorrentManager
 
-    await _sweep_download_dir(keep)
+    await _sweep_download_dir(keep, keep_dirs)
     try:
         # ``purgeDownloadResult`` rather than ``remove_all``: it forgets the
         # finished and failed downloads -- the ones no task is waiting on any
@@ -366,17 +411,25 @@ async def _sweep(keep: set[int]) -> None:
     await _sweep_torrents(keep)
 
 
-async def _sweep_download_dir(keep: set[int]) -> None:
+async def _sweep_download_dir(keep: set[int], keep_dirs: set[str]) -> None:
     """Remove the directories of tasks that are not being resumed.
 
-    A name that is not a number is not a task id, so it stays where it is. A
-    number no row claimed belongs to a task that finished, failed or was
-    cancelled while the bot was down.
+    A numeric name is a task id: one a resumed row claimed stays, anything else
+    belongs to a task that finished, failed or was cancelled while the bot was
+    down. A same-dir batch's ``sd*`` staging directory is kept when a resumed
+    upload owns it and swept otherwise. Everything else -- ``thumbnails`` and
+    any name that is neither a task id nor a staging dir -- is left alone.
     """
     from ..helper.util.shutil_helper import rmtree
 
     for name in await _listdir(DOWNLOAD_DIR):
-        if not name.isdigit() or int(name) in keep:
+        if name.isdigit():
+            if int(name) in keep:
+                continue
+        elif name.startswith("sd") and name[2:].isdigit():
+            if name in keep_dirs:
+                continue
+        else:
             continue
         try:
             await rmtree(ospath.join(DOWNLOAD_DIR, name), ignore_errors=True)

@@ -951,6 +951,22 @@ class DbManager:
             (state, TgClient.ID, mid),
         )
 
+    async def set_active_task_up(self, mid, up_dir):
+        """Record that a task reached upload, and where its files wait.
+
+        ``set_active_task_state(mid, "up")`` marks the stage but not the source
+        directory, and the upload directory is exactly what a same-dir batch
+        leaves nowhere else on record: its files were merged into an ``sd*``
+        staging directory whose name recovery cannot derive from the row alone.
+        """
+        if self._return:
+            return
+        await self._execute(
+            "UPDATE active_tasks SET state = %s, data = data || %s "
+            "WHERE bot_id = %s AND mid = %s",
+            ("up", _jsonb({"up_dir": up_dir}), TgClient.ID, mid),
+        )
+
     async def rm_active_task(self, mid):
         if self._return:
             return
