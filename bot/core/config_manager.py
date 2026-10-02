@@ -37,6 +37,12 @@ class Config:
     # Gateway configuration for scrapers and resolvers
     GATEWAY_URL = "https://api.piyann.me"
     GATEWAY_TOKEN = ""
+    # Terabox ndus session cookie value, without the "ndus=" prefix. Passed to
+    # the gateway as the ``ndus`` query param so dlinks are minted against this
+    # session and the bot fetches them straight from the CDN (no relay). Empty
+    # means the gateway's own cookie pool is used and the bot still relies on the
+    # ``download.cookie`` it returns.
+    TERABOX_NDUS = ""
     # An explicit proxy for Mega traffic, overriding WARP's own listener.
     MEGA_PROXY_URL = ""
     # Ranged connections per file. Mega tolerates a handful; too many is what
