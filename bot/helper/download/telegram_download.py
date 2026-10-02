@@ -69,11 +69,13 @@ class TelegramDownloadHelper:
         self._processed_bytes = current
 
     async def _forget_gid(self):
-        """Let go of the file's id, now that this task is done downloading it.
+        """Release the file's id after a *failed* download so it can be retried.
 
-        Held from the moment the download starts so a second task cannot fetch
-        the same file at the same time. Releasing it before the upload is what
-        the queued path does too -- by then the bytes are on disk.
+        A successful download keeps its id held for the life of the process:
+        the same content re-posted at another message id shares the same
+        ``file_unique_id``, and dropping the id here is what let the bot fetch
+        and send such duplicates. The id is only let go on error or cancel,
+        where the bytes are not on disk and a later task should retry.
         """
         async with global_lock:
             if self._id in GLOBAL_GID:
@@ -84,7 +86,11 @@ class TelegramDownloadHelper:
         await self._listener.on_download_error(error)
 
     async def _on_download_complete(self):
-        await self._forget_gid()
+        # ponytail: GLOBAL_GID is process-global, so the same content cannot be
+        # leeched twice in one process lifetime (a restart resets it). If a user
+        # ever needs to re-leech the same file to a second destination without a
+        # restart, key the dedup on the batch (multi_tag) instead and release it
+        # when the batch finalises.
         await self._listener.on_download_complete()
 
     async def _stream_download(self, file_path):
@@ -99,7 +105,6 @@ class TelegramDownloadHelper:
         """
         from ..upload.stream_uploader import StreamUploader
 
-        await self._forget_gid()
         stream = StreamUploader(self._listener, ospath.dirname(file_path))
         if not await stream.start():
             return
@@ -207,7 +212,7 @@ class TelegramDownloadHelper:
                 await self._on_download_start(gid, add_to_queue)
                 await self._download(message, path)
             else:
-                await self._on_download_error("File already being downloaded!")
+                await self._on_download_error("File already downloaded (duplicate skipped)")
         else:
             await self._on_download_error(
                 "No document in the replied message! Use SuperGroup incase you are trying to download with User session!"

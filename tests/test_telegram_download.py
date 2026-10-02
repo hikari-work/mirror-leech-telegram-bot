@@ -2,10 +2,10 @@
 
 A replied file is one file, downloaded by pyrogram and then uploaded -- the
 queued way at the end of the task, or, with ``-su``, sent the moment it lands
-instead of waiting for an upload slot. The two endings also both have to let go
-of the file's id: it is held from the moment the download starts to keep a
-second task off the same file, and a task that streamed and never released it
-would make that file undownloadable until the bot restarted.
+instead of waiting for an upload slot. A successful download holds the file's
+``file_unique_id`` for the life of the process, so the same content re-posted
+at another message id is not fetched and sent a second time; only an error or
+cancel releases it, so a failed file can still be retried.
 
 The module is loaded under a stubbed bot package -- it reaches into the client
 manager at import time, and none of that is needed to drive a download -- with
@@ -278,13 +278,17 @@ async def test_a_flood_wait_retry_builds_one_uploader(telegram_dl):
     assert uploader.finalized == 1
 
 
-async def test_a_streamed_file_is_not_left_as_being_downloaded(telegram_dl):
-    """The id guards against a second task taking the same file."""
+async def test_a_streamed_file_stays_deduped(telegram_dl):
+    """A successful download holds its id so the same content is not re-sent.
+
+    Dropping the id after a streamed download is what let a duplicate -- the
+    same file re-posted at another message id -- be fetched and sent again.
+    """
     listener = _Listener(stream_upload=True)
 
     await telegram_dl.run(listener, telegram_dl.message())
 
-    assert telegram_dl.module.GLOBAL_GID == set()
+    assert telegram_dl.module.GLOBAL_GID == {"uid1"}
 
 
 async def test_a_cancelled_download_is_not_sent(telegram_dl):
