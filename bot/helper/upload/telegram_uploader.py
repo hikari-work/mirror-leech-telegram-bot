@@ -21,13 +21,6 @@ from natsort import natsorted
 from PIL import Image
 from pyrogram.errors import BadRequest, FloodPremiumWait, FloodWait, RPCError
 from pyrogram.types import InputMediaPhoto, ReplyParameters
-from tenacity import (
-    RetryError,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from ... import intervals
 from ...core.config_manager import Config
@@ -515,9 +508,6 @@ class TelegramUploader:
                 self._msgs_dict[self.anchor.link] = file_
             await self._pacer.pace()
         except Exception as err:
-            if isinstance(err, RetryError):
-                LOGGER.info(f"Total Attempts: {err.last_attempt.attempt_number}")
-                err = err.last_attempt.exception()
             LOGGER.error(f"{err}. Path: {self._up_path}")
             self._error = str(err)
             self._corrupted += 1
@@ -873,11 +863,6 @@ class TelegramUploader:
         except Exception as e:
             LOGGER.error(f"Unable to record album for {self._listener.mid}: {e}")
 
-    @retry(
-        wait=wait_exponential(multiplier=2, min=4, max=8),
-        stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
-    )
     async def _upload_file(self, cap_mono, file, o_path, force_document=False):
         if (
             self._thumb is not None
@@ -901,7 +886,7 @@ class TelegramUploader:
                     self._pacer.note_flood()
                     await sleep(flood_seconds(f) * FLOOD_SLACK)
                     raise
-        except FloodWait, FloodPremiumWait:
+        except (FloodWait, FloodPremiumWait):
             return await self._upload_file(cap_mono, file, o_path)
         except Exception as err:
             err_type = "RPCError: " if isinstance(err, RPCError) else ""
