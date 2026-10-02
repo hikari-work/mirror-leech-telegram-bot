@@ -1,4 +1,4 @@
-from asyncio import sleep, TimeoutError
+from asyncio import gather, Semaphore, sleep, TimeoutError
 from aiohttp.client_exceptions import ClientError
 from os import path as ospath
 
@@ -16,6 +16,10 @@ class DirectListener:
         self._proc_bytes = 0
         self._failed = 0
         self.download_task = None
+        # gid -> last tellStatus result of each download currently running, so
+        # the progress aggregate and cancellation cover the whole parallel batch
+        # rather than whichever download was polled last.
+        self._active: dict[str, dict] = {}
         self.name = self.listener.name
         # Which host's resolver turns each entry's page URL into a signed CDN
         # link, or "" when the entries already carry final links. Named rather
@@ -36,19 +40,13 @@ class DirectListener:
 
     @property
     def processed_bytes(self):
-        if self.download_task:
-            return self._proc_bytes + int(
-                self.download_task.get("completedLength", "0")
-            )
-        return self._proc_bytes
+        return self._proc_bytes + sum(
+            int(task.get("completedLength", "0")) for task in self._active.values()
+        )
 
     @property
     def speed(self):
-        return (
-            int(self.download_task.get("downloadSpeed", "0"))
-            if self.download_task
-            else 0
-        )
+        return sum(int(task.get("downloadSpeed", "0")) for task in self._active.values())
 
     async def adopt_running(self) -> None:
         """Pick up the aria2 downloads a restart left behind.
@@ -83,13 +81,17 @@ class DirectListener:
 
     async def _download_one(self, content):
         """Download a single content entry. Returns file path on success, None on failure."""
+        # A per-entry options copy: the shared template must stay untouched
+        # because several entries download at once and would otherwise stomp on
+        # each other's dir/out.
+        a2c_opt = dict(self._a2c_opt)
         if content["path"]:
-            self._a2c_opt["dir"] = f"{self._path}/{content['path']}"
+            a2c_opt["dir"] = f"{self._path}/{content['path']}"
         else:
-            self._a2c_opt["dir"] = self._path
+            a2c_opt["dir"] = self._path
         filename = content["filename"]
-        self._a2c_opt["out"] = filename
-        target = ospath.join(self._a2c_opt["dir"], filename)
+        a2c_opt["out"] = filename
+        target = ospath.join(a2c_opt["dir"], filename)
         if gid := self._live.pop(target, ""):
             # Already coming down: poll the download that is already running
             # rather than adding a second one for the same file.
@@ -111,7 +113,7 @@ class DirectListener:
             return target
         try:
             gid = await TorrentManager.aria2.addUri(
-                uris=[content["url"]], options=self._a2c_opt, position=0
+                uris=[content["url"]], options=a2c_opt, position=0
             )
         except (TimeoutError, ClientError, Exception) as e:
             self._failed += 1
@@ -133,24 +135,29 @@ class DirectListener:
 
     async def _await_download(self, gid, target):
         """Wait out one aria2 download and answer the path it produced."""
-        self.download_task = await TorrentManager.aria2.tellStatus(gid)
+        download_task = await TorrentManager.aria2.tellStatus(gid)
+        self._active[gid] = download_task
+        self.download_task = download_task
         while True:
             if self.listener.is_cancelled:
-                if self.download_task:
-                    await TorrentManager.aria2_remove(self.download_task)
+                await TorrentManager.aria2_remove(download_task)
+                self._active.pop(gid, None)
                 return None
-            self.download_task = await TorrentManager.aria2.tellStatus(gid)
-            if error_message := self.download_task.get("errorMessage"):
+            download_task = await TorrentManager.aria2.tellStatus(gid)
+            self._active[gid] = download_task
+            self.download_task = download_task
+            if error_message := download_task.get("errorMessage"):
                 self._failed += 1
                 LOGGER.error(
-                    f"Unable to download {aria2_name(self.download_task)} due to: {error_message}"
+                    f"Unable to download {aria2_name(download_task)} due to: {error_message}"
                 )
-                await TorrentManager.aria2_remove(self.download_task)
+                await TorrentManager.aria2_remove(download_task)
+                self._active.pop(gid, None)
                 return None
-            elif self.download_task.get("status", "") == "complete":
-                self._proc_bytes += int(self.download_task.get("totalLength", "0"))
-                await TorrentManager.aria2_remove(self.download_task)
-                self.download_task = None
+            elif download_task.get("status", "") == "complete":
+                self._proc_bytes += int(download_task.get("totalLength", "0"))
+                await TorrentManager.aria2_remove(download_task)
+                self._active.pop(gid, None)
                 return target
             await sleep(1)
 
@@ -162,7 +169,12 @@ class DirectListener:
             await self._download_batch(contents)
 
     async def _download_batch(self, contents):
-        """Original behavior: download all, then on_download_complete."""
+        """Download the batch a few files at a time, then on_download_complete.
+
+        A Terabox dlink is throttled per file, not per session, so pulling one
+        file at a time tops out at the CDN's single-stream cap. Four at once
+        multiplies the throughput without tripping the account's rate limit.
+        """
         total = len(contents)
         # An album is hundreds of files and its links live long enough to be
         # worth resolving together, a few at a time. The other lazy hosts mint
@@ -175,14 +187,20 @@ class DirectListener:
                     "All Bunkr files failed to resolve!"
                 )
                 return
-        for content in contents:
-            if self.listener.is_cancelled:
-                break
-            if self._lazy and not resolve_all:
-                content = await self._resolve_entry(content)
-                if content is None:
-                    continue
-            await self._download_one(content)
+
+        sem = Semaphore(4)
+
+        async def run(content):
+            async with sem:
+                if self.listener.is_cancelled:
+                    return
+                if self._lazy and not resolve_all:
+                    content = await self._resolve_entry(content)
+                    if content is None:
+                        return
+                await self._download_one(content)
+
+        await gather(*(run(content) for content in contents))
         if self.listener.is_cancelled:
             return
         # Counted against the album, not against what survived resolving: the
@@ -309,5 +327,6 @@ class DirectListener:
         self.listener.is_cancelled = True
         LOGGER.info(f"Cancelling Download: {self.listener.name}")
         await self.listener.on_download_error("Download Cancelled by User!")
-        if self.download_task:
-            await TorrentManager.aria2_remove(self.download_task)
+        for download in list(self._active.values()):
+            await TorrentManager.aria2_remove(download)
+        self._active.clear()
