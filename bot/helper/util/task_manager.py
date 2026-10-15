@@ -1,11 +1,13 @@
 from asyncio import Event
 
 from ... import (
+    task_dict,
     queued_dl,
     queued_up,
     non_queued_up,
     non_queued_dl,
     upload_chat_of,
+    task_dict_lock,
     queue_dict_lock,
 )
 from ...core.config_manager import Config
@@ -103,3 +105,20 @@ async def start_from_queued():
                 if dl_limit and len(non_queued_dl) >= dl_limit:
                     break
                 await start_dl_from_queued(mid)
+
+
+async def user_over_task_limit(user_id: int) -> bool:
+    """Whether *user_id* already holds the most tasks they're allowed.
+
+    Counts every task the user owns in ``task_dict`` -- downloading, uploading
+    or queued, since all three states share the one registry -- against
+    ``USER_QUEUE_MAX``. The owner is never capped, and a limit of 0 disables the
+    check. Read fresh each call so a change through ``/botset`` takes effect at
+    once.
+    """
+    limit = Config.USER_QUEUE_MAX
+    if not limit or user_id == Config.OWNER_ID:
+        return False
+    async with task_dict_lock:
+        count = sum(1 for s in task_dict.values() if s.listener.user_id == user_id)
+    return count >= limit

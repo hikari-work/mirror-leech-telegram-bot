@@ -178,7 +178,7 @@ async def _make_listener(row: dict, data: dict):
         cmd_text=data.get("cmd_text") or "",
     )
     listener._apply_args(load_args(data["args"]))
-    await listener.before_start()
+    await listener.before_start(enforce_user_limit=False)
     return listener
 
 

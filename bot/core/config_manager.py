@@ -56,6 +56,10 @@ class Config:
     QUEUE_ALL = 0
     QUEUE_DOWNLOAD = 0
     QUEUE_UPLOAD = 0
+    # Most tasks (downloading, uploading or queued) one non-owner user may hold
+    # at once. The next task over this is rejected with a message, not queued.
+    # 0 disables the cap; the owner is never capped.
+    USER_QUEUE_MAX = 0
     # Links resolved (scraped / metadata-fetched) at the same time. The queue
     # limits above only bound transfers, and they are checked *after* a link is
     # resolved, so this is what keeps a bulk of a hundred links from hitting the

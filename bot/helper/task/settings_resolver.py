@@ -25,6 +25,7 @@ from ..upload.s3_uploader import s3_config_error
 from ..util.bot_utils import get_size_bytes
 from ..util.links_utils import is_telegram_link
 from ..util.media_utils import create_thumb
+from ..util.task_manager import user_over_task_limit
 from ._host import TaskConfigHost
 
 # Telegram's per-file ceiling for a bot token; a premium user session raises it.
@@ -79,7 +80,7 @@ class SettingsResolverMixin(TaskConfigHost):
             f"Can't check {what} right now: {error}. Try again in a moment."
         )
 
-    async def before_start(self) -> None:
+    async def before_start(self, enforce_user_limit: bool = True) -> None:
         """Settle every task setting that was left to a default.
 
         Order matters: the destination has the last word on which session
@@ -91,7 +92,17 @@ class SettingsResolverMixin(TaskConfigHost):
         or thumbnail to attach -- and none of it is read on the way to a bucket.
         ``_resolve_upload_destination`` in particular can raise "Chat not found!"
         for a task that was never going to post anything.
+
+        The per-user cap is checked first, before any of that work: a user who
+        is already at ``USER_QUEUE_MAX`` is turned away with a message rather
+        than queued. ``enforce_user_limit`` is false only for restart recovery,
+        which resumes tasks that were already admitted.
         """
+        if enforce_user_limit and await user_over_task_limit(self.user_id):
+            raise ValueError(
+                f"You already have {Config.USER_QUEUE_MAX} tasks running or"
+                " queued. Wait for one to finish before adding another."
+            )
         self._resolve_name_substitutions()
         self._resolve_extension_filters()
         self._resolve_ffmpeg_commands()
