@@ -37,6 +37,30 @@ def chat_of(message: Message) -> Chat:
     return message.chat  # pyrefly: ignore[bad-return]
 
 
+def message_media(message: Message):
+    """The media *message* carries, or None when it carries none.
+
+    One chain in one order: a document wins over a photo, a photo over a video,
+    and so on down to an animation. A message can legitimately hold more than
+    one of these, so the order is the answer to "which file is this message
+    about" -- and it has to be the same answer everywhere. The callers that pick
+    a file to send and the callers that decide whether a message *has* a file
+    are looking at the same messages, and two chains that disagreed would mean a
+    message counted as having media that then failed to produce any.
+    """
+    return (
+        message.document
+        or message.photo
+        or message.video
+        or message.audio
+        or message.voice
+        or message.video_note
+        or message.sticker
+        or message.animation
+        or None
+    )
+
+
 def file_link_line(index: int, link: str, name: str) -> str:
     """One numbered, clickable result line for an uploaded file.
 
@@ -158,7 +182,7 @@ async def get_tg_link_message(link, user_id=None):
     else:
         private = True
         msg = re_match(
-            r"tg:\/\/openmessage\?user_id=([0-9]+)&message_id=([0-9-]+)", link
+            r"tg:\/\/openmessage\?user_id=(-?[0-9]+)&message_id=([0-9-]+)", link
         )
         if not user_client:
             raise TgLinkException("USER_SESSION_STRING required for this private link!")
@@ -186,7 +210,11 @@ async def get_tg_link_message(link, user_id=None):
     else:
         msg_id = int(msg_id)
 
-    if chat.isdigit():
+    if chat.lstrip("-").isdigit():
+        # A plain group and a private chat carry a negative id of their own, and
+        # neither has a ``-100`` prefix to add: unlike a channel, the id in the
+        # link is already the peer id. Only the ``https://t.me/c/`` form names a
+        # channel by its stripped id, and that branch is the ``else``.
         chat = int(chat) if private else int(f"-100{chat}")
 
     if not private:

@@ -5,6 +5,7 @@ i = Config.CMD_SUFFIX
 class BotCommands:
     StartCommand = f"start{i}"
     LeechCommand = [f"leech{i}", f"l{i}"]
+    PrivateLeechCommand = [f"pleech{i}", f"pl{i}"]
     QbLeechCommand = [f"qbleech{i}", f"ql{i}"]
     YtdlLeechCommand = [f"ytdlleech{i}", f"yl{i}"]
     CancelTaskCommand = [f"cancel{i}", f"c{i}"]

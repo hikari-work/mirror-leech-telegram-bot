@@ -141,6 +141,11 @@ async def _send_status_message(message):
     return None
 
 
+def _message_media(message):
+    """Stands in for the shared chain; the fixture's message has a document."""
+    return message.document
+
+
 def _module(name, package=False, **attrs):
     mod = ModuleType(name)
     if package:
@@ -169,6 +174,7 @@ def _stub_modules():
         "bot.helper.telegram.message_utils": _module(
             "bot.helper.telegram.message_utils",
             send_status_message=_send_status_message,
+            message_media=_message_media,
         ),
         # a flood wait is not slept through in a test: the retry is what matters
         "bot.helper.telegram.flood": _module(

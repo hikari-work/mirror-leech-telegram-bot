@@ -8,6 +8,7 @@ from .file_selector import select, confirm_selection
 from .force_start import remove_from_queue
 from .help import arg_usage, bot_help
 from .leech import leech, qb_leech
+from .private_leech import private_leech
 from .restart import (
     restart_bot,
     restart_notification,
@@ -46,6 +47,7 @@ __all__ = [
     "arg_usage",
     "leech",
     "qb_leech",
+    "private_leech",
     "restart_bot",
     "restart_notification",
     "confirm_restart",

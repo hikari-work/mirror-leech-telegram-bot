@@ -15,7 +15,7 @@ from ..util.task_manager import check_running_tasks
 from ..progress.queue_status import QueueStatus
 from ..progress.telegram_status import TelegramStatus
 from ..telegram.flood import flood_seconds
-from ..telegram.message_utils import send_status_message
+from ..telegram.message_utils import message_media, send_status_message
 
 if TYPE_CHECKING:
     # For the annotation only: the client is always handed to this module.
@@ -158,17 +158,7 @@ class TelegramDownloadHelper:
         else:
             client = self._listener.client
         self._client = client
-        media = (
-            message.document
-            or message.photo
-            or message.video
-            or message.audio
-            or message.voice
-            or message.video_note
-            or message.sticker
-            or message.animation
-            or None
-        )
+        media = message_media(message)
 
         if media is not None:
             async with global_lock:

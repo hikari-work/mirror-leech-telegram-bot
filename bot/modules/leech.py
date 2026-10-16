@@ -41,7 +41,12 @@ from ..helper.download.vidara_download import (
 from ..helper.download.yt_dlp_download import (
     add_ytdlp_download,
 )
-from ..helper.telegram.message_utils import send_message, get_tg_link_message
+from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.message_utils import (
+    get_tg_link_message,
+    message_media,
+    send_message,
+)
 from ..helper.telegram.task_options import ask_options
 
 
@@ -142,21 +147,17 @@ class Leech(CommandTask):
                 return None
 
         if isinstance(reply_to, list):
-            await self._handle_bulk(reply_to, input_list)
+            # the range link itself must go: every child gets its own link in
+            # front of these options
+            await self._handle_bulk(
+                reply_to,
+                " ".join(strip_link_tokens(input_list[1:])),
+                input_list[0],
+            )
             return None
 
         if reply_to:
-            file_ = (
-                reply_to.document
-                or reply_to.photo
-                or reply_to.video
-                or reply_to.audio
-                or reply_to.voice
-                or reply_to.video_note
-                or reply_to.sticker
-                or reply_to.animation
-                or None
-            )
+            file_ = message_media(reply_to)
 
             if file_ is None:
                 if reply_text := reply_to.text:
@@ -164,12 +165,12 @@ class Leech(CommandTask):
                 else:
                     reply_to = None
             elif (document := reply_to.document) and (
-                # ``document`` and not ``file_``: they are the same object here
-                # -- a document is first in the chain above, so a reply carrying
-                # one is what ``file_`` came from -- but only the document is
-                # known to have these two fields, and neither is guaranteed to
-                # be filled. A document sent without a name used to reach
-                # ``.endswith`` on None.
+                # ``document`` and not ``file_``: a document is first in the
+                # chain ``message_media`` walks, so a reply carrying one is what
+                # ``file_`` came from -- but only the document is known to have
+                # these two fields, and neither is guaranteed to be filled. A
+                # document sent without a name used to reach ``.endswith`` on
+                # None.
                 document.mime_type == "application/x-bittorrent"
                 or (document.file_name or "").endswith(".torrent")
             ):
@@ -178,11 +179,16 @@ class Leech(CommandTask):
 
         return reply_to, file_, session
 
-    async def _handle_bulk(self, reply_to, input_list):
-        """Handle list-type reply_to (a telegram link range expanded to links)."""
-        # the range link itself must go: every child gets its own link in front
-        # of these options
-        self.options = " ".join(strip_link_tokens(input_list[1:]))
+    async def _handle_bulk(self, links, options, cmd=None):
+        """Start one task per link in ``links``, as a single batch.
+
+        The options are handed in already stripped of the address that produced
+        the list, because that is the caller's business: a range link carries
+        its own token, and a command that looked the links up itself has no
+        token to strip. Either way every child gets its own link in front of
+        these options.
+        """
+        self.options = options
 
         if not self.multi_tag:
             self.multi_tag = token_urlsafe(3)
@@ -192,7 +198,7 @@ class Leech(CommandTask):
             self.options += f" -m bulk-{self.multi_tag}"
 
         try:
-            await self.dispatch_bulk(input_list[0], reply_to, Leech)
+            await self.dispatch_bulk(cmd or BotCommands.LeechCommand[0], links, Leech)
         except Exception as e:
             multi_tags.discard(self.multi_tag)
             LOGGER.error(f"Can't start bulk from telegram links: {e}")

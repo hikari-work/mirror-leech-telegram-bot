@@ -97,7 +97,7 @@ By Reply:
 if u have link(folder) have splitted files:
 /cmd link -j"""
 
-tg_links = """<b>TG Links</b>:
+tg_links = f"""<b>TG Links</b>:
 
 Treat links like any direct link
 Some links need user access so you must add USER_SESSION_STRING for it.
@@ -107,7 +107,8 @@ Private: tg://openmessage?user_id=xxxxxx&message_id=xxxxx
 Super: https://t.me/c/channel_id/message_id
 Range: https://t.me/channel_name/first_message_id-last_message_id
 Range Example: tg://openmessage?user_id=xxxxxx&message_id=555-560 or https://t.me/channel_name/100-150
-Note: Range link will work only by replying cmd to it"""
+Note: Range link will work only by replying cmd to it
+No link at all: a private chat -- a DM with a person or with a bot -- has neither a public nor a tg:// link you can copy. Use /{BotCommands.PrivateLeechCommand[0]} chat count instead, which needs your own session (/{BotCommands.LoginCommand}) for any chat the bot is not part of."""
 
 sample_video = """<b>Sample Video</b>: -sv
 
@@ -392,6 +393,7 @@ NOTE: Try each command without any argument to see more detalis.
 /{BotCommands.LeechCommand[0]} or /{BotCommands.LeechCommand[1]}: Start leeching to Telegram or, with <code>-s3</code>, to your bucket.
 /{BotCommands.QbLeechCommand[0]} or /{BotCommands.QbLeechCommand[1]}: Start leeching using qBittorrent.
 /{BotCommands.YtdlLeechCommand[0]} or /{BotCommands.YtdlLeechCommand[1]}: Leech yt-dlp supported link.
+/{BotCommands.PrivateLeechCommand[0]} or /{BotCommands.PrivateLeechCommand[1]} [chat] [count]: Leech the media out of a private chat, which has no link to paste. DMs with other people or bots are read with your own session, so /{BotCommands.LoginCommand} first.
 /{BotCommands.BypassCommand[0]} or /{BotCommands.BypassCommand[1]} [link]: Bypass and get the direct link.
 /{BotCommands.UserSetCommand[0]} or /{BotCommands.UserSetCommand[1]} [query]: Users settings.
 /{BotCommands.LoginCommand}: Login with your own telegram account to download restricted/private telegram links (PM only).
