@@ -45,8 +45,14 @@ async def user_login(client, message):
         )
         return
     user_id = message.from_user.id
-    if not Config.TELEGRAM_API or not Config.TELEGRAM_HASH:
-        await send_message(message, "TELEGRAM_API and TELEGRAM_HASH are required!")
+    user_api, user_hash = Config.user_credentials()
+    if not user_api or not user_hash:
+        await send_message(
+            message,
+            "No credentials to log in with! Set USER_TELEGRAM_API and "
+            "USER_TELEGRAM_HASH, or TELEGRAM_API and TELEGRAM_HASH to fall back "
+            "to the bot's pair.",
+        )
         return
     if user_id in pending_logins:
         await send_message(
@@ -75,8 +81,8 @@ async def user_login(client, message):
 
         temp_client = Client(
             f"login_{user_id}",
-            Config.TELEGRAM_API,
-            Config.TELEGRAM_HASH,
+            user_api,
+            user_hash,
             proxy=Config.TG_PROXY or None,
             in_memory=True,
             no_updates=True,

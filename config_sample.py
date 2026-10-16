@@ -6,6 +6,12 @@ TELEGRAM_HASH = ""
 # OPTIONAL CONFIG
 TG_PROXY = {}
 USER_SESSION_STRING = ""
+# Optional second api_id/api_hash pair for every client that signs in as a user
+# account: /login, the sessions it hands out, and the USER_SESSION_STRING
+# client. Keeps user logins off the bot's own api_id reputation. Leave BOTH
+# empty to fall back to the pair above.
+USER_TELEGRAM_API = 0
+USER_TELEGRAM_HASH = ""
 CMD_SUFFIX = ""
 AUTHORIZED_CHATS = ""
 SUDO_USERS = ""

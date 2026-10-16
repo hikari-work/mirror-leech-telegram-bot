@@ -94,10 +94,11 @@ class TgClient:
         if Config.USER_SESSION_STRING:
             LOGGER.info("Creating client from USER_SESSION_STRING")
             try:
+                user_api, user_hash = Config.user_credentials()
                 cls.user = Client(
                     "user",
-                    Config.TELEGRAM_API,
-                    Config.TELEGRAM_HASH,
+                    user_api,
+                    user_hash,
                     proxy=Config.TG_PROXY or None,
                     session_string=Config.USER_SESSION_STRING,
                     workdir="/app",
@@ -168,10 +169,11 @@ async def get_user_client(user_id):
         if client := user_clients.get(user_id):
             return client
         LOGGER.info(f"Creating client from USER_SESSION_STRING of {user_id}")
+        user_api, user_hash = Config.user_credentials()
         client = Client(
             f"user_{user_id}",
-            Config.TELEGRAM_API,
-            Config.TELEGRAM_HASH,
+            user_api,
+            user_hash,
             proxy=Config.TG_PROXY or None,
             session_string=session_string,
             in_memory=True,

@@ -111,6 +111,16 @@ class Config:
     SUDO_USERS = ""
     TELEGRAM_API = 0
     TELEGRAM_HASH = ""
+    # A second api_id/api_hash pair, for every client that signs in as a *user
+    # account*: the /login flow, the session strings it hands out, the
+    # USER_SESSION_STRING client, and the per-user clients built from those
+    # strings. Telegram scores a login by the api_id it arrives on, so running
+    # user logins through the bot's pair spends the bot's reputation on them --
+    # and the bot's pair is the one every deployment shares with its users.
+    # Empty means "use the pair above", which is what every user session was
+    # created with before these existed.
+    USER_TELEGRAM_API = 0
+    USER_TELEGRAM_HASH = ""
     TG_PROXY = {}
     THUMBNAIL_LAYOUT = ""
     TORRENT_TIMEOUT = 0
@@ -180,6 +190,26 @@ class Config:
 
         converted_value = cls._convert(key, value)
         setattr(cls, key, converted_value)
+
+    @classmethod
+    def user_credentials(cls) -> tuple[int, str]:
+        """The api_id/api_hash pair the user-account clients sign in with.
+
+        The pair is taken as a whole. An operator who set only one of the two
+        almost certainly meant to set both, and pairing their api_id with the
+        bot's hash would fail at send_code with an error naming neither -- so a
+        half-set pair falls back to the bot's, with a warning to say so.
+        """
+        if cls.USER_TELEGRAM_API and cls.USER_TELEGRAM_HASH:
+            return cls.USER_TELEGRAM_API, cls.USER_TELEGRAM_HASH
+
+        if cls.USER_TELEGRAM_API or cls.USER_TELEGRAM_HASH:
+            LOGGER.warning(
+                "USER_TELEGRAM_API and USER_TELEGRAM_HASH must be set together. "
+                "Falling back to TELEGRAM_API/TELEGRAM_HASH."
+            )
+
+        return cls.TELEGRAM_API, cls.TELEGRAM_HASH
 
     @classmethod
     def get_all(cls):
