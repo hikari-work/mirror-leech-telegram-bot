@@ -60,6 +60,15 @@ class Config:
     # at once. The next task over this is rejected with a message, not queued.
     # 0 disables the cap; the owner is never capped.
     USER_QUEUE_MAX = 0
+    # What those tasks may add up to, written the way a person would say it:
+    # "100GB", "1TB", "500MB". A plain number counts as bytes. The two caps are
+    # read together: a user is turned away only once they are over *both*, so
+    # somebody holding a couple of small tasks may keep adding -- which is what
+    # makes a queue of many small files cost one person nothing. Empty drops the
+    # size side of the check, leaving USER_QUEUE_MAX on its own, and a value the
+    # bot cannot read does the same after saying so in the log; the owner is
+    # never capped either.
+    USER_QUEUE_SIZE_MAX = ""
     # Links resolved (scraped / metadata-fetched) at the same time. The queue
     # limits above only bound transfers, and they are checked *after* a link is
     # resolved, so this is what keeps a bulk of a hundred links from hitting the

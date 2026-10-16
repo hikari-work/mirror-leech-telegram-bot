@@ -1,6 +1,8 @@
 from asyncio import Event
 
 from ... import (
+    DOWNLOAD_DIR,
+    LOGGER,
     task_dict,
     queued_dl,
     queued_up,
@@ -11,6 +13,9 @@ from ... import (
     queue_dict_lock,
 )
 from ...core.config_manager import Config
+from .bot_utils import get_size_bytes
+from .files_utils import get_path_size
+from .status_utils import get_readable_file_size
 
 
 def upload_chat_id(listener):
@@ -107,18 +112,102 @@ async def start_from_queued():
                 await start_dl_from_queued(mid)
 
 
-async def user_over_task_limit(user_id: int) -> bool:
-    """Whether *user_id* already holds the most tasks they're allowed.
+async def _user_tasks(user_id: int) -> list:
+    """The listeners of every task *user_id* holds.
 
-    Counts every task the user owns in ``task_dict`` -- downloading, uploading
-    or queued, since all three states share the one registry -- against
-    ``USER_QUEUE_MAX``. The owner is never capped, and a limit of 0 disables the
-    check. Read fresh each call so a change through ``/botset`` takes effect at
-    once.
+    Read from ``task_dict``, where downloading, uploading and queued tasks all
+    live, so one pass covers the whole lifetime of a task without a second
+    ledger. Taken under the lock and returned whole: the callers below go on to
+    measure these against the disk, which is no time to be holding it.
     """
-    limit = Config.USER_QUEUE_MAX
-    if not limit or user_id == Config.OWNER_ID:
-        return False
     async with task_dict_lock:
-        count = sum(1 for s in task_dict.values() if s.listener.user_id == user_id)
-    return count >= limit
+        return [
+            status.listener
+            for status in task_dict.values()
+            if status.listener.user_id == user_id
+        ]
+
+
+async def _tasks_size(listeners) -> int:
+    """What *listeners* add up to in bytes.
+
+    A task's bytes are ``listener.size`` where the downloader has already
+    settled them -- a link's metadata, or a downloader's own running count.
+    Where that is still 0 its own directory is measured instead, because aria2
+    and qbittorrent leave ``listener.size`` at 0 until the download ends:
+    without that fallback a user holding nothing but torrents would measure as
+    0 and no size cap would ever see them.
+    """
+    total = 0
+    for listener in listeners:
+        total += listener.size or await get_path_size(f"{DOWNLOAD_DIR}{listener.mid}")
+    return total
+
+
+def _size_cap_bytes() -> int:
+    """``USER_QUEUE_SIZE_MAX`` in bytes, or 0 when there is no usable cap.
+
+    The setting is written the way a person would say it -- "100GB", "1TB",
+    "500MB" -- or as a plain byte count, for which 0 is the setting's own "off".
+    A value the bot cannot make sense of counts as no cap too, and is said out
+    loud in the log rather than taken quietly: a typo that lifts the size cap is
+    not something anyone notices until the disk does.
+    """
+    configured = Config.USER_QUEUE_SIZE_MAX
+    raw = str(configured or "").strip().lower()
+    if not raw:
+        return 0
+    if raw.isdigit():
+        return int(raw)
+
+    try:
+        size = get_size_bytes(raw)
+    except (ValueError, TypeError):
+        size = 0
+    if not size:
+        LOGGER.warning(
+            f"USER_QUEUE_SIZE_MAX is {configured!r}, which is not a size this"
+            ' bot understands (try "100GB"); the per-user size cap is off.'
+        )
+    return size
+
+
+async def user_limit_refusal(user_id: int) -> str | None:
+    """Why *user_id* may not start another task, or None when they may.
+
+    Two caps, and a user has to be over *both* to be turned away:
+    ``USER_QUEUE_MAX`` tasks holding ``USER_QUEUE_SIZE_MAX`` bytes between them.
+    The task count on its own is not what this is guarding against -- one person
+    parking a handful of small downloads costs the queue little -- so a user
+    still under the size cap keeps adding, and the pair only closes once what
+    they hold is both numerous and large.
+
+    ``USER_QUEUE_MAX`` of 0 turns the whole check off, and is also the owner's
+    standing exemption; an empty ``USER_QUEUE_SIZE_MAX`` drops the size side,
+    which leaves the task count deciding on its own. Both are read fresh each
+    call, so a change through ``/botset`` takes effect on the next task.
+
+    The count is answered first and the sizes only when it has run out, which
+    keeps the disk walk off the path most tasks take.
+    """
+    task_limit = Config.USER_QUEUE_MAX
+    if not task_limit or user_id == Config.OWNER_ID:
+        return None
+
+    listeners = await _user_tasks(user_id)
+    if len(listeners) < task_limit:
+        return None
+
+    size_limit = _size_cap_bytes()
+    size = await _tasks_size(listeners)
+    if size_limit and size < size_limit:
+        return None
+
+    held = f"{len(listeners)} tasks totalling {get_readable_file_size(size)}"
+    allowed = f"{task_limit} tasks"
+    if size_limit:
+        allowed += f" and {get_readable_file_size(size_limit)}"
+    return (
+        f"You already hold {held}. One user may hold {allowed} at once --"
+        " wait for one of them to finish before adding another."
+    )
