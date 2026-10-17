@@ -25,7 +25,9 @@ def imgbb(url: str) -> str:
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        raise DirectDownloadLinkException(f"ERROR: ImgBB API request failed: {exc}") from exc
+        raise DirectDownloadLinkException(
+            f"ERROR: ImgBB API request failed: {exc}"
+        ) from exc
 
     if not data.get("success"):
         error = data.get("error", "Unknown error")

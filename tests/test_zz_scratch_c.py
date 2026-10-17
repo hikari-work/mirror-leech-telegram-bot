@@ -14,8 +14,11 @@ import pytest
 from test_telegram_uploader_album import (  # noqa: E402
     FakeMessage,
     _make_uploader,
-    uploader_module,
 )
+
+# Registered as a plugin so its ``uploader_module`` fixture resolves here too;
+# importing the name would only shadow it in each test that takes the argument.
+pytest_plugins = ["test_telegram_uploader_album"]
 
 DUMP = -1004421291343
 PRESET = (-1004365842775, 34)

@@ -443,7 +443,9 @@ async def test_purepath_is_accepted(tmp_path, fallback, tiny):
 # wire, no error, two tasks queued behind one that had stopped moving.
 
 
-async def test_a_pool_that_will_not_open_still_uploads(tmp_path, fallback, tiny, monkeypatch):
+async def test_a_pool_that_will_not_open_still_uploads(
+    tmp_path, fallback, tiny, monkeypatch
+):
     """kurigram's ``connect`` has no timeout, and this await holds a shared lock."""
     monkeypatch.setattr(fast_upload, "_POOL_TIMEOUT", 0.05)
     path = _write(tmp_path, fast_upload._PART_SIZE * 4)
@@ -508,7 +510,9 @@ async def test_a_datacenter_that_refused_is_not_asked_again_yet(
     assert len(asked) == 1, "the pool was never opened, so nothing was refused"
 
     started = time.monotonic()
-    result = await asyncio.wait_for(fast_upload._save_file(client, str(path)), timeout=5)
+    result = await asyncio.wait_for(
+        fast_upload._save_file(client, str(path)), timeout=5
+    )
 
     assert result == "fell-back"
     assert len(asked) == 1, "the second file paid the same stall all over again"
@@ -560,7 +564,9 @@ async def test_a_session_that_will_not_stop_is_left_behind(fallback, monkeypatch
     assert client not in fast_upload._pools
 
 
-async def test_a_part_that_never_answers_fails_the_upload(tmp_path, fallback, tiny, monkeypatch):
+async def test_a_part_that_never_answers_fails_the_upload(
+    tmp_path, fallback, tiny, monkeypatch
+):
     """``run`` waits for every part still in flight, so one that never returns
     would hold the task's upload slot for good."""
     monkeypatch.setattr(fast_upload, "_SEND_TIMEOUT", 0.05)

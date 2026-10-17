@@ -21,7 +21,6 @@ from .._common import (
 )
 from ..registry import register
 
-
 _TERABOX_DOMAINS = (
     "terabox.com",
     "nephobox.com",
@@ -70,6 +69,25 @@ def _build_header(download_info, header_cookie=""):
     return header
 
 
+def _collect_contents(files: list[dict]) -> tuple[list[dict], int]:
+    """Flatten the gateway's file list into ``contents`` entries and a total size."""
+    contents: list[dict] = []
+    total_size = 0
+    for file in files:
+        contents.append(
+            {
+                "path": ospath.dirname(file.get("path", "")).lstrip("/"),
+                "filename": file.get("name", ""),
+                "url": file["dlink"],
+            }
+        )
+        try:
+            total_size += int(file.get("size") or 0)
+        except (TypeError, ValueError):
+            pass
+    return contents, total_size
+
+
 @register(*_TERABOX_DOMAINS, order=35)
 def terabox(url):
     if "/file/" in url:
@@ -110,19 +128,12 @@ def terabox(url):
     if not any(line.startswith("Cookie:") for line in header):
         LOGGER.warning(f"Terabox: no cookie for CDN; dlinks may 403. {warning}")
 
-    details = {"contents": [], "title": response.get("title", ""), "total_size": 0}
-    for file in files:
-        details["contents"].append(
-            {
-                "path": ospath.dirname(file.get("path", "")).lstrip("/"),
-                "filename": file.get("name", ""),
-                "url": file["dlink"],
-            }
-        )
-        try:
-            details["total_size"] += int(file.get("size") or 0)
-        except (TypeError, ValueError):
-            pass
+    contents, total_size = _collect_contents(files)
+    details = {
+        "contents": contents,
+        "title": response.get("title", ""),
+        "total_size": total_size,
+    }
 
     if not details["title"]:
         details["title"] = details["contents"][0]["filename"]

@@ -67,7 +67,9 @@ class _Store:
     async def get_uploaded_files(self, mid):
         return list(self.rows)
 
-    async def add_uploaded_file(self, mid, relpath, seq, cid, msg_id, link, label, unit):
+    async def add_uploaded_file(
+        self, mid, relpath, seq, cid, msg_id, link, label, unit
+    ):
         if self.fail:
             raise RuntimeError("the database is down")
         self.written.append((mid, relpath, seq, cid, msg_id, link, label, unit))

@@ -576,7 +576,9 @@ async def test_add_uploaded_file_upserts_one_file(dbm):
     A file sent twice -- a retry, a second pass over the same directory -- must
     leave one row, not a second one that the report would then count twice.
     """
-    await dbm.add_uploaded_file(42, "album/a.mkv", 3, -100, 77, "https://t/1", "a", None)
+    await dbm.add_uploaded_file(
+        42, "album/a.mkv", 3, -100, 77, "https://t/1", "a", None
+    )
 
     sql, params = dbm._recorder.writes[0]
     assert "INSERT INTO uploaded_files" in sql

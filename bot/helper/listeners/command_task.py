@@ -108,7 +108,9 @@ class CommandTask(TaskListener):
 
     # ── restart recovery ────────────────────────────────────────────
 
-    async def record_active_task(self, args, handler, engine, engine_tag="", engine_dir=""):
+    async def record_active_task(
+        self, args, handler, engine, engine_tag="", engine_dir=""
+    ):
         """Leave behind what a restart would need to pick this task back up.
 
         Written where the download is handed to its engine and nowhere else. A

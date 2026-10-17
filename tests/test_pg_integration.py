@@ -494,7 +494,12 @@ async def test_an_active_task_survives_the_reconnection_it_exists_for(dbm) -> No
     )
     await dbm.add_active_task(
         42, -100, 10, 7, "@user",
-        {"schema": 1, "engine": "aria2", "engine_dir": "/d/42", "args": dump_args(args)},
+        {
+            "schema": 1,
+            "engine": "aria2",
+            "engine_dir": "/d/42",
+            "args": dump_args(args),
+        },
     )
 
     await dbm.disconnect()

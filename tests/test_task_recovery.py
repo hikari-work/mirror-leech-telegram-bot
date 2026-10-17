@@ -204,7 +204,9 @@ async def test_a_chat_gets_one_status_message_however_many_tasks_returned(
     assert announced == [message]
 
 
-async def test_two_chats_are_announced_to_separately(store, announced, monkeypatch) -> None:
+async def test_two_chats_are_announced_to_separately(
+    store, announced, monkeypatch
+) -> None:
     """One per chat is per chat, not one overall."""
     rows = [_row(mid=1), _row(mid=2)]
     rows[1]["cid"] = -200

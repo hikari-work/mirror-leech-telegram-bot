@@ -1,4 +1,5 @@
 from secrets import token_urlsafe
+from typing import Any
 
 from ... import (
     LOGGER,
@@ -10,6 +11,13 @@ from ..progress.direct_status import DirectStatus
 from ..progress.queue_status import QueueStatus
 from ..telegram.message_utils import send_status_message
 from ..util.task_manager import check_running_tasks
+
+
+async def _announce_start(listener: Any) -> None:
+    """Tell the user the transfer is underway, once per task rather than per file."""
+    await listener.on_download_start()
+    if listener.multi <= 1 and not listener.is_rss:
+        await send_status_message(listener.message)
 
 
 async def add_direct_download(listener, path, resume=False):
@@ -31,9 +39,7 @@ async def add_direct_download(listener, path, resume=False):
             LOGGER.info(f"Added to Queue/Download: {listener.name}")
             async with task_dict_lock:
                 task_dict[listener.mid] = QueueStatus(listener, gid, "dl")
-            await listener.on_download_start()
-            if listener.multi <= 1 and not listener.is_rss:
-                await send_status_message(listener.message)
+            await _announce_start(listener)
             await event.wait()
             if listener.is_cancelled:
                 return
@@ -58,8 +64,6 @@ async def add_direct_download(listener, path, resume=False):
         LOGGER.info(f"Start Queued Download from Direct Download: {listener.name}")
     else:
         LOGGER.info(f"Download from Direct Download: {listener.name}")
-        await listener.on_download_start()
-        if listener.multi <= 1 and not listener.is_rss:
-            await send_status_message(listener.message)
+        await _announce_start(listener)
 
     await directListener.download(contents)

@@ -18,7 +18,15 @@ from ..util.exceptions import DirectDownloadLinkException
 
 _API_BASE = "/api/v1/scrape/pornhub"
 
-_QUALITY_SCORE = {"2160": 5, "1440": 4, "1080": 3, "720": 2, "480": 1, "360": 0, "240": -1}
+_QUALITY_SCORE = {
+    "2160": 5,
+    "1440": 4,
+    "1080": 3,
+    "720": 2,
+    "480": 1,
+    "360": 0,
+    "240": -1,
+}
 
 _PH_HEADERS = {
     "Referer": "https://www.pornhub.com/",
@@ -44,7 +52,9 @@ def _gateway_get(endpoint: str, params: dict, timeout: int = 120) -> dict:
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        raise DirectDownloadLinkException(f"ERROR: PornHub gateway request failed: {exc}") from exc
+        raise DirectDownloadLinkException(
+            f"ERROR: PornHub gateway request failed: {exc}"
+        ) from exc
     if not data.get("success"):
         err = data.get("error") or "Unknown gateway error"
         raise DirectDownloadLinkException(f"ERROR: PornHub scrape failed: {err}")
@@ -60,13 +70,17 @@ def scrape_video(viewkey: str) -> dict:
     return detail
 
 
-def scrape_list(list_type: str, name: str, *, all_pages: bool = True, max_pages: int = 0) -> list[dict]:
+def scrape_list(
+    list_type: str, name: str, *, all_pages: bool = True, max_pages: int = 0
+) -> list[dict]:
     """Fetch video listing for channel / model / pornstar.
 
     Returns a flat list of video dicts (each has ``video_key``, ``title``, etc.).
     """
     if list_type not in ("channel", "model", "pornstar"):
-        raise DirectDownloadLinkException(f"ERROR: Invalid PornHub list type: {list_type}")
+        raise DirectDownloadLinkException(
+            f"ERROR: Invalid PornHub list type: {list_type}"
+        )
     params: dict = {"name": name}
     if all_pages:
         params["all"] = "true"
@@ -125,7 +139,9 @@ def resolve_single_video(viewkey: str) -> dict:
     """
     entry = _resolve_video_entry(viewkey)
     if not entry:
-        raise DirectDownloadLinkException("ERROR: No download URLs found for this video")
+        raise DirectDownloadLinkException(
+            "ERROR: No download URLs found for this video"
+        )
     return {
         "pornhub": True,
         "title": entry["name"].rsplit(".", 1)[0],

@@ -303,7 +303,6 @@ async def _adopt_direct(listener, row: dict, data: dict):
     the recovery pass.
     """
     from .. import bot_loop
-    from ..helper.download.direct_downloader import add_direct_download
 
     if not isinstance(listener.link, dict) or not listener.link.get("contents"):
         return None
@@ -384,7 +383,8 @@ def _why(row: dict) -> str:
     if data.get("multi") or data.get("multi_tag") or row["mid"] >= BULK_MID_FLOOR:
         return "it is part of a batch, whose merging state lived in the dead process"
     if data.get("engine") not in ADOPTABLE:
-        return f"the {data.get('engine') or 'unknown'} engine runs inside the bot process"
+        engine = data.get("engine") or "unknown"
+        return f"the {engine} engine runs inside the bot process"
     return "its engine no longer has it"
 
 

@@ -46,7 +46,6 @@ max-complexity = 10
 "bot/helper/download/direct_link_generators/hosts/sharelinks.py"    = ["E501"]
 "bot/helper/download/direct_link_generators/hosts/streaming.py"     = ["C901", "E501", "E722"]
 "bot/helper/download/direct_link_generators/hosts/swisstransfer.py" = ["C901", "E501", "F841"]
-"bot/helper/download/direct_link_generators/hosts/terabox.py"       = ["E501"]
 "bot/helper/download/direct_link_generators/hosts/vidoy.py"         = ["C901"]
 
 # --- Fase 4 — debrid resolver ---

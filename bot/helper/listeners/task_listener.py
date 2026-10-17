@@ -40,7 +40,6 @@ from ..telegram.message_utils import (
 from ..upload.s3_uploader import S3Uploader
 from ..upload.telegram_uploader import TelegramUploader
 from ..util.files_utils import (
-    sweep_unless_stopping,
     clean_download,
     clean_target,
     create_recursive_symlink,
@@ -49,6 +48,7 @@ from ..util.files_utils import (
     move_and_merge,
     remove_excluded_files,
     remove_non_included_files,
+    sweep_unless_stopping,
 )
 from ..util.status_utils import get_readable_file_size
 from ..util.task_manager import check_running_tasks, start_from_queued

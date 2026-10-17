@@ -1,5 +1,6 @@
-"""Vidara HLS resolver - resolve video pages to HLS master playlist and quality variants."""
+"""Vidara HLS resolver - page to HLS master playlist and quality variants."""
 
+from collections.abc import Callable
 from os import path as ospath
 from random import uniform
 from time import sleep
@@ -180,7 +181,17 @@ def vidara_stem(response):
     title = (response.get("title") or "").strip()
     stem, ext = ospath.splitext(title)
     # For HLS streams, remove common video extensions
-    if ext.lower() in (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv"):
+    if ext.lower() in (
+        ".mp4",
+        ".mkv",
+        ".webm",
+        ".mov",
+        ".avi",
+        ".m4v",
+        ".ts",
+        ".flv",
+        ".wmv",
+    ):
         return stem
     return title
 
@@ -418,6 +429,31 @@ def vidara_resolve(url, name=""):
     )
 
 
+def _try_response(
+    response: dict, probe: Callable[[str, dict], tuple[str | None, str | None]]
+) -> tuple[dict | None, str | None, bool]:
+    """Turn a truthy scrape response into (result, reason, retryable).
+
+    ``result`` is the yt-dlp payload when the master playlist resolved, else
+    ``None`` with ``reason`` saying why and whether a retry could help.
+    """
+    # Get master URL - try both field names for compatibility
+    master_url = response.get("master_url") or response.get("master_playlist_url")
+    if not master_url:
+        return None, "no master URL in API response", False
+    headers = vidara_headers(response.get("download") or {})
+    hls_link, probe_reason = probe(master_url, headers)
+    if hls_link:
+        payload = {
+            "ytdlp": True,
+            "link": hls_link,
+            "name": vidara_stem(response),
+            "headers": headers,
+        }
+        return payload, None, False
+    return None, f"HLS playlist rejected ({probe_reason})", True
+
+
 @register(predicate=is_vidara_link, order=37)
 def vidara(url):
     """Main Vidara handler that returns HLS stream information for yt-dlp."""
@@ -442,7 +478,7 @@ def vidara(url):
                     return None, f"HTTP {resp.status_code}"
                 content_type = resp.headers.get("Content-Type", "").lower()
                 content = resp.text[:1024]  # Read first 1KB
-                
+
                 # Check if it's a valid HLS playlist
                 if (
                     "mpegurl" in content_type
@@ -454,6 +490,15 @@ def vidara(url):
         except Exception as e:
             return None, e.__class__.__name__
 
+    return _resolve_with_retries(url, max_attempts, __probe_hls)
+
+
+def _resolve_with_retries(
+    url: str,
+    max_attempts: int,
+    probe: Callable[[str, dict], tuple[str | None, str | None]],
+) -> dict:
+    """Scrape until the master playlist resolves, then return the yt-dlp payload."""
     targets = vidara_targets(url)
     reason = "unknown error"
 
@@ -464,25 +509,10 @@ def vidara(url):
             )
 
             if response:
-                # Get master URL - try both field names for compatibility
-                master_url = response.get("master_url") or response.get("master_playlist_url")
-                if master_url:
-                    headers = vidara_headers(response.get("download") or {})
-                    hls_link, probe_reason = __probe_hls(master_url, headers)
-                    if hls_link:
-                        # Return for yt-dlp processing
-                        return {
-                            "ytdlp": True,
-                            "link": hls_link,
-                            "name": vidara_stem(response),
-                            "headers": headers,
-                        }
-                    reason = f"HLS playlist rejected ({probe_reason})"
-                    retryable = True
-                    retry_after = None
-                else:
-                    reason = "no master URL in API response"
-                    retryable = False
+                result, reason, retryable = _try_response(response, probe)
+                if result:
+                    return result
+                retry_after = None
 
             if not retryable:
                 raise DirectDownloadLinkException(f"ERROR: {reason}")
@@ -499,6 +529,3 @@ def vidara(url):
                 f"ERROR: Vidara could not be resolved ({reason}). The link may "
                 "have expired or the video was removed, try again later"
             )
-
-    # This should not be reached due to the raise above, but just in case
-    raise DirectDownloadLinkException(f"ERROR: Vidara resolution failed ({reason})")

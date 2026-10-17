@@ -19,16 +19,16 @@ from types import SimpleNamespace
 
 import pytest
 
+import bot.helper.listeners.task_listener as tl
+import bot.helper.task.batch_tracker as bt
+from bot.helper.task.multi_link import MultiLinkMixin
+from bot.helper.upload.stream_uploader import StreamUploader
 from bot.helper.util.task_args import (
     parse_folder_name,
     parse_leech_args,
     parse_ytdlp_args,
     strip_link_tokens,
 )
-import bot.helper.listeners.task_listener as tl
-import bot.helper.task.batch_tracker as bt
-from bot.helper.task.multi_link import MultiLinkMixin
-from bot.helper.upload.stream_uploader import StreamUploader
 
 FOLDER = "/bulk-tst"
 

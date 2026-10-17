@@ -113,7 +113,8 @@ class TestParseUrl:
         assert ph_module.parse_pornhub_url("https://youtube.com/watch?v=abc") is None
 
     def test_unknown_path(self, ph_module):
-        assert ph_module.parse_pornhub_url("https://www.pornhub.com/categories/popular") is None
+        url = "https://www.pornhub.com/categories/popular"
+        assert ph_module.parse_pornhub_url(url) is None
 
 
 class TestScrapeVideo:
