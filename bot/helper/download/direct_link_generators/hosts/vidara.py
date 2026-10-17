@@ -500,7 +500,7 @@ def _resolve_with_retries(
 ) -> dict:
     """Scrape until the master playlist resolves, then return the yt-dlp payload."""
     targets = vidara_targets(url)
-    reason = "unknown error"
+    reason: str | None = "unknown error"
 
     with Session() as session:
         for attempt in range(1, max_attempts + 1):

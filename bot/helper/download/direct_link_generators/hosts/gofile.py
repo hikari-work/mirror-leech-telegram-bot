@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from os import path as ospath
+from typing import Any
 
 from requests import Session
 
@@ -19,7 +20,7 @@ from ..registry import register
 _API_TIMEOUT = 30
 
 
-def _build_header(download_info: dict[str, object]) -> list[str]:
+def _build_header(download_info: dict[str, Any]) -> list[str]:
     """The CDN request header as a list of 'Key: value' lines."""
     cookie = str(download_info.get("cookie") or "").strip()
     if not cookie:
@@ -36,10 +37,10 @@ def _build_header(download_info: dict[str, object]) -> list[str]:
 
 
 def _parse_files(
-    files: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], int]:
+    files: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
     """Extract valid file entries and total size from gateway files list."""
-    contents: list[dict[str, object]] = []
+    contents: list[dict[str, Any]] = []
     total_size = 0
 
     for file in files:
@@ -73,7 +74,7 @@ def _parse_files(
     return contents, total_size
 
 
-def _fetch_from_gateway(url: str, password: str = "") -> dict[str, object]:
+def _fetch_from_gateway(url: str, password: str = "") -> dict[str, Any]:
     """Call gateway gofile scrape endpoint and validate response."""
     api_url = gateway_url("/api/v1/scrape/gofile")
     params: dict[str, str] = {"q": url}
@@ -113,7 +114,7 @@ def _fetch_from_gateway(url: str, password: str = "") -> dict[str, object]:
 
 
 @register("gofile.io", order=20)
-def gofile(url: str) -> tuple[str, list[str]] | dict[str, object]:
+def gofile(url: str) -> tuple[str, list[str]] | dict[str, Any]:
     """Resolve a GoFile link (single file or folder) via gateway API."""
     if "::" in url:
         clean_url, password = url.rsplit("::", 1)
@@ -132,9 +133,8 @@ def gofile(url: str) -> tuple[str, list[str]] | dict[str, object]:
     if not contents:
         raise DirectDownloadLinkException("ERROR: No valid download links found")
 
-    download_info = (
-        data.get("download") if isinstance(data.get("download"), dict) else {}
-    )
+    download = data.get("download")
+    download_info = download if isinstance(download, dict) else {}
     header = _build_header(download_info)
     title = str(data.get("title") or contents[0]["filename"])
 
@@ -143,7 +143,7 @@ def gofile(url: str) -> tuple[str, list[str]] | dict[str, object]:
     if len(contents) == 1:
         return str(contents[0]["url"]), header
 
-    details: dict[str, object] = {
+    details: dict[str, Any] = {
         "contents": contents,
         "title": title,
         "total_size": total_size,
