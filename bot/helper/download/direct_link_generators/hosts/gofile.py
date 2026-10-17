@@ -1,123 +1,153 @@
-"""GoFile direct link handler."""
+"""GoFile direct link handler via gateway API."""
 
-from hashlib import sha256
+from __future__ import annotations
+
 from os import path as ospath
-from time import time
 
 from requests import Session
 
 from .._common import (
+    LOGGER,
     PASSWORD_ERROR_MESSAGE,
     DirectDownloadLinkException,
+    gateway_headers,
+    gateway_url,
     user_agent,
 )
 from ..registry import register
 
+_API_TIMEOUT = 30
 
-@register("gofile.io", order=20)
-def gofile(url):
-    try:
-        if "::" in url:
-            _password = url.split("::")[-1]
-            _password = sha256(_password.encode("utf-8")).hexdigest()
-            url = url.split("::")[-2]
+
+def _build_header(download_info: dict[str, object]) -> list[str]:
+    """The CDN request header as a list of 'Key: value' lines."""
+    cookie = str(download_info.get("cookie") or "").strip()
+    if not cookie:
+        name = str(download_info.get("cookie_name") or "").strip()
+        value = str(download_info.get("cookie_value") or "").strip()
+        if name and value:
+            cookie = f"{name}={value}"
+
+    ua = str(download_info.get("user_agent") or "").strip() or user_agent
+    header = [f"User-Agent: {ua}"]
+    if cookie:
+        header.insert(0, f"Cookie: {cookie}")
+    return header
+
+
+def _parse_files(
+    files: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], int]:
+    """Extract valid file entries and total size from gateway files list."""
+    contents: list[dict[str, object]] = []
+    total_size = 0
+
+    for file in files:
+        dl_url = file.get("download_url") or file.get("link")
+        if not dl_url or not isinstance(dl_url, str):
+            continue
+
+        raw_path = str(file.get("path") or "").lstrip("/")
+        folder_path = ospath.dirname(raw_path).lstrip("/")
+        filename = str(
+            file.get("name")
+            or ospath.basename(raw_path)
+            or "unknown"
+        )
+        raw_size = file.get("size")
+        if isinstance(raw_size, (int, float, str)):
+            try:
+                size = int(raw_size)
+            except (TypeError, ValueError):
+                size = 0
         else:
-            _password = ""
-        _id = url.split("/")[-1]
-    except Exception as e:
-        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}")
+            size = 0
 
-    def __get_token(session):
-        headers = {
-            "User-Agent": user_agent,
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept": "*/*",
-            "Connection": "keep-alive",
-        }
-        __url = "https://api.gofile.io/accounts"
-        try:
-            __res = session.post(__url, headers=headers).json()
-            if __res["status"] != "ok":
-                raise DirectDownloadLinkException("ERROR: Failed to get token.")
-            return __res["data"]["token"]
-        except Exception as e:
-            raise e
+        total_size += size
+        contents.append({
+            "path": folder_path,
+            "filename": filename,
+            "url": dl_url,
+        })
 
-    def __fetch_links(session, _id, folderPath=""):
-        _url = f"https://api.gofile.io/contents/{_id}?cache=true"
-        time_slot = int(time()) // 14400
-        raw = f"{user_agent}::en-US::{token}::{time_slot}::gf2026x"
-        wt = sha256(raw.encode()).hexdigest()
-        headers = {
-            "User-Agent": user_agent,
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept": "*/*",
-            "Connection": "keep-alive",
-            "Authorization": "Bearer" + " " + token,
-            "X-Website-Token": wt,
-            "X-BL": "en-US",
-        }
-        if _password:
-            _url += f"&password={_password}"
+    return contents, total_size
+
+
+def _fetch_from_gateway(url: str, password: str = "") -> dict[str, object]:
+    """Call gateway gofile scrape endpoint and validate response."""
+    api_url = gateway_url("/api/v1/scrape/gofile")
+    params: dict[str, str] = {"q": url}
+    if password:
+        params["password"] = password
+
+    with Session() as session:
         try:
-            _json = session.get(_url, headers=headers).json()
-        except Exception as e:
-            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}")
-        if _json["status"] in "error-passwordRequired":
+            resp = session.get(
+                api_url,
+                params=params,
+                headers=gateway_headers(),
+                timeout=_API_TIMEOUT,
+            )
+            data = resp.json()
+        except Exception as exc:
+            raise DirectDownloadLinkException(
+                f"ERROR: {exc.__class__.__name__}"
+            ) from exc
+
+    if not data.get("success"):
+        err = str(data.get("error") or f"HTTP {resp.status_code}")
+        err_lower = err.lower()
+        if "password" in err_lower and (
+            "required" in err_lower or "error-passwordrequired" in err_lower
+        ):
             raise DirectDownloadLinkException(
                 f"ERROR:\n{PASSWORD_ERROR_MESSAGE.format(url)}"
             )
-        if _json["status"] in "error-passwordWrong":
+        if "password" in err_lower and (
+            "wrong" in err_lower or "error-passwordwrong" in err_lower
+        ):
             raise DirectDownloadLinkException("ERROR: This password is wrong !")
-        if _json["status"] in "error-notFound":
-            raise DirectDownloadLinkException(
-                "ERROR: File not found on gofile's server"
-            )
-        if _json["status"] in "error-notPublic":
-            raise DirectDownloadLinkException("ERROR: This folder is not public")
+        raise DirectDownloadLinkException(f"ERROR: {err}")
 
-        data = _json["data"]
+    return data
 
-        if not details["title"]:
-            details["title"] = data["name"] if data["type"] == "folder" else _id
 
-        contents = data["children"]
-        for content in contents.values():
-            if content["type"] == "folder":
-                if not content["public"]:
-                    continue
-                if not folderPath:
-                    newFolderPath = ospath.join(details["title"], content["name"])
-                else:
-                    newFolderPath = ospath.join(folderPath, content["name"])
-                __fetch_links(session, content["id"], newFolderPath)
-            else:
-                if not folderPath:
-                    folderPath = details["title"]
-                item = {
-                    "path": ospath.join(folderPath),
-                    "filename": content["name"],
-                    "url": content["link"],
-                }
-                if "size" in content:
-                    size = content["size"]
-                    if isinstance(size, str) and size.isdigit():
-                        size = float(size)
-                    details["total_size"] += size
-                details["contents"].append(item)
+@register("gofile.io", order=20)
+def gofile(url: str) -> tuple[str, list[str]] | dict[str, object]:
+    """Resolve a GoFile link (single file or folder) via gateway API."""
+    if "::" in url:
+        clean_url, password = url.rsplit("::", 1)
+        clean_url = clean_url.strip()
+        password = password.strip()
+    else:
+        clean_url = url.strip()
+        password = ""
 
-    details = {"contents": [], "title": "", "total_size": 0}
-    with Session() as session:
-        try:
-            token = __get_token(session)
-        except Exception as e:
-            raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}")
-        details["header"] = f"Cookie: accountToken={token}"
-        try:
-            __fetch_links(session, _id)
-        except Exception as e:
-            raise DirectDownloadLinkException(e)
+    data = _fetch_from_gateway(clean_url, password)
+    files = data.get("files")
+    if not isinstance(files, list) or not files:
+        raise DirectDownloadLinkException("ERROR: No files found in GoFile response")
 
-    if len(details["contents"]) == 1:
-        return (details["contents"][0]["url"], details["header"])
+    contents, total_size = _parse_files(files)
+    if not contents:
+        raise DirectDownloadLinkException("ERROR: No valid download links found")
+
+    download_info = (
+        data.get("download") if isinstance(data.get("download"), dict) else {}
+    )
+    header = _build_header(download_info)
+    title = str(data.get("title") or contents[0]["filename"])
+
+    LOGGER.info(f"GoFile: resolved {len(contents)} file(s) for '{title}'")
+
+    if len(contents) == 1:
+        return str(contents[0]["url"]), header
+
+    details: dict[str, object] = {
+        "contents": contents,
+        "title": title,
+        "total_size": total_size,
+    }
+    if header:
+        details["header"] = "\n".join(header)
     return details
