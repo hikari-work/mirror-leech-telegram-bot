@@ -128,6 +128,42 @@ def test_is_url_shortener_covers_ouo(shortener):
     assert shortener.is_url_shortener("www.ouo.io")
 
 
+def test_is_url_shortener_covers_bicolink(shortener):
+    # go.bicolink.net is the legacy host the gateway still accepts; bicolink.net
+    # is subdomain-matched like the rest.
+    assert shortener.is_url_shortener("bicolink.com")
+    assert shortener.is_url_shortener("bicolink.net")
+    assert shortener.is_url_shortener("go.bicolink.net")
+
+
+def test_bicolink_success_returns_target(shortener):
+    mock_cls, session, calls = _mock_session(
+        (200, {"success": True, "url": "https://mega.nz/file/abc#key"})
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://bicolink.com/Zjl2r")
+
+    assert result == "https://mega.nz/file/abc#key"
+    url, kwargs = calls[0]
+    assert url == "https://api.piyann.me/api/v1/bypass/bicolink"
+    assert kwargs["params"] == {"url": "https://bicolink.com/Zjl2r"}
+    assert session.get.call_count == 1
+
+
+def test_bicolink_rate_limit_is_retried(shortener):
+    # The resolver's own walk sleeps ~10 s before the final POST, so its
+    # endpoint is the slow one; a rate limit is still worth another attempt.
+    mock_cls, session, _calls = _mock_session(
+        (429, {"success": False, "error": "rate limit exceeded"}),
+        (200, {"success": True, "url": "https://example.com/target"}),
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://bicolink.com/Zjl2r")
+
+    assert result == "https://example.com/target"
+    assert session.get.call_count == 2
+
+
 def test_is_url_shortener_rejects_others(shortener):
     # Hosts the gateway answers with 400; routing them here would only turn a
     # working direct-link lookup into a bypass error.

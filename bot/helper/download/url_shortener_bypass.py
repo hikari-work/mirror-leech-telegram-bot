@@ -31,13 +31,20 @@ _LINKVERTISE_DOMAINS = (
     "file-link.net",
     "link-target.net",
 )
+_BICOLINK_DOMAINS = (
+    "bicolink.com",
+    "bicolink.net",
+)
 
-# (name, domains it owns, gateway endpoint). Both shorteners gate the
+# (name, domains it owns, gateway endpoint). All three shorteners gate the
 # destination behind a flow the gateway already walks for us — ouo's CSRF chain
-# behind Cloudflare, Linkvertise's GraphQL API — so neither is scraped here.
+# behind Cloudflare, Linkvertise's GraphQL API, bicolink's ad gate plus its
+# wp-safelink blog — so none is scraped here. bicolink's walk carries a ~10 s
+# settle sleep the target itself imposes, so its endpoint is the slow one.
 _BYPASSERS = (
     ("ouo", _OUO_DOMAINS, "/api/v1/bypass/ouo"),
     ("linkvertise", _LINKVERTISE_DOMAINS, "/api/v1/bypass/linkvertise"),
+    ("bicolink", _BICOLINK_DOMAINS, "/api/v1/bypass/bicolink"),
 )
 
 _GATEWAY_ATTEMPTS = 3
