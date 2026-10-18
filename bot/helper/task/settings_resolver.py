@@ -94,10 +94,10 @@ class SettingsResolverMixin(TaskConfigHost):
         for a task that was never going to post anything.
 
         The per-user cap is checked first, before any of that work: a user who
-        is already past both ``USER_QUEUE_MAX`` and ``USER_QUEUE_SIZE_MAX`` is
-        turned away with a message rather than queued. ``enforce_user_limit`` is
-        false only for restart recovery, which resumes tasks that were already
-        admitted.
+        has already reached ``USER_QUEUE_MAX`` tasks or ``USER_QUEUE_SIZE_MAX``
+        bytes is turned away with a message rather than queued.
+        ``enforce_user_limit`` is false only for restart recovery, which
+        resumes tasks that were already admitted.
         """
         if enforce_user_limit and (refusal := await user_limit_refusal(self.user_id)):
             raise ValueError(refusal)

@@ -3,13 +3,13 @@
 Two values bound one non-owner user: ``USER_QUEUE_MAX`` tasks, and
 ``USER_QUEUE_SIZE_MAX`` bytes between them. Both are read in the same pass over
 ``task_dict`` -- downloading, uploading and queued all share that registry
-(``_user_tasks``/``_tasks_size``) -- and a user has to be over *both* to be
-turned away, which is what lets somebody with a handful of small tasks keep
-adding. The refusal is raised in ``before_start``, which both task-entry classes
-already run inside a ``try/except -> fail_task`` that turns the raise into a
-message to the user. Restart recovery passes ``enforce_user_limit=False`` so a
-task that was already admitted before the restart is never turned away on the
-way back.
+(``_user_tasks``/``_tasks_size``) -- and reaching *either* one is enough to be
+turned away, so a user may add up to the task bound as long as they stay under
+the size bound. The refusal is raised in ``before_start``, which both task-entry
+classes already run inside a ``try/except -> fail_task`` that turns the raise
+into a message to the user. Restart recovery passes ``enforce_user_limit=False``
+so a task that was already admitted before the restart is never turned away on
+the way back.
 """
 
 from __future__ import annotations
@@ -108,23 +108,32 @@ async def test_a_declared_size_spares_the_disk_walk(disk):
 # ── user_limit_refusal ──────────────────────────────────────────────
 
 
-async def test_under_the_task_cap_is_allowed(caps):
-    caps.update({i: _status(USER, 10_000, i) for i in range(2)})
+async def test_under_both_bounds_is_allowed(caps):
+    caps.update({i: _status(USER, 10, i) for i in range(2)})
     assert await tm.user_limit_refusal(USER) is None
 
 
-async def test_over_the_task_cap_but_small_is_allowed(caps, disk):
-    # five tasks, well under the size cap: this is the case the pair exists for
+async def test_the_task_bound_admits_up_to_its_last_slot(caps):
+    # one short of the count, well under the size: the last slot is the user's
+    caps.update({i: _status(USER, 10, i) for i in range(TASK_CAP - 1)})
+    assert await tm.user_limit_refusal(USER) is None
+
+
+async def test_the_task_bound_stops_the_next_though_the_tasks_are_small(caps):
+    # five tiny tasks: nowhere near the size bound, and it does not matter
     caps.update({i: _status(USER, 10, i) for i in range(5)})
-    assert await tm.user_limit_refusal(USER) is None
+    refusal = await tm.user_limit_refusal(USER)
+    assert refusal is not None
+    assert "5 tasks totalling 50.00B" in refusal
+    assert "3 tasks and 1.00KB" in refusal
 
 
-async def test_under_the_task_cap_never_touches_the_disk(caps, disk):
-    # the sizes only decide once the task count has run out, and most tasks
-    # never get that far
-    caps.update({i: _status(USER, mid=i) for i in range(TASK_CAP - 1)})
-    assert await tm.user_limit_refusal(USER) is None
-    assert disk.walked == []
+async def test_the_size_bound_stops_a_user_the_count_would_have_admitted(caps):
+    # the count is short of its bound, but two tasks already fill the size
+    caps.update({i: _status(USER, SIZE_CAP_BYTES, i) for i in range(TASK_CAP - 1)})
+    refusal = await tm.user_limit_refusal(USER)
+    assert refusal is not None
+    assert "2 tasks totalling 2.00KB" in refusal
 
 
 async def test_over_both_is_refused(caps):
@@ -135,16 +144,19 @@ async def test_over_both_is_refused(caps):
     assert "3 tasks and 1.00KB" in refusal
 
 
-async def test_both_boundaries_have_to_be_reached(caps):
-    # exactly at the task cap, one byte under the size cap
+async def test_one_byte_under_the_size_bound_still_refuses_on_the_count(caps):
+    # exactly at the task bound, one byte under the size bound: the count alone
+    # is enough to turn the next task away
     caps.update({i: _status(USER, 341, i) for i in range(TASK_CAP)})
-    assert await tm.user_limit_refusal(USER) is None
+    refusal = await tm.user_limit_refusal(USER)
+    assert refusal is not None
+    assert "3 tasks totalling 1023.00B" in refusal
 
 
 async def test_only_the_asking_user_is_counted(caps):
-    # five large tasks, but four belong to someone else
+    # one small task for the user; someone else is over both
     caps.update({i: _status(OTHER, SIZE_CAP_BYTES, i) for i in range(4)})
-    caps[9] = _status(USER, SIZE_CAP_BYTES, 9)
+    caps[9] = _status(USER, 10, 9)
     assert await tm.user_limit_refusal(USER) is None
     assert await tm.user_limit_refusal(OTHER) is not None
 
@@ -153,9 +165,9 @@ async def test_download_upload_and_queued_count_together(caps):
     # one of each state reaches the cap of three; the kind is not consulted
     caps.update(
         {
-            1: _status(USER, SIZE_CAP_BYTES, 1, "download"),
-            2: _status(USER, SIZE_CAP_BYTES, 2, "upload"),
-            3: _status(USER, SIZE_CAP_BYTES, 3, "queued"),
+            1: _status(USER, 1, 1, "download"),
+            2: _status(USER, 1, 2, "upload"),
+            3: _status(USER, 1, 3, "queued"),
         }
     )
     assert await tm.user_limit_refusal(USER) is not None
@@ -182,11 +194,25 @@ async def test_an_empty_size_cap_leaves_the_task_count_deciding(caps, monkeypatc
     assert "3 tasks at once" in refusal
 
 
-async def test_a_big_size_cap_spares_a_user_the_count_cap(caps, monkeypatch):
-    # the point of writing 100GB: two dozen 1GB tasks are nowhere near it
+async def test_a_big_size_cap_does_not_lift_the_task_bound(caps, monkeypatch):
+    # writing 100GB keeps the size side quiet; the count still bounds, so two
+    # dozen 1GB tasks are refused on the count
     monkeypatch.setattr(Config, "USER_QUEUE_SIZE_MAX", "100GB")
     caps.update({i: _status(USER, 1073741824, i) for i in range(24)})
-    assert await tm.user_limit_refusal(USER) is None
+    refusal = await tm.user_limit_refusal(USER)
+    assert refusal is not None
+    assert "24 tasks totalling 24.00GB" in refusal
+    assert "3 tasks and 100.00GB" in refusal
+
+
+async def test_an_empty_size_cap_is_never_measured(caps, disk, monkeypatch):
+    # nothing to weigh, so the disk stays unread -- the count is the only bound
+    monkeypatch.setattr(Config, "USER_QUEUE_SIZE_MAX", "")
+    caps.update({i: _status(USER, mid=i) for i in range(TASK_CAP)})
+    refusal = await tm.user_limit_refusal(USER)
+    assert refusal is not None
+    assert "3 tasks at once" in refusal
+    assert disk.walked == []
 
 
 # ── _size_cap_bytes ─────────────────────────────────────────────────

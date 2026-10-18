@@ -57,17 +57,19 @@ class Config:
     QUEUE_DOWNLOAD = 0
     QUEUE_UPLOAD = 0
     # Most tasks (downloading, uploading or queued) one non-owner user may hold
-    # at once. The next task over this is rejected with a message, not queued.
-    # 0 disables the cap; the owner is never capped.
+    # at once. A user may keep adding up to this many; the next task over it is
+    # rejected with a message, not queued. 0 disables the cap; the owner is
+    # never capped.
     USER_QUEUE_MAX = 0
     # What those tasks may add up to, written the way a person would say it:
-    # "100GB", "1TB", "500MB". A plain number counts as bytes. The two caps are
-    # read together: a user is turned away only once they are over *both*, so
-    # somebody holding a couple of small tasks may keep adding -- which is what
-    # makes a queue of many small files cost one person nothing. Empty drops the
-    # size side of the check, leaving USER_QUEUE_MAX on its own, and a value the
-    # bot cannot read does the same after saying so in the log; the owner is
-    # never capped either.
+    # "100GB", "1TB", "500MB". A plain number counts as bytes. The two values
+    # bound the same queue from both sides: a user may hold up to
+    # USER_QUEUE_MAX tasks *and* up to this many bytes between them, and the
+    # next task is refused once either bound is met -- so a user whose tasks
+    # are large runs out of bytes before they run out of slots. Empty drops the
+    # size side of the check, leaving USER_QUEUE_MAX on its own, and a value
+    # the bot cannot read does the same after saying so in the log; the owner
+    # is never capped either.
     USER_QUEUE_SIZE_MAX = ""
     # Links resolved (scraped / metadata-fetched) at the same time. The queue
     # limits above only bound transfers, and they are checked *after* a link is

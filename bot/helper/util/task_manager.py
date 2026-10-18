@@ -175,35 +175,35 @@ def _size_cap_bytes() -> int:
 async def user_limit_refusal(user_id: int) -> str | None:
     """Why *user_id* may not start another task, or None when they may.
 
-    Two caps, and a user has to be over *both* to be turned away:
-    ``USER_QUEUE_MAX`` tasks holding ``USER_QUEUE_SIZE_MAX`` bytes between them.
-    The task count on its own is not what this is guarding against -- one person
-    parking a handful of small downloads costs the queue little -- so a user
-    still under the size cap keeps adding, and the pair only closes once what
-    they hold is both numerous and large.
+    Two bounds, and a user has to be under both to keep adding:
+    ``USER_QUEUE_MAX`` tasks, or ``USER_QUEUE_SIZE_MAX`` bytes between them.
+    Either one reaching its bound turns the next task away, so the count keeps
+    one person from taking the queue's slots and the size keeps them from
+    taking its disk. A user may add up to the count as long as what they hold
+    stays under the size, and no further once either bound is met.
 
     ``USER_QUEUE_MAX`` of 0 turns the whole check off, and is also the owner's
     standing exemption; an empty ``USER_QUEUE_SIZE_MAX`` drops the size side,
-    which leaves the task count deciding on its own. Both are read fresh each
+    which leaves the task count bounding on its own. Both are read fresh each
     call, so a change through ``/botset`` takes effect on the next task.
 
-    The count is answered first and the sizes only when it has run out, which
-    keeps the disk walk off the path most tasks take.
+    The task count is answered without a size measurement when there is no
+    size side, and the sizes themselves are read from the listeners where the
+    downloaders already settled them, so the disk walk stays the fallback.
     """
     task_limit = Config.USER_QUEUE_MAX
     if not task_limit or user_id == Config.OWNER_ID:
         return None
 
     listeners = await _user_tasks(user_id)
-    if len(listeners) < task_limit:
-        return None
-
     size_limit = _size_cap_bytes()
-    size = await _tasks_size(listeners)
-    if size_limit and size < size_limit:
+    size = await _tasks_size(listeners) if size_limit else 0
+    if len(listeners) < task_limit and (not size_limit or size < size_limit):
         return None
 
-    held = f"{len(listeners)} tasks totalling {get_readable_file_size(size)}"
+    held = f"{len(listeners)} tasks"
+    if size_limit:
+        held += f" totalling {get_readable_file_size(size)}"
     allowed = f"{task_limit} tasks"
     if size_limit:
         allowed += f" and {get_readable_file_size(size_limit)}"
