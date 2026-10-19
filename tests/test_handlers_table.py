@@ -70,8 +70,8 @@ EXPECTED_COMMANDS = [
     ("torrent_search", ["search"], "auth"),
     ("get_users_settings", ["users"], "sudo"),
     ("send_user_settings", ["us", "usetting"], "auth"),
-    ("user_login", ["login"], "auth"),
-    ("user_logout", ["logout"], "auth"),
+    ("user_login", ["login"], None),
+    ("user_logout", ["logout"], None),
     ("copy_task", ["copy"], "auth"),
     ("ytdl_leech", ["yl", "ytdlleech"], "auth"),
 ]
@@ -204,13 +204,13 @@ def test_shell_is_the_only_command_that_also_fires_on_edit(registered):
     assert edited[0]["access"] == plain["access"]
 
 
-def test_start_is_the_only_command_open_to_everyone(registered):
+def test_only_start_and_login_commands_are_open_to_everyone(registered):
     open_commands = [
         row["callback"]
         for row in _of_kind(registered, "MessageHandler")
         if row["access"] is None
     ]
-    assert open_commands == ["start"]
+    assert open_commands == ["start", "user_login", "user_logout"]
 
 
 def test_every_command_is_case_sensitive_and_slash_prefixed(registered):

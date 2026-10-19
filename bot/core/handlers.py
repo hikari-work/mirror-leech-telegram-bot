@@ -147,8 +147,8 @@ COMMAND_HANDLERS: tuple[_Command, ...] = (
     _Command(torrent_search, B.SearchCommand, _AUTH, desc="Search for torrents"),
     _Command(get_users_settings, B.UsersCommand, _SUDO, desc="Show users settings"),
     _Command(send_user_settings, B.UserSetCommand, _AUTH, desc="User settings"),
-    _Command(user_login, B.LoginCommand, _AUTH, desc="Login with own session"),
-    _Command(user_logout, B.LogoutCommand, _AUTH, desc="Revoke personal session"),
+    _Command(user_login, B.LoginCommand, desc="Login with own session"),
+    _Command(user_logout, B.LogoutCommand, desc="Revoke personal session"),
     _Command(copy_task, B.CopyCommand, _AUTH, desc="Copy a finished task"),
     _Command(ytdl_leech, B.YtdlLeechCommand, _AUTH, desc="Leech yt-dlp supported link"),
 )
