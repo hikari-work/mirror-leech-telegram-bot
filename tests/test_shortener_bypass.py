@@ -1,4 +1,7 @@
-"""Tests for the gateway-backed shortener bypasses (ouo, Linkvertise)."""
+"""Tests for the gateway-backed shortener bypasses.
+
+Covers ouo, Linkvertise, bicolink, and paid4link.
+"""
 
 from __future__ import annotations
 
@@ -159,6 +162,46 @@ def test_bicolink_rate_limit_is_retried(shortener):
     )
     with patch.object(shortener, "Session", mock_cls):
         result = shortener.bypass_shortener("https://bicolink.com/Zjl2r")
+
+    assert result == "https://example.com/target"
+    assert session.get.call_count == 2
+
+
+def test_is_url_shortener_covers_paid4link(shortener: ModuleType) -> None:
+    # Every paid4link host is a subdomain of the registrable domain; the gateway's
+    # own matcher accepts all of them, so no host list is needed here.
+    assert shortener.is_url_shortener("paid4link.com")
+    assert shortener.is_url_shortener("link.paid4link.com")
+    assert shortener.is_url_shortener("go.paid4link.com")
+    assert shortener.is_url_shortener("go2.paid4link.com")
+    assert shortener.is_url_shortener("go3.paid4link.com")
+
+
+def test_paid4link_success_returns_target(shortener: ModuleType) -> None:
+    mock_cls, session, calls = _mock_session(
+        (200, {"success": True, "url": "https://droplink.co/ftbVWC3"})
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://go.paid4link.com/cF0S4")
+
+    assert result == "https://droplink.co/ftbVWC3"
+    url, kwargs = calls[0]
+    assert url == "https://api.piyann.me/api/v1/bypass/paid4link"
+    # The gateway resolves every host, including subdomains, so the link is
+    # handed over untouched.
+    assert kwargs["params"] == {"url": "https://go.paid4link.com/cF0S4"}
+    assert session.get.call_count == 1
+
+
+def test_paid4link_rate_limit_is_retried(shortener: ModuleType) -> None:
+    # The resolver reads the SPF record and walks the origin, so its endpoint can
+    # be slow; a rate limit is still worth another attempt.
+    mock_cls, session, _calls = _mock_session(
+        (429, {"success": False, "error": "rate limit exceeded"}),
+        (200, {"success": True, "url": "https://example.com/target"}),
+    )
+    with patch.object(shortener, "Session", mock_cls):
+        result = shortener.bypass_shortener("https://go.paid4link.com/cF0S4")
 
     assert result == "https://example.com/target"
     assert session.get.call_count == 2

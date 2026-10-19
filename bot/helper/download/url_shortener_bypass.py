@@ -35,16 +35,22 @@ _BICOLINK_DOMAINS = (
     "bicolink.com",
     "bicolink.net",
 )
+# paid4link serves links from go/go2/go3/link subdomains; the subdomain match
+# covers them all, and the gateway accepts every one.
+_PAID4LINK_DOMAINS = ("paid4link.com",)
 
-# (name, domains it owns, gateway endpoint). All three shorteners gate the
+# (name, domains it owns, gateway endpoint). All four shorteners gate the
 # destination behind a flow the gateway already walks for us — ouo's CSRF chain
 # behind Cloudflare, Linkvertise's GraphQL API, bicolink's ad gate plus its
-# wp-safelink blog — so none is scraped here. bicolink's walk carries a ~10 s
-# settle sleep the target itself imposes, so its endpoint is the slow one.
+# wp-safelink blog, paid4link's Cloudflare origin — so none is scraped here.
+# bicolink's walk carries a ~10 s settle sleep the target itself imposes, and
+# paid4link's reads the zone's SPF record before walking the origin, so their
+# endpoints are the slow ones.
 _BYPASSERS = (
     ("ouo", _OUO_DOMAINS, "/api/v1/bypass/ouo"),
     ("linkvertise", _LINKVERTISE_DOMAINS, "/api/v1/bypass/linkvertise"),
     ("bicolink", _BICOLINK_DOMAINS, "/api/v1/bypass/bicolink"),
+    ("paid4link", _PAID4LINK_DOMAINS, "/api/v1/bypass/paid4link"),
 )
 
 _GATEWAY_ATTEMPTS = 3
