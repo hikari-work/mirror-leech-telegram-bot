@@ -221,3 +221,193 @@ async def test_a_notice_can_follow_the_first_one_silently(monkeypatch):
 
     assert bot.calls[0]["disable_notification"] is True
     assert bot.calls[0]["message_thread_id"] is None
+
+
+# ── parse_tg_link: one grammar for both range forms ─────────────────
+
+
+TWO_LINK = (
+    "https://t.me/c/4419364912/6617-https://t.me/c/4419364912/6900"
+)
+
+
+def test_a_two_link_range_names_every_message():
+    parsed = mu.parse_tg_link(TWO_LINK)
+
+    assert parsed.chat == -1004419364912
+    assert (parsed.first_id, parsed.last_id) == (6617, 6900)
+    assert parsed.is_range
+    assert len(parsed.ids) == 6900 - 6617 + 1
+    assert parsed.link_for(6617) == "https://t.me/c/4419364912/6617"
+
+
+def test_a_short_range_can_be_written_backwards():
+    parsed = mu.parse_tg_link("https://t.me/c/4419364912/6617-6500")
+
+    assert (parsed.first_id, parsed.last_id) == (6500, 6617)
+    assert parsed.link_for(6500) == "https://t.me/c/4419364912/6500"
+
+
+def test_a_two_link_range_can_be_written_backwards():
+    parsed = mu.parse_tg_link("https://t.me/c/1/900-https://t.me/c/1/700")
+
+    assert (parsed.first_id, parsed.last_id) == (700, 900)
+
+
+def test_a_single_link_is_not_a_range():
+    parsed = mu.parse_tg_link("https://t.me/somechannel/42")
+
+    assert not parsed.is_range
+    assert parsed.count == 1
+    assert parsed.chat == "somechannel"
+
+
+def test_the_two_ends_must_name_the_same_chat():
+    with pytest.raises(mu.TgLinkException, match="same chat"):
+        mu.parse_tg_link("https://t.me/c/1/5-https://t.me/c/2/7")
+
+
+def test_the_two_ends_must_name_the_same_topic():
+    with pytest.raises(mu.TgLinkException, match="same topic"):
+        mu.parse_tg_link(
+            "https://t.me/c/1/111/5-https://t.me/c/1/222/7"
+        )
+
+
+def test_a_range_over_the_cap_is_refused():
+    with pytest.raises(mu.TgLinkException, match="too large"):
+        mu.parse_tg_link("https://t.me/c/1/1-1001")
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["https://t.me/c/1/0", "https://t.me/c/1/0-3", "https://t.me/c/1/"],
+)
+def test_message_ids_start_at_one(address):
+    with pytest.raises(mu.TgLinkException, match="Wrong link format"):
+        mu.parse_tg_link(address)
+
+
+def test_the_private_range_form_still_works():
+    parsed = mu.parse_tg_link("tg://openmessage?user_id=123&message_id=5-7")
+
+    assert parsed.chat == 123
+    assert [parsed.link_for(i) for i in parsed.ids] == [
+        "tg://openmessage?user_id=123&message_id=5",
+        "tg://openmessage?user_id=123&message_id=6",
+        "tg://openmessage?user_id=123&message_id=7",
+    ]
+
+
+def test_a_topic_prefix_survives_the_expansion():
+    parsed = mu.parse_tg_link("https://t.me/c/123/456/10-12")
+
+    assert parsed.link_for(10) == "https://t.me/c/123/456/10"
+
+
+# ── get_tg_link_message: ranges ─────────────────────────────────────
+
+
+class _ProbeBot:
+    """Answers a single-id probe, optionally only for some of the ids."""
+
+    def __init__(self, readable=(), unreadable=False):
+        self.readable = set(readable)
+        self.unreadable = unreadable
+        self.asked: list[tuple] = []
+
+    async def get_messages(self, chat_id, message_ids):
+        if self.unreadable:
+            raise ValueError(f"no access to {chat_id}")
+        self.asked.append((chat_id, message_ids))
+        message = _Message(message_id=message_ids)
+        if message_ids not in self.readable:
+            message.empty = True
+        return message
+
+
+@pytest.fixture
+def no_bot_session(monkeypatch):
+    """Take the bot and the user session away, leaving only what a test sets."""
+    monkeypatch.setattr(mu.TgClient, "bot", _ProbeBot())
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+
+async def test_a_two_link_range_becomes_one_link_per_message(
+    monkeypatch, no_bot_session
+):
+    bot = _ProbeBot(readable={6617})
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+
+    links, session = await mu.get_tg_link_message(TWO_LINK, user_id=7)
+
+    assert session == "bot"
+    assert len(links) == 284
+    assert links[0] == "https://t.me/c/4419364912/6617"
+    assert links[-1] == "https://t.me/c/4419364912/6900"
+    assert bot.asked == [(-1004419364912, 6617)]
+
+
+async def test_a_reverse_range_expands_ascending(monkeypatch, no_bot_session):
+    monkeypatch.setattr(mu.TgClient, "bot", _ProbeBot(readable={5}))
+
+    links, _ = await mu.get_tg_link_message(
+        "https://t.me/c/1/7-5", user_id=7
+    )
+
+    assert links == [
+        "https://t.me/c/1/5",
+        "https://t.me/c/1/6",
+        "https://t.me/c/1/7",
+    ]
+
+
+async def test_a_degenerate_range_is_a_one_link_batch(monkeypatch, no_bot_session):
+    monkeypatch.setattr(mu.TgClient, "bot", _ProbeBot(readable={5}))
+
+    links, _ = await mu.get_tg_link_message("https://t.me/c/1/5-5", user_id=7)
+
+    assert links == ["https://t.me/c/1/5"]
+
+
+async def test_a_range_over_the_cap_is_refused_before_any_request(
+    monkeypatch, no_bot_session
+):
+    bot = _ProbeBot(readable={1})
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+
+    with pytest.raises(mu.TgLinkException, match="too large"):
+        await mu.get_tg_link_message("https://t.me/c/1/1-1001", user_id=7)
+
+    assert bot.asked == []
+
+
+async def test_a_deleted_first_message_does_not_condemn_the_range(
+    monkeypatch, no_bot_session
+):
+    bot = _ProbeBot(readable={9})
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+
+    links, session = await mu.get_tg_link_message(
+        "https://t.me/c/1/5-9", user_id=7
+    )
+
+    assert links[0] == "https://t.me/c/1/5"
+    assert session == "bot"
+    assert bot.asked == [(-1001, 5), (-1001, 9)]
+
+
+async def test_trailing_text_does_not_change_a_single_link(monkeypatch):
+    monkeypatch.setattr(
+        mu.TgClient, "bot", SimpleNamespace(get_messages=_bot_returning(_Message(42)))
+    )
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    message, session = await mu.get_tg_link_message(
+        "https://t.me/somechannel/42 some trailing text", user_id=7
+    )
+
+    assert session == "bot"
+    assert message.id == 42

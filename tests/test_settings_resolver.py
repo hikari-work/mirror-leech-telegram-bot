@@ -606,3 +606,44 @@ class TestBucketDestination:
 
         with pytest.raises(ValueError, match="'aws'"):
             listener._resolve_s3_destination()
+
+
+# ── thumbnails ──────────────────────────────────────────────────────
+
+
+class TestThumbnail:
+    """A ``THUMBNAIL`` may name a telegram message; a range has no single one."""
+
+    async def test_a_photo_message_is_downloaded(self, monkeypatch):
+        saved = []
+
+        async def resolve(link, user_id):
+            return SimpleNamespace(photo=object(), document=None), "bot"
+
+        async def create_thumb(msg):
+            saved.append(msg)
+            return "/thumbs/one.jpg"
+
+        monkeypatch.setattr(sr, "get_tg_link_message", resolve)
+        monkeypatch.setattr(sr, "create_thumb", create_thumb)
+        listener = Listener(thumb="https://t.me/c/1/5")
+
+        await listener._resolve_thumbnail()
+
+        assert listener.thumb == "/thumbs/one.jpg"
+        assert len(saved) == 1
+
+    async def test_a_range_resolves_to_no_thumbnail(self, monkeypatch):
+        async def resolve(link, user_id):
+            return ["https://t.me/c/1/5", "https://t.me/c/1/6"], "bot"
+
+        async def create_thumb(msg):
+            raise AssertionError("a range has no single message to thumbnail")
+
+        monkeypatch.setattr(sr, "get_tg_link_message", resolve)
+        monkeypatch.setattr(sr, "create_thumb", create_thumb)
+        listener = Listener(thumb="https://t.me/c/1/5-6")
+
+        await listener._resolve_thumbnail()
+
+        assert listener.thumb == ""

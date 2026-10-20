@@ -1,11 +1,13 @@
 import html
 from asyncio import sleep
-from pyrogram.errors import FloodWait, FloodPremiumWait
-from re import match as re_match
+from dataclasses import dataclass
+from re import compile as re_compile
 from time import time
 from typing import TYPE_CHECKING
 
-from ... import LOGGER, status_dict, task_dict_lock, intervals, DOWNLOAD_DIR
+from pyrogram.errors import FloodPremiumWait, FloodWait
+
+from ... import DOWNLOAD_DIR, LOGGER, intervals, status_dict, task_dict_lock
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient, get_user_client
 from ..util.bot_utils import SetInterval
@@ -15,6 +17,7 @@ from .flood import flood_seconds
 
 if TYPE_CHECKING:
     # For ``chat_of``'s signature only; nothing here builds either one.
+    from pyrogram import Client
     from pyrogram.types import Chat, Message
 
 STATUS_RESEND_INTERVAL = 8
@@ -206,83 +209,270 @@ async def delete_status():
                 LOGGER.error(str(e))
 
 
-async def get_tg_link_message(link, user_id=None):
-    message = None
-    links = []
-    user_client = await get_user_client(user_id) or TgClient.user
-    if link.startswith("https://t.me/"):
-        private = False
-        msg = re_match(
-            r"https:\/\/t\.me\/(?:c\/)?([^\/]+)\/(?:\d+\/)*([0-9-]+)",
-            link,
+MAX_RANGE_MESSAGES = 1000
+"""Most messages one range may name."""
+
+_HTTPS_PREFIX = (
+    r"(?P<prefix>https://t\.me/(?:(?P<super>c)/)?"
+    r"(?P<chat>[^/\s?#]+)/(?P<topic>(?:\d+/)*))"
+)
+_HTTPS_SINGLE = re_compile(rf"^{_HTTPS_PREFIX}(?P<id>\d+)(?:[?#]\S*)?$")
+_HTTPS_RANGE = re_compile(rf"^{_HTTPS_PREFIX}(?P<first>\d+)-(?P<last>\d+)$")
+_TG_PREFIX = r"(?P<prefix>tg://openmessage\?user_id=(?P<chat>-?\d+)&message_id=)"
+_TG_SINGLE = re_compile(rf"^{_TG_PREFIX}(?P<id>\d+)(?:&[^#\s]*)?$")
+_TG_RANGE = re_compile(rf"^{_TG_PREFIX}(?P<first>\d+)-(?P<last>\d+)$")
+
+_RANGE_SEPARATORS = ("-https://t.me/", "-tg://openmessage?")
+
+
+@dataclass(frozen=True)
+class TgLink:
+    """One telegram address, resolved into the pieces a range needs.
+
+    ``prefix`` is everything before the message id, which is what lets one
+    address become one link per id without guessing the chat, the ``c/`` form
+    or a forum topic again.
+    """
+
+    chat: int | str
+    first_id: int
+    last_id: int
+    scheme: str
+    prefix: str
+    is_range: bool
+
+    @property
+    def ids(self) -> range:
+        return range(self.first_id, self.last_id + 1)
+
+    @property
+    def count(self) -> int:
+        return self.last_id - self.first_id + 1
+
+    def link_for(self, message_id: int) -> str:
+        return f"{self.prefix}{message_id}"
+
+
+def _address_of(text: str) -> str:
+    """The address at the front of *text*, without surrounding punctuation.
+
+    ``/leech`` hands this function either a bare link or a link followed by the
+    mode keyword; the thumbnail and ffmpeg callers append their own text. Only
+    the first token is ever the address.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    return stripped.split(maxsplit=1)[0].rstrip(".,;:!?\"')]}")
+
+
+def _chat_id(raw: str, *, tg: bool) -> int | str:
+    """The peer id a link names, in the form pyrogram expects.
+
+    The ``c/`` form carries the channel id without telegram's ``-100`` marker;
+    a username is not a number at all and goes back as a string.
+    """
+    if tg:
+        return int(raw)
+    if raw.isdigit():
+        return int(f"-100{raw}")
+    return raw
+
+
+def _parse_single_tg_link(address: str) -> TgLink | None:
+    if match := _HTTPS_SINGLE.match(address):
+        message_id = int(match["id"])
+        if message_id < 1:
+            return None
+        return TgLink(
+            chat=_chat_id(match["chat"], tg=False),
+            first_id=message_id,
+            last_id=message_id,
+            scheme="https",
+            prefix=match["prefix"],
+            is_range=False,
         )
+    if match := _TG_SINGLE.match(address):
+        message_id = int(match["id"])
+        if message_id < 1:
+            return None
+        return TgLink(
+            chat=int(match["chat"]),
+            first_id=message_id,
+            last_id=message_id,
+            scheme="tg",
+            prefix=match["prefix"],
+            is_range=False,
+        )
+    return None
+
+
+def _parse_range_address(address: str) -> TgLink | None:
+    if match := _TG_RANGE.match(address):
+        scheme, tg = "tg", True
+    elif match := _HTTPS_RANGE.match(address):
+        scheme, tg = "https", False
     else:
-        private = True
-        msg = re_match(
-            r"tg:\/\/openmessage\?user_id=(-?[0-9]+)&message_id=([0-9-]+)", link
+        return None
+    first_id, last_id = sorted((int(match["first"]), int(match["last"])))
+    if first_id < 1:
+        return None
+    return TgLink(
+        chat=_chat_id(match["chat"], tg=tg),
+        first_id=first_id,
+        last_id=last_id,
+        scheme=scheme,
+        prefix=match["prefix"],
+        is_range=True,
+    )
+
+
+def _split_two_links(address: str) -> tuple[str, str] | None:
+    for separator in _RANGE_SEPARATORS:
+        index = address.find(separator)
+        if index > 0:
+            return address[:index], address[index + 1 :]
+    return None
+
+
+def _merge_two_links(pair: tuple[str, str]) -> TgLink:
+    left = _parse_single_tg_link(pair[0])
+    right = _parse_single_tg_link(pair[1])
+    if left is None or right is None:
+        raise TgLinkException("Wrong link format!")
+    if left.scheme != right.scheme or left.chat != right.chat:
+        raise TgLinkException("The two links in a range must point to the same chat.")
+    if left.prefix != right.prefix:
+        raise TgLinkException("The two links in a range must point to the same topic.")
+    first_id, last_id = sorted((left.first_id, right.first_id))
+    return TgLink(
+        chat=left.chat,
+        first_id=first_id,
+        last_id=last_id,
+        scheme=left.scheme,
+        prefix=left.prefix,
+        is_range=True,
+    )
+
+
+def parse_tg_link(address: str) -> TgLink:
+    """Resolve a single link, a short range, or two full links joined by ``-``.
+
+    Both ends of a range are normalized to ``first..last``, so a range written
+    backwards names the same messages as one written forwards.
+    """
+    pair = _split_two_links(address)
+    parsed = (
+        _merge_two_links(pair)
+        if pair
+        else _parse_range_address(address) or _parse_single_tg_link(address)
+    )
+    if parsed is None:
+        raise TgLinkException("Wrong link format!")
+    if parsed.count > MAX_RANGE_MESSAGES:
+        raise TgLinkException(
+            f"Message range is too large: {parsed.count} "
+            f"(max {MAX_RANGE_MESSAGES})."
         )
+    return parsed
+
+
+async def get_tg_link_message(
+    link: str, user_id: int | None = None
+) -> tuple[Message | list[str], str]:
+    """Resolve a telegram address into what a leech task can act on.
+
+    A single message is returned as the message itself; a range becomes one
+    link per id, which the caller dispatches as a bulk.
+    """
+    parsed = parse_tg_link(_address_of(link))
+    if parsed.is_range:
+        session = await _probe_session(parsed, user_id)
+        return [parsed.link_for(message_id) for message_id in parsed.ids], session
+    return await _fetch_single(parsed, user_id)
+
+
+async def _fetch_single(
+    parsed: TgLink, user_id: int | None
+) -> tuple[Message, str]:
+    """Read one message: the bot first, the requester's session second."""
+    user_client = await get_user_client(user_id) or TgClient.user
+    if parsed.scheme == "tg":
         if not user_client:
             raise TgLinkException("USER_SESSION_STRING required for this private link!")
-    if not msg:
-        raise TgLinkException("Wrong link format!")
-    chat = msg[1]
-    msg_id = msg[2]
-    if "-" in msg_id:
-        start_id, end_id = msg_id.split("-")
-        msg_id = start_id = int(start_id)
-        end_id = int(end_id)
-        btw = end_id - start_id
-        if private:
-            link = link.split("&message_id=")[0]
-            links.append(f"{link}&message_id={start_id}")
-            for _ in range(btw):
-                start_id += 1
-                links.append(f"{link}&message_id={start_id}")
-        else:
-            link = link.rsplit("/", 1)[0]
-            links.append(f"{link}/{start_id}")
-            for _ in range(btw):
-                start_id += 1
-                links.append(f"{link}/{start_id}")
-    else:
-        msg_id = int(msg_id)
+        return await _fetch_with_user(user_client, parsed, parsed.first_id)
+    try:
+        message = await TgClient.bot.get_messages(
+            chat_id=parsed.chat, message_ids=parsed.first_id
+        )
+        if message is not None and not message.empty:
+            return message, "bot"
+    except Exception as e:
+        if not user_client:
+            raise e
+    if not user_client:
+        raise TgLinkException("Private: Can't get this message!")
+    return await _fetch_with_user(user_client, parsed, parsed.first_id)
 
-    if chat.lstrip("-").isdigit():
-        # A plain group and a private chat carry a negative id of their own, and
-        # neither has a ``-100`` prefix to add: unlike a channel, the id in the
-        # link is already the peer id. Only the ``https://t.me/c/`` form names a
-        # channel by its stripped id, and that branch is the ``else``.
-        chat = int(chat) if private else int(f"-100{chat}")
 
-    if not private:
+async def _fetch_with_user(
+    client: Client, parsed: TgLink, message_id: int
+) -> tuple[Message, str]:
+    try:
+        message = await client.get_messages(
+            chat_id=parsed.chat, message_ids=message_id
+        )
+    except Exception as e:
+        raise TgLinkException(
+            f"You don't have access to this chat!. ERROR: {e}"
+        ) from e
+    if message is not None and not message.empty:
+        return message, "user"
+    raise TgLinkException("Private: Can't get this message!")
+
+
+async def _probe_session(parsed: TgLink, user_id: int | None) -> str:
+    """Choose the reader for a range without fetching the whole range.
+
+    The first id is the natural probe, but a deleted first message must not
+    condemn a range the rest of which is readable, hence the second probe at
+    the other end.
+    """
+    user_client = await get_user_client(user_id) or TgClient.user
+    if parsed.scheme == "tg":
+        if not user_client:
+            raise TgLinkException("USER_SESSION_STRING required for this private link!")
+        await _probe_user_range(user_client, parsed)
+        return "user"
+    try:
+        for message_id in dict.fromkeys((parsed.first_id, parsed.last_id)):
+            message = await TgClient.bot.get_messages(
+                chat_id=parsed.chat, message_ids=message_id
+            )
+            if message is not None and not message.empty:
+                return "bot"
+    except Exception as e:
+        if not user_client:
+            raise e
+    if user_client:
+        await _probe_user_range(user_client, parsed)
+        return "user"
+    raise TgLinkException("Private: Can't get this message!")
+
+
+async def _probe_user_range(client: Client, parsed: TgLink) -> None:
+    for message_id in dict.fromkeys((parsed.first_id, parsed.last_id)):
         try:
-            message = await TgClient.bot.get_messages(chat_id=chat, message_ids=msg_id)
-            # No message at all counts as one the bot cannot read, same as the
-            # empty placeholder telegram answers with for a deleted one.
-            if message is None or message.empty:
-                private = True
-        except Exception as e:
-            private = True
-            if not user_client:
-                raise e
-
-    if not private:
-        return (links, "bot") if links else (message, "bot")
-    elif user_client:
-        try:
-            user_message = await user_client.get_messages(
-                chat_id=chat, message_ids=msg_id
+            message = await client.get_messages(
+                chat_id=parsed.chat, message_ids=message_id
             )
         except Exception as e:
             raise TgLinkException(
                 f"You don't have access to this chat!. ERROR: {e}"
             ) from e
-        if user_message is not None and not user_message.empty:
-            return (links, "user") if links else (user_message, "user")
-        else:
-            raise TgLinkException("Private: Can't get this message!")
-    else:
-        raise TgLinkException("Private: Can't get this message!")
+        if message is not None and not message.empty:
+            return
+    raise TgLinkException("Private: Can't get this message!")
 
 
 async def temp_download(msg):

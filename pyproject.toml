@@ -120,7 +120,6 @@ max-complexity = 10
 "bot/helper/progress/yt_dlp_status.py"             = ["E722"]
 "bot/helper/telegram/button_build.py"                              = ["I001"]
 "bot/helper/telegram/filters.py"                                   = ["I001"]
-"bot/helper/telegram/message_utils.py"                             = ["C901", "I001"]
 "bot/modules/__init__.py"                                                 = ["I001"]
 "bot/modules/bypass.py"                                                   = ["I001"]
 "bot/modules/cancel_task.py"                                              = ["E501", "I001"]

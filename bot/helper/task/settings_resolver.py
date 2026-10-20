@@ -182,7 +182,12 @@ class SettingsResolverMixin(TaskConfigHost):
         """Turn a telegram link thumbnail into a file on disk."""
         if self.thumb == "none" or not is_telegram_link(self.thumb):
             return
-        msg = (await get_tg_link_message(self.thumb, self.user_id))[0]
+        msg, _ = await get_tg_link_message(self.thumb, self.user_id)
+        if isinstance(msg, list):
+            # A range resolves to a list of links; a thumbnail is one message
+            # by definition, so a range simply has none.
+            self.thumb = ""
+            return
         self.thumb = await create_thumb(msg) if msg.photo or msg.document else ""
 
     # ── ffmpeg presets ──────────────────────────────────────────────────
