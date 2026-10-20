@@ -25,6 +25,11 @@ class Config:
     FILES_LINKS = False
     INCOMPLETE_TASK_NOTIFIER = False
     LEECH_DUMP_CHAT = ""
+    # How many live recordings (`/live`) one user may run at once. The slot is
+    # held until the recording has been uploaded, so it also bounds how many
+    # uploads a single user can have running from this command. 0 disables the
+    # cap; the owner is subject to it like everyone else.
+    MAX_LIVE_RECORDS = 2
     LEECH_FILENAME_PREFIX = ""
     LEECH_SPLIT_SIZE = 2097152000
     MEDIA_GROUP = False

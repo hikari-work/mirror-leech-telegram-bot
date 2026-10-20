@@ -74,6 +74,7 @@ EXPECTED_COMMANDS = [
     ("user_logout", ["logout"], None),
     ("copy_task", ["copy"], "auth"),
     ("ytdl_leech", ["yl", "ytdlleech"], "auth"),
+    ("live_menu", ["live"], "auth"),
 ]
 
 # (callback, callback-data pattern, who may press it) — in registration order.
@@ -90,6 +91,7 @@ EXPECTED_CALLBACKS = [
     ("edit_user_settings", "^userset", None),
     ("copy_choice", "^copyt", None),
     ("task_options_callback", "^lopt", None),
+    ("live_callback", "^live", None),
 ]
 
 # Runs inside the subprocess. Filter trees are only ever a match filter or

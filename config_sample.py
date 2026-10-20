@@ -62,6 +62,9 @@ USER_TRANSMISSION = False
 HYBRID_LEECH = False
 LEECH_FILENAME_PREFIX = ""
 LEECH_DUMP_CHAT = ""
+# How many `/live` recordings one user may run at once; each slot is held until
+# its recording has been uploaded. 0 disables the cap.
+MAX_LIVE_RECORDS = 2
 CLONE_DUMP_CHATS = ""
 THUMBNAIL_LAYOUT = ""
 FILES_LINKS = False

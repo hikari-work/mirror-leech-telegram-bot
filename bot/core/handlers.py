@@ -59,6 +59,8 @@ from ..modules import (
     get_rss_menu,
     get_users_settings,
     leech,
+    live_callback,
+    live_menu,
     log,
     ping,
     private_leech,
@@ -151,6 +153,7 @@ COMMAND_HANDLERS: tuple[_Command, ...] = (
     _Command(user_logout, B.LogoutCommand, desc="Revoke personal session"),
     _Command(copy_task, B.CopyCommand, _AUTH, desc="Copy a finished task"),
     _Command(ytdl_leech, B.YtdlLeechCommand, _AUTH, desc="Leech yt-dlp supported link"),
+    _Command(live_menu, B.LiveCommand, _AUTH, desc="Record a live room"),
 )
 
 # Most callbacks carry no access filter of their own: the menu they belong to
@@ -170,6 +173,7 @@ CALLBACK_HANDLERS: tuple[_Callback, ...] = (
     _Callback(edit_user_settings, "^userset"),
     _Callback(copy_choice, "^copyt"),
     _Callback(task_options_callback, "^lopt"),
+    _Callback(live_callback, "^live"),
 )
 
 

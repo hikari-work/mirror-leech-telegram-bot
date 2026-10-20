@@ -407,6 +407,7 @@ NOTE: Try each command without any argument to see more detalis.
 /{BotCommands.LoginCommand}: Login with your own telegram account to download restricted/private telegram links (PM only).
 /{BotCommands.LogoutCommand}: Remove and revoke your saved personal session.
 /{BotCommands.CopyCommand} [task_id]: Copy a finished task's uploads to one of your copy presets, without downloading again.
+/{BotCommands.LiveCommand}: List the live rooms the gateway knows about and record one of them.
 /{BotCommands.BotSetCommand[0]} or /{BotCommands.BotSetCommand[1]} [query]: Bot settings.
 /{BotCommands.SelectCommand}: Select files from torrents by gid or reply.
 /{BotCommands.CancelTaskCommand[0]} or /{BotCommands.CancelTaskCommand[1]} [gid]: Cancel task by gid or reply.
