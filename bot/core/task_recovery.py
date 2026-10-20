@@ -388,7 +388,9 @@ def _why(row: dict) -> str:
     return "its engine no longer has it"
 
 
-async def _sweep(keep: set[int], keep_dirs: set[str] = frozenset()) -> None:
+async def _sweep(
+    keep: set[int], keep_dirs: set[str] | frozenset[str] = frozenset()
+) -> None:
     """Clear out what the dead process left and nothing is coming back for.
 
     Deliberately narrower than the ``clean_all`` it replaces, which removed
@@ -411,7 +413,9 @@ async def _sweep(keep: set[int], keep_dirs: set[str] = frozenset()) -> None:
     await _sweep_torrents(keep)
 
 
-async def _sweep_download_dir(keep: set[int], keep_dirs: set[str]) -> None:
+async def _sweep_download_dir(
+    keep: set[int], keep_dirs: set[str] | frozenset[str]
+) -> None:
     """Remove the directories of tasks that are not being resumed.
 
     A numeric name is a task id: one a resumed row claimed stays, anything else
