@@ -142,9 +142,16 @@ class MultiLinkMixin(TaskConfigHost):
             await self._shrink_batch(self.multi - 1)
 
     async def _run_multi(self, input_list, obj):
-        if not self.multi_tag and self.multi > 1:
-            self.multi_tag = token_urlsafe(3)
-            multi_tags.add(self.multi_tag)
+        # The tag this task owns, before the sleep below. The listener is shared
+        # with the rest of the command: a telegram range resolves its links
+        # while this task waits, and ``_handle_bulk`` installs the bulk's own
+        # tag on ``self`` in that window. Reading ``self.multi_tag`` after the
+        # sleep would make this task discard a tag it does not own, and
+        # ``dispatch_bulk`` would stop after the first few children.
+        own_tag = self.multi_tag
+        if not own_tag and self.multi > 1:
+            own_tag = self.multi_tag = token_urlsafe(3)
+            multi_tags.add(own_tag)
 
         if self.multi > 1 and self.multi_tag and self.multi_tag not in multi_batches:
             batch_name = (
@@ -164,8 +171,8 @@ class MultiLinkMixin(TaskConfigHost):
 
         await sleep(3)
         if self.multi <= 1:
-            if self.multi_tag in multi_tags:
-                multi_tags.discard(self.multi_tag)
+            if own_tag in multi_tags:
+                multi_tags.discard(own_tag)
             return
         if self.multi_tag and self.multi_tag not in multi_tags:
             await send_message(
