@@ -8,6 +8,7 @@ from ..telegram.message_utils import (
     edit_message,
     file_link_line,
     send_message,
+    send_notice,
 )
 from ..util.status_utils import get_readable_file_size
 from ._host import TaskConfigHost
@@ -178,6 +179,10 @@ class BatchTrackerMixin(TaskConfigHost):
             head += f"\n{notice}"
         head += f"\n<b>cc:</b> {self.tag}\n\n"
 
+        # The anchor is the progress message ("11/100 completed"), and an edit
+        # of it notifies nobody. Remove it and send the summary as a fresh,
+        # notifying message so the user learns the batch is done.
+        await delete_message(batch["anchor"])
         await self._send_chunked(batch["anchor"], head, all_files)
         await self._release(batch)
 
@@ -195,29 +200,28 @@ class BatchTrackerMixin(TaskConfigHost):
         return digest
 
     async def _send_chunked(self, anchor, head, all_files) -> None:
-        """Edit the anchor with the summary, spilling over into replies."""
+        """Send the summary as fresh messages, spilling over into more of them.
+
+        Only the first chunk asks telegram to notify: one batch is one event,
+        and a hundred-file summary split across several messages should not
+        ring the user's phone once per message. The rest follow silently.
+        """
+        notify = True
         if not all_files:
-            await edit_message(anchor, head)
+            await send_notice(anchor, head, notify=notify)
             return
         msg = head
         fmsg = ""
-        anchor_used = False
         for index, (flink, fname) in enumerate(all_files.items(), start=1):
             fmsg += file_link_line(index, flink, fname)
             if len(fmsg.encode()) + len(msg.encode()) > 4000:
-                if anchor_used:
-                    await send_message(anchor, msg + fmsg)
-                else:
-                    await edit_message(anchor, msg + fmsg)
-                    anchor_used = True
+                await send_notice(anchor, msg + fmsg, notify=notify)
+                notify = False
                 await sleep(1)
                 fmsg = ""
                 msg = ""
         if fmsg:
-            if anchor_used:
-                await send_message(anchor, msg + fmsg)
-            else:
-                await edit_message(anchor, msg + fmsg)
+            await send_notice(anchor, msg + fmsg, notify=notify)
 
     async def _release(self, batch) -> None:
         """Drop the batch bookkeeping and the command messages it owns."""

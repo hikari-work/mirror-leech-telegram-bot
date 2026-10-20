@@ -113,6 +113,43 @@ async def edit_message(message, text, buttons=None, block=True):
         return str(e)
 
 
+async def send_notice(
+    message: Message, text: str, *, notify: bool = True
+) -> Message | str:
+    """Send a fresh message to the chat *message* belongs to.
+
+    ``send_message`` replies and stays silent, which is right for status lines
+    and for the anchor a batch edits. A final summary is neither: an edit
+    notifies nobody, so the summary has to arrive as a new message, and the
+    user has to be told about it. The thread id is carried over so a summary
+    lands in the same forum topic as the message it replaces.
+
+    Returns the sent message, or the error string -- the same shape
+    ``send_message`` uses, so a caller can tell the two apart with ``isinstance``.
+    """
+    chat_id = chat_of(message).id
+    if chat_id is None:
+        # ``chat_of`` documents the opposite, but the type still says optional;
+        # refusing here keeps the assumption from becoming a TypeError inside
+        # pyrogram's argument validation.
+        LOGGER.error("Cannot send a notice: the message has no chat")
+        return "No chat to send to"
+    try:
+        return await TgClient.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=getattr(message, "message_thread_id", None),
+            disable_notification=not notify,
+        )
+    except (FloodWait, FloodPremiumWait) as f:
+        LOGGER.warning(str(f))
+        await sleep(flood_seconds(f) * 1.2)
+        return await send_notice(message, text, notify=notify)
+    except Exception as e:
+        LOGGER.error(str(e))
+        return str(e)
+
+
 async def send_file(message, file, caption=""):
     try:
         return await message.reply_document(

@@ -328,7 +328,7 @@ class Recorder(bt.BatchTrackerMixin, MultiLinkMixin):
 
 @pytest.fixture
 def batch(monkeypatch):
-    sent, edited = [], []
+    sent, edited, notices, deleted = [], [], [], []
 
     async def edit_message(msg, text, *a, block=True, **kw):
         await asyncio.sleep(0)
@@ -339,25 +339,37 @@ def batch(monkeypatch):
         sent.append(text)
         return SimpleNamespace(id=len(sent))
 
+    async def send_notice(msg, text, *a, notify=True, **kw):
+        await asyncio.sleep(0)
+        notices.append((text, notify))
+        return SimpleNamespace(id=len(notices))
+
     async def delete_message(msg):
-        return None
+        deleted.append(msg)
 
     monkeypatch.setattr(bt, "edit_message", edit_message)
     monkeypatch.setattr(bt, "send_message", send_message)
+    monkeypatch.setattr(bt, "send_notice", send_notice)
     monkeypatch.setattr(bt, "delete_message", delete_message)
 
     tag = "tst"
-    monkeypatch.setitem(
-        bt.multi_batches, tag, bt.new_batch(SimpleNamespace(id=1), 0, "bulk-tst")
-    )
+    anchor = SimpleNamespace(id=1)
+    monkeypatch.setitem(bt.multi_batches, tag, bt.new_batch(anchor, 0, "bulk-tst"))
     bt.multi_tags.add(tag)
-    yield SimpleNamespace(tag=tag, sent=sent, edited=edited)
+    yield SimpleNamespace(
+        tag=tag,
+        anchor=anchor,
+        sent=sent,
+        edited=edited,
+        notices=notices,
+        deleted=deleted,
+    )
     bt.multi_batches.pop(tag, None)
     bt.multi_tags.discard(tag)
 
 
 def summaries(batch):
-    return [t for t in batch.edited + batch.sent if "Complete" in t]
+    return [text for text, _ in batch.notices if "Complete" in text]
 
 
 async def report(batch, total, *, failures=(), files=1, seed=0):
@@ -399,6 +411,26 @@ class TestBatchAccounting:
         progress = [t for t in batch.edited if "Complete" not in t]
         assert len(progress) <= 3, "one edit per task is what earns a FloodWait"
 
+    async def test_the_summary_notifies_in_a_fresh_message(self, batch):
+        await report(batch, 3)
+
+        assert batch.deleted == [batch.anchor], (
+            "the progress message must not survive as the summary"
+        )
+        assert len(batch.notices) == 1
+        text, notify = batch.notices[0]
+        assert "Complete" in text
+        assert notify is True, "the user has to be told the batch finished"
+
+    async def test_only_the_first_summary_chunk_notifies(self, batch):
+        await report(batch, 120)
+
+        assert len(batch.notices) > 1, "the file list has to spill over"
+        assert batch.notices[0][1] is True
+        assert all(notify is False for _, notify in batch.notices[1:]), (
+            "one batch is one notification, however many messages it takes"
+        )
+
     async def test_failures_are_counted_and_digested(self, batch):
         await report(batch, 40, failures=set(range(0, 40, 3)))
 
@@ -406,9 +438,7 @@ class TestBatchAccounting:
         assert "<b>Failed:</b> 14" in summary
         assert "<b>Total Files:</b> 26" in summary
         assert "…and 4 more" in summary, "only the first 10 are listed by name"
-        assert batch.sent == [] or "Complete" in batch.sent[0], (
-            "a failed link must not answer with its own message"
-        )
+        assert batch.sent == [], "a failed link must not answer with its own message"
 
     async def test_file_counts_are_summed_not_overwritten(self, batch):
         await report(batch, 15, files=4)

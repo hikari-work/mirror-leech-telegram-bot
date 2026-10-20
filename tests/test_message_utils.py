@@ -177,3 +177,47 @@ def _bot_returning(message):
         return message
 
     return get_messages
+
+
+# ── send_notice: a fresh message the user is told about ─────────────
+
+
+class _SendingBot:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(id=5)
+
+
+async def test_a_notice_is_a_new_message_with_notification_on(monkeypatch):
+    """An edit notifies nobody, so the batch summary has to be sent, not edited."""
+    bot = _SendingBot()
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=99), message_thread_id=7
+    )
+
+    sent = await mu.send_notice(message, "done", notify=True)
+
+    assert sent.id == 5
+    assert bot.calls == [
+        {
+            "chat_id": 99,
+            "text": "done",
+            "message_thread_id": 7,
+            "disable_notification": False,
+        }
+    ]
+
+
+async def test_a_notice_can_follow_the_first_one_silently(monkeypatch):
+    bot = _SendingBot()
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+    message = SimpleNamespace(chat=SimpleNamespace(id=99), message_thread_id=None)
+
+    await mu.send_notice(message, "more", notify=False)
+
+    assert bot.calls[0]["disable_notification"] is True
+    assert bot.calls[0]["message_thread_id"] is None
