@@ -33,12 +33,20 @@ from ..helper.telegram.bot_commands import BotCommands
 from ..helper.telegram.message_utils import message_media, send_message
 from .leech import Leech
 
-MAX_MESSAGES = 100
+HISTORY_PAGE = 100
+"""Messages one history request asks for.
+
+Telegram returns at most this many per request, whatever ``limit`` says. The
+scan below walks the history one page at a time, so this is the size of a page
+rather than a ceiling on how far back the command may look.
+"""
+
+MAX_MESSAGES = 1000
 """Most messages one command may ask to scan.
 
-Telegram answers a history request with at most 100 messages, so a larger count
-cannot be honoured and silently returning 100 would be a lie about what was
-looked at. Refusing says so instead.
+Larger than one history page on purpose: the reader paginates, so a user who
+wants to look further back than 100 messages gets what they asked for instead of
+a silently truncated batch.
 """
 
 CHANNEL_PREFIX = 1000000000000
@@ -124,8 +132,35 @@ async def _history(client, chat_id, count):
 
     ``get_chat_history`` is an async iterator that yields newest first; the
     reversal is what makes a batch upload in the order the files were posted.
+
+    Telegram answers one request with at most ``HISTORY_PAGE`` messages, so a
+    longer scan is paginated. Each page asks for ``max_id`` one less than the
+    oldest id read so far: ``max_id`` is inclusive, and the subtraction is what
+    makes the pages adjacent instead of overlapping.
     """
-    messages = [msg async for msg in client.get_chat_history(chat_id, limit=count)]
+    messages = []
+    oldest = None
+    while len(messages) < count:
+        limit = min(HISTORY_PAGE, count - len(messages))
+        if oldest is None:
+            page = [
+                msg async for msg in client.get_chat_history(chat_id, limit=limit)
+            ]
+        else:
+            page = [
+                msg
+                async for msg in client.get_chat_history(
+                    chat_id, limit=limit, max_id=oldest - 1
+                )
+            ]
+        if not page:
+            break
+        messages.extend(page)
+        # a short page means the history itself ran out, not that the next page
+        # is empty -- stopping here saves a request that would return nothing
+        if len(page) < limit:
+            break
+        oldest = page[-1].id
     messages.reverse()
     return messages
 

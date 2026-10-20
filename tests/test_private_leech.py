@@ -85,18 +85,27 @@ class _Client:
         self.me = SimpleNamespace(id=me_id) if me_id is not None else None
         self.unreadable = unreadable
         self.asked_for: list[int] = []
+        self.calls: list[tuple[int, int]] = []
 
     async def get_chat(self, spec):
         if self.unreadable:
             raise ValueError(f"no access to {spec}")
         return self.chat
 
-    def get_chat_history(self, chat_id, limit=0):
+    def get_chat_history(self, chat_id, limit=0, max_id=0):
         self.asked_for.append(chat_id)
+        self.calls.append((limit, max_id))
 
         async def gen():
-            # newest first, the way telegram answers
-            for message in self.messages[:limit]:
+            # newest first, the way telegram answers; max_id is inclusive and
+            # asks for the messages at or below the id given
+            yielded = 0
+            for message in self.messages:
+                if max_id and message.id > max_id:
+                    continue
+                if limit and yielded >= limit:
+                    break
+                yielded += 1
                 yield message
 
         return gen()
@@ -168,10 +177,15 @@ def test_a_missing_count_is_refused(tokens):
         pl.parse_spec(tokens)
 
 
-@pytest.mark.parametrize("count", ["0", "101", "-4"])
+@pytest.mark.parametrize("count", ["0", "1001", "-4"])
 def test_a_count_outside_the_range_is_refused(count):
-    with pytest.raises(ValueError, match="between 1 and 100"):
+    with pytest.raises(ValueError, match="between 1 and 1000"):
         pl.parse_spec(["@somebot", count])
+
+
+@pytest.mark.parametrize("count", ["1", "100", "1000"])
+def test_the_count_range_reaches_a_thousand(count):
+    assert pl.parse_spec(["@somebot", count])[1] == int(count)
 
 
 def test_a_count_that_is_not_a_number_is_refused():
@@ -313,6 +327,36 @@ async def test_the_count_is_how_many_messages_are_scanned(wires):
     assert len(wires.dispatched["links"]) == 3
 
 
+async def test_a_scan_over_one_page_is_paginated_at_a_hundred(wires):
+    """Telegram returns 100 messages per request; 250 has to be three of them."""
+    bot = _Client(
+        chat=SimpleNamespace(id=123456, username=None),
+        messages=_history(*range(250, 0, -1)),
+    )
+    wires.install(bot=bot)
+
+    await _run("/pleech @someone 250")
+
+    assert [limit for limit, _ in bot.calls] == [100, 100, 50]
+    assert [max_id for _, max_id in bot.calls] == [0, 150, 50]
+    assert len(wires.dispatched["links"]) == 250
+    ids = [link.rsplit("=", 1)[1] for link in wires.dispatched["links"]]
+    assert ids[0] == "1", "the oldest message is still dispatched first"
+    assert ids[-1] == "250"
+
+
+async def test_a_short_page_ends_the_scan_early(wires):
+    bot = _Client(
+        chat=SimpleNamespace(id=123456, username=None),
+        messages=_history(*range(40, 0, -1)),
+    )
+    wires.install(bot=bot)
+
+    await _run("/pleech @someone 250")
+
+    assert len(bot.calls) == 1, "the history ran out, so there is no next page"
+
+
 # ── which client reads ──────────────────────────────────────────────
 
 
@@ -418,8 +462,8 @@ async def test_an_empty_history_is_reported(wires):
     [
         ("/pleech", "both required"),
         ("/pleech @someone", "both required"),
-        ("/pleech @someone 0", "between 1 and 100"),
-        ("/pleech @someone 101", "between 1 and 100"),
+        ("/pleech @someone 0", "between 1 and 1000"),
+        ("/pleech @someone 1001", "between 1 and 1000"),
         ("/pleech @someone lots", "is not a message count"),
     ],
 )
