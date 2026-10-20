@@ -65,6 +65,14 @@ async def main():
     # means it can read the rows before recovery has cleared the ones it placed.
     await restart_notification()
 
+    # Last, once recovery and the notifier have settled: the watcher reads the
+    # same task ledger to decide when a restart costs nobody a transfer, and a
+    # half-recovered ledger would make it see idle before it is. It then keeps
+    # polling the tracked branch beside the bot until the process ends.
+    from .helper.util.update_watch import watch_updates
+
+    bot_loop.create_task(watch_updates())
+
 
 bot_loop.run_until_complete(main())
 

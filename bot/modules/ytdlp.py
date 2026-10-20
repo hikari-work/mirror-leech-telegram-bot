@@ -17,6 +17,7 @@ from ..helper.util.links_utils import is_url
 from ..helper.util.resolve_gate import resolve_gate
 from ..helper.util.task_args import parse_ytdlp_args
 from ..helper.util.status_utils import get_readable_file_size, get_readable_time
+from ..helper.util.update_watch import refuse_if_pending
 from ..helper.listeners.command_task import CommandTask
 from ..helper.download.direct_link_generators import (
     is_vidoy_link,
@@ -265,6 +266,10 @@ class YtDlp(CommandTask):
         self.is_ytdlp = True
 
     async def new_event(self):
+        # Same early gate as /leech: a pending update is answered before a
+        # metadata fetch or the quality keyboard holds the task open.
+        if await refuse_if_pending(self):
+            return
         text = self.cmd_text.split("\n")
         input_list = text[0].split(" ")
         qual = ""
@@ -359,7 +364,8 @@ class YtDlp(CommandTask):
         # After the quality question, which can hold the task for two minutes,
         # and before the download itself: this is the first moment the task has
         # a shape a restart could rebuild.
-        await self.record_active_task(args, "ytdl", "ytdlp", "", path)
+        if not await self.record_active_task(args, "ytdl", "ytdlp", "", path):
+            return
         ydl = YoutubeDLHelper(self)
         await ydl.add_download(path, qual, playlist, opt)
 

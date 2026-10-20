@@ -4,6 +4,8 @@ from aiofiles.os import path as aiopath, remove
 from asyncio import gather, create_subprocess_exec
 from os import execl as osexecl
 
+from pyrogram.types import Message
+
 from .. import intervals, scheduler, LOGGER
 from ..helper.util.bot_utils import new_task
 from ..helper.telegram.message_utils import (
@@ -87,39 +89,52 @@ async def confirm_restart(_, query):
         intervals["stopAll"] = True
         restart_message = await send_message(reply_to, "Restarting...")
         await delete_message(message)
-        await TgClient.stop()
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
-        if qb := intervals["qb"]:
-            qb.cancel()
-        if st := intervals["status"]:
-            for intvl in list(st.values()):
-                intvl.cancel()
-        await TorrentManager.close_all()
-        # No ``clean_all``, and the engines are absent from the pattern below.
-        # Both are what made a restart cost every running task: the downloads
-        # are the engines' and they survive this process, so wiping the
-        # directory or killing the daemons threw away work that had nothing
-        # wrong with it. What is left in the pattern is this process's own
-        # children -- gunicorn, and the ffmpeg/7z/split children of a post
-        # processing stage, which really do have to go with it.
-        proc1 = await create_subprocess_exec(
-            "pkill",
-            "-9",
-            "-f",
-            "gunicorn|ffmpeg|7z|split",
-        )
-        proc2 = await create_subprocess_exec("python3", "update.py")
-        await gather(proc1.wait(), proc2.wait())
-        # ``send_message`` answers with the error text instead of a message when
-        # the reply fails -- a ``reply_to`` deleted in the meantime, for one. The
-        # restart goes ahead either way, so the note telling
-        # ``restart_notification`` which message to edit is left unwritten
-        # instead of raising out of the handler here, which used to skip
-        # ``osexecl`` and leave the bot stopped with nothing to bring it back.
-        if not isinstance(restart_message, str):
-            async with aiopen(".restartmsg", "w") as f:
-                await f.write(f"{chat_of(restart_message).id}\n{restart_message.id}\n")
-        osexecl(executable, executable, "-m", "bot")
+        await perform_restart(restart_message)
     else:
         await delete_message(message)
+
+
+async def perform_restart(restart_message: Message | str | None = None) -> None:
+    """Replace this process with one started from the tracked branch.
+
+    ``restart_message`` is the "Restarting..." message the caller sent, when
+    there is one: the next process edits it to say it is back. The automatic
+    restart that follows a finished update passes None -- it has no chat to
+    report to. Both paths share everything after the flag, so a change to the
+    shutdown sequence cannot reach only one of them.
+    """
+    intervals["stopAll"] = True
+    await TgClient.stop()
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    if qb := intervals["qb"]:
+        qb.cancel()
+    if st := intervals["status"]:
+        for intvl in list(st.values()):
+            intvl.cancel()
+    await TorrentManager.close_all()
+    # No ``clean_all``, and the engines are absent from the pattern below.
+    # Both are what made a restart cost every running task: the downloads
+    # are the engines' and they survive this process, so wiping the
+    # directory or killing the daemons threw away work that had nothing
+    # wrong with it. What is left in the pattern is this process's own
+    # children -- gunicorn, and the ffmpeg/7z/split children of a post
+    # processing stage, which really do have to go with it.
+    proc1 = await create_subprocess_exec(
+        "pkill",
+        "-9",
+        "-f",
+        "gunicorn|ffmpeg|7z|split",
+    )
+    proc2 = await create_subprocess_exec("python3", "update.py")
+    await gather(proc1.wait(), proc2.wait())
+    # ``send_message`` answers with the error text instead of a message when
+    # the reply fails -- a ``reply_to`` deleted in the meantime, for one. The
+    # restart goes ahead either way, so the note telling
+    # ``restart_notification`` which message to edit is left unwritten
+    # instead of raising out of the handler here, which used to skip
+    # ``osexecl`` and leave the bot stopped with nothing to bring it back.
+    if restart_message is not None and not isinstance(restart_message, str):
+        async with aiopen(".restartmsg", "w") as f:
+            await f.write(f"{chat_of(restart_message).id}\n{restart_message.id}\n")
+    osexecl(executable, executable, "-m", "bot")

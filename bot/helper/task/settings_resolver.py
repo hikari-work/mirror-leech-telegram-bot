@@ -26,6 +26,7 @@ from ..util.bot_utils import get_size_bytes
 from ..util.links_utils import is_telegram_link
 from ..util.media_utils import create_thumb
 from ..util.task_manager import user_limit_refusal
+from ..util.update_watch import update_refusal
 from ._host import TaskConfigHost
 
 # Telegram's per-file ceiling for a bot token; a premium user session raises it.
@@ -93,14 +94,19 @@ class SettingsResolverMixin(TaskConfigHost):
         ``_resolve_upload_destination`` in particular can raise "Chat not found!"
         for a task that was never going to post anything.
 
-        The per-user cap is checked first, before any of that work: a user who
-        has already reached ``USER_QUEUE_MAX`` tasks or ``USER_QUEUE_SIZE_MAX``
-        bytes is turned away with a message rather than queued.
-        ``enforce_user_limit`` is false only for restart recovery, which
-        resumes tasks that were already admitted.
+        The per-user cap and the pending update are checked first, before any
+        of that work: a user who has already reached ``USER_QUEUE_MAX`` tasks
+        or ``USER_QUEUE_SIZE_MAX`` bytes is turned away with a message rather
+        than queued, and while a new commit is waiting for the bot to restart
+        nobody is admitted. ``enforce_user_limit`` is false only for restart
+        recovery, which resumes tasks that were already admitted -- including
+        when the restart it came from is the one this update is waiting for.
         """
-        if enforce_user_limit and (refusal := await user_limit_refusal(self.user_id)):
-            raise ValueError(refusal)
+        if enforce_user_limit:
+            if refusal := await user_limit_refusal(self.user_id):
+                raise ValueError(refusal)
+            if refusal := update_refusal():
+                raise ValueError(refusal)
         self._resolve_name_substitutions()
         self._resolve_extension_filters()
         self._resolve_ffmpeg_commands()

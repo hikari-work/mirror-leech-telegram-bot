@@ -9,7 +9,8 @@ disagree about which options each command honours.
 
 from ... import LOGGER
 from ..telegram.message_utils import chat_of
-from ..util.task_args import COMMON_ARG_FIELDS, dump_args
+from ..util.task_args import COMMON_ARG_FIELDS, CommonArgs, dump_args
+from ..util.update_watch import update_refusal
 from .task_listener import TaskListener
 
 ACTIVE_TASK_SCHEMA = 1
@@ -109,8 +110,13 @@ class CommandTask(TaskListener):
     # ── restart recovery ────────────────────────────────────────────
 
     async def record_active_task(
-        self, args, handler, engine, engine_tag="", engine_dir=""
-    ):
+        self,
+        args: CommonArgs,
+        handler: str,
+        engine: str,
+        engine_tag: str = "",
+        engine_dir: str = "",
+    ) -> bool:
         """Leave behind what a restart would need to pick this task back up.
 
         Written where the download is handed to its engine and nowhere else. A
@@ -124,10 +130,19 @@ class CommandTask(TaskListener):
         the arguments without changing the message they sent, and re-parsing the
         text on the way back would quietly undo those choices.
 
-        Never raises. A database that is down costs the task its resumability,
-        which is worth far less than the task itself -- and this runs on the
-        path that starts the download.
+        Returns ``False`` when an update is pending and the task is turned
+        away here instead. This is the last moment before an engine call, so
+        it is where a task that was admitted before the update was detected --
+        and then spent a while resolving its link -- is caught: the caller
+        must not start the download.
+
+        Never raises otherwise. A database that is down costs the task its
+        resumability, which is worth far less than the task itself -- and this
+        runs on the path that starts the download.
         """
+        if reason := update_refusal():
+            await self.fail_task(reason)
+            return False
         try:
             from ..storage.db_handler import database
 
@@ -164,3 +179,4 @@ class CommandTask(TaskListener):
             )
         except Exception as e:
             LOGGER.error(f"Unable to record active task {self.mid}: {e}")
+        return True

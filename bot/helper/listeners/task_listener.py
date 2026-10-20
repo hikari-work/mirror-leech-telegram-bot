@@ -52,6 +52,7 @@ from ..util.files_utils import (
 )
 from ..util.status_utils import get_readable_file_size
 from ..util.task_manager import check_running_tasks, start_from_queued
+from ..util.update_watch import schedule_restart_if_idle
 
 NO_FILES_ERROR = (
     "No files to upload. In case you have filled EXCLUDED/INCLUDED EXTENSIONS, "
@@ -598,6 +599,11 @@ class TaskListener(TaskConfig):
             upload_chat_of.pop(self.mid, None)
 
         await start_from_queued()
+        # This task is off the books; if it was the last one and an update is
+        # waiting, ``start_from_queued`` had nothing to start and the bot may
+        # now restart. The periodic watcher would find out within a minute;
+        # this makes it the same moment the user sees the task finish.
+        schedule_restart_if_idle()
 
     async def on_download_error(self, error, button=None):
         async with task_dict_lock:
@@ -697,6 +703,9 @@ class TaskListener(TaskConfig):
             await sweep_unless_stopping(clean_download, self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
+        # Last, so the teardown above is not cut short by the restart it may
+        # trigger when this was the final task.
+        schedule_restart_if_idle()
 
     async def on_upload_error(self, error, silent=False):
         async with task_dict_lock:
