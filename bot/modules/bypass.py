@@ -24,6 +24,15 @@ from ..helper.telegram.message_utils import (
 )
 
 _PAGE_TIMEOUT = 120
+# A shortlink often hides another shortlink, so the chain is walked to its end.
+# The cap only guards against a gateway that keeps answering with shortlinks --
+# a real chain is two or three hops.
+_MAX_BYPASS_HOPS = 10
+
+
+def _bypassed_text(target: str) -> str:
+    """The chat body answering a shortlink with the URL it resolved to."""
+    return f"<b>Bypassed</b>\n<code>{escape(target)}</code>"
 
 
 def _slug(title):
@@ -51,26 +60,45 @@ async def _ask_reply(client, message, user_id):
 
 
 async def _resolve_shortlink(status, link):
-    """Resolve ``link`` when it is a shortlink; otherwise hand it back untouched.
+    """Walk nested shortlinks until the chain stops being one.
+
+    A chain such as linkvertise -> ouo -> linkvertise -> mega is followed to the
+    end. When a later hop fails, the last URL the gateway did resolve is
+    answered instead of the error, so a partially walked chain still gives the
+    user something. A cycle or an over-long chain stops the same way.
 
     Returns (link, done). ``done`` means the user has already been answered and
-    there is nothing left to scrape: either the bypass failed, or it succeeded
-    and no thread scraper handles the target, in which case the target URL is
-    the whole answer.
+    there is nothing left to scrape: either the chain ended at a plain URL, or
+    it failed on the first hop. ``done`` is False only when the chain ended at a
+    thread the caller must keep working with.
     """
     if not is_url_shortener(urlparse(link).hostname or ""):
         return link, False
 
-    try:
-        target = await sync_to_async(bypass_shortener, link)
-    except DirectDownloadLinkException as e:
-        await edit_message(status, str(e))
-        return link, True
+    current = link
+    seen = {link}
+    while True:
+        try:
+            target = await sync_to_async(bypass_shortener, current)
+        except DirectDownloadLinkException as e:
+            if current == link:
+                # Nothing was bypassed, so there is no partial result to show.
+                await edit_message(status, str(e))
+                return link, True
+            await edit_message(status, _bypassed_text(current))
+            return current, True
 
-    if not is_scrape_target(target):
-        await edit_message(status, f"<b>Bypassed</b>\n<code>{escape(target)}</code>")
-        return target, True
-    return target, False
+        if is_scrape_target(target):
+            return target, False
+        if not is_url_shortener(urlparse(target).hostname or ""):
+            await edit_message(status, _bypassed_text(target))
+            return target, True
+        if target in seen or len(seen) >= _MAX_BYPASS_HOPS:
+            await edit_message(status, _bypassed_text(target))
+            return target, True
+
+        seen.add(target)
+        current = target
 
 
 async def _deliver_links(message, status, title, all_links, page_list, keyword):

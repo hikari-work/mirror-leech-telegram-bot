@@ -5,6 +5,8 @@ linkvertise.com": the command only knew about thread scrapers, while the
 shortener resolvers were reachable from /mirror and /leech alone. These pin the
 two behaviours the command now has to keep apart — resolve a shortlink and stop,
 versus resolve it and carry on into the page prompt when the target is a thread.
+They also pin the shortlink branch walking nested shortlinks end to end, and
+answering with the last URL the API did resolve when a later hop fails.
 """
 
 from __future__ import annotations
@@ -168,7 +170,7 @@ def test_is_scrape_target(dispatcher):
 
 async def test_shortlink_answered_with_target(bypass_cmd):
     module, stubs = bypass_cmd
-    stubs.is_url_shortener.return_value = True
+    stubs.is_url_shortener.side_effect = lambda host: host == "linkvertise.com"
     stubs.bypass_shortener.return_value = "https://mega.nz/file/abc#key"
 
     await module.bypass_scrape_cmd(
@@ -181,6 +183,85 @@ async def test_shortlink_answered_with_target(bypass_cmd):
     assert "https://mega.nz/file/abc#key" in _shown(stubs.edit_message)[-1]
     # No page prompt, and the thread scraper is never consulted.
     stubs.bypass_scrape.assert_not_awaited()
+
+
+def _host_shortener(hosts):
+    """A stand-in for ``is_url_shortener`` that knows exactly ``hosts``."""
+    return lambda host: host in hosts
+
+
+async def test_nested_shortlinks_are_followed_to_the_end(bypass_cmd):
+    module, stubs = bypass_cmd
+    stubs.is_url_shortener.side_effect = _host_shortener(
+        {"linkvertise.com", "ouo.io"}
+    )
+    chain = {
+        "https://linkvertise.com/1/first": "https://ouo.io/second",
+        "https://ouo.io/second": "https://linkvertise.com/2/third",
+        "https://linkvertise.com/2/third": "https://mega.nz/file/abc#key",
+    }
+    stubs.bypass_shortener.side_effect = chain.__getitem__
+
+    await module.bypass_scrape_cmd(
+        MagicMock(), _message("/bypass https://linkvertise.com/1/first")
+    )
+
+    assert stubs.bypass_shortener.call_count == 3
+    assert "https://mega.nz/file/abc#key" in _shown(stubs.edit_message)[-1]
+    stubs.bypass_scrape.assert_not_awaited()
+
+
+async def test_chain_failure_shows_the_last_resolved_link(bypass_cmd):
+    module, stubs = bypass_cmd
+    stubs.is_url_shortener.side_effect = _host_shortener(
+        {"linkvertise.com", "ouo.io"}
+    )
+    chain = {
+        "https://linkvertise.com/1/first": "https://ouo.io/second",
+        "https://ouo.io/second": "https://linkvertise.com/2/third",
+    }
+
+    def _resolve(link):
+        if link in chain:
+            return chain[link]
+        raise _DirectDownloadLinkException(
+            "ERROR: ouo bypass failed: Content Not Found."
+        )
+
+    stubs.bypass_shortener.side_effect = _resolve
+
+    await module.bypass_scrape_cmd(
+        MagicMock(), _message("/bypass https://linkvertise.com/1/first")
+    )
+
+    body = _shown(stubs.edit_message)[-1]
+    # The third hop failed, so answer with the second hop's target -- not the
+    # first one, and not the error.
+    assert "https://linkvertise.com/2/third" in body
+    assert "https://ouo.io/second" not in body
+    assert "Content Not Found" not in body
+    stubs.bypass_scrape.assert_not_awaited()
+
+
+async def test_shortlink_cycle_stops_at_the_last_hop(bypass_cmd):
+    module, stubs = bypass_cmd
+    stubs.is_url_shortener.side_effect = _host_shortener(
+        {"linkvertise.com", "ouo.io"}
+    )
+    chain = {
+        "https://linkvertise.com/1/a": "https://ouo.io/b",
+        "https://ouo.io/b": "https://linkvertise.com/1/a",
+    }
+    stubs.bypass_shortener.side_effect = chain.__getitem__
+
+    await module.bypass_scrape_cmd(
+        MagicMock(), _message("/bypass https://linkvertise.com/1/a")
+    )
+
+    assert stubs.bypass_shortener.call_count == 2
+    assert "https://linkvertise.com/1/a" in _shown(stubs.edit_message)[-1]
+    stubs.bypass_scrape.assert_not_awaited()
+
 
 
 async def test_shortlink_target_is_html_escaped(bypass_cmd):
