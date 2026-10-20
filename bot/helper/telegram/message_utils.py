@@ -1,5 +1,6 @@
 import html
 from asyncio import sleep
+from collections.abc import Sequence
 from dataclasses import dataclass
 from re import compile as re_compile
 from time import time
@@ -12,6 +13,7 @@ from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient, get_user_client
 from ..util.bot_utils import SetInterval
 from ..util.exceptions import TgLinkException
+from ..util.links_utils import extract_urls, is_telegram_link
 from ..util.status_utils import get_readable_message
 from .flood import flood_seconds
 
@@ -212,6 +214,13 @@ async def delete_status():
 MAX_RANGE_MESSAGES = 1000
 """Most messages one range may name."""
 
+RANGE_FETCH_CHUNK = 100
+"""Message ids per ``get_messages`` request.
+
+Telegram documents 200; 100 is the comfortable half of that and keeps a failed
+request small enough to retry.
+"""
+
 _HTTPS_PREFIX = (
     r"(?P<prefix>https://t\.me/(?:(?P<super>c)/)?"
     r"(?P<chat>[^/\s?#]+)/(?P<topic>(?:\d+/)*))"
@@ -377,6 +386,18 @@ def parse_tg_link(address: str) -> TgLink:
     return parsed
 
 
+def split_tg_command_text(text: str) -> tuple[str, str | None]:
+    """Split a command's telegram input into ``(address, mode keyword)``.
+
+    Only a positional token can be the keyword: ``arg_parser`` never folds a
+    flag into the link, so a ``-`` prefix here cannot be intended as one.
+    """
+    parts = text.split()
+    if len(parts) > 1 and is_telegram_link(parts[0]) and not parts[1].startswith("-"):
+        return parts[0], " ".join(parts[1:])
+    return text, None
+
+
 async def get_tg_link_message(
     link: str, user_id: int | None = None
 ) -> tuple[Message | list[str], str]:
@@ -390,6 +411,23 @@ async def get_tg_link_message(
         session = await _probe_session(parsed, user_id)
         return [parsed.link_for(message_id) for message_id in parsed.ids], session
     return await _fetch_single(parsed, user_id)
+
+
+async def get_tg_link_batch(
+    text: str, user_id: int | None = None
+) -> tuple[Message | list[str], str]:
+    """Resolve the telegram input of a leech command.
+
+    With only an address this is :func:`get_tg_link_message`. A trailing word
+    switches to links mode: the range is read, and every URL in its messages is
+    returned in place of the message links, so the caller dispatches them as an
+    ordinary bulk and never touches the range's own media.
+    """
+    address, keyword = split_tg_command_text(text)
+    if keyword is None:
+        return await get_tg_link_message(address, user_id)
+    links, session = await _scan_range_urls(parse_tg_link(address), user_id)
+    return links, session
 
 
 async def _fetch_single(
@@ -473,6 +511,96 @@ async def _probe_user_range(client: Client, parsed: TgLink) -> None:
         if message is not None and not message.empty:
             return
     raise TgLinkException("Private: Can't get this message!")
+
+
+async def _scan_range_urls(
+    parsed: TgLink, user_id: int | None
+) -> tuple[list[str], str]:
+    """Every URL in the messages of *parsed*, in message order.
+
+    Nothing here downloads: the messages are read for their text and captions,
+    and the media they carry is left alone.
+    """
+    messages, session = await _range_messages(parsed, user_id)
+    if not messages:
+        raise TgLinkException("Can't read the messages in this range!")
+    urls: list[str] = []
+    for message in sorted(messages, key=lambda item: item.id):
+        urls.extend(_message_urls(message))
+    unique = list(dict.fromkeys(urls))
+    if not unique:
+        raise TgLinkException("No links found in the selected messages.")
+    return unique, session
+
+
+async def _range_messages(
+    parsed: TgLink, user_id: int | None
+) -> tuple[list[Message], str]:
+    """Read a range with the bot, falling back to the requester's session."""
+    user_client = await get_user_client(user_id) or TgClient.user
+    if parsed.scheme == "tg":
+        if not user_client:
+            raise TgLinkException("USER_SESSION_STRING required for this private link!")
+        messages, _ = await _fetch_range(user_client, parsed)
+        return messages, "user"
+    try:
+        messages, missing = await _fetch_range(TgClient.bot, parsed)
+    except Exception as e:
+        if not user_client:
+            raise TgLinkException(
+                f"You don't have access to this chat!. ERROR: {e}"
+            ) from e
+        messages, _ = await _fetch_range(user_client, parsed)
+        return messages, "user"
+    if missing and user_client:
+        # A bot in a channel sees only what was posted while it was a member;
+        # the requester's session can read the rest.
+        extra, _ = await _fetch_range(user_client, parsed, missing)
+        if extra:
+            messages.extend(extra)
+            return messages, "user"
+    return messages, "bot"
+
+
+async def _fetch_range(
+    client: Client, parsed: TgLink, ids: Sequence[int] | None = None
+) -> tuple[list[Message], list[int]]:
+    """Read the named ids, returning ``(messages, missing ids)``.
+
+    ``missing`` is what the caller may retry with another client: a deleted
+    message and a post the bot cannot see look alike here, and only the retry
+    can tell them apart.
+    """
+    wanted = list(parsed.ids) if ids is None else list(ids)
+    messages: list[Message] = []
+    missing: list[int] = []
+    for index in range(0, len(wanted), RANGE_FETCH_CHUNK):
+        chunk = wanted[index : index + RANGE_FETCH_CHUNK]
+        answer = await client.get_messages(chat_id=parsed.chat, message_ids=chunk)
+        returned = {
+            message.id: message
+            for message in answer or ()
+            if message is not None and not message.empty
+        }
+        messages.extend(returned.values())
+        missing.extend(message_id for message_id in chunk if message_id not in returned)
+    return messages, missing
+
+
+def _message_urls(message: Message) -> list[str]:
+    """Every URL a message carries, not only the ones visible in its text."""
+    urls = extract_urls(getattr(message, "text", None))
+    urls.extend(extract_urls(getattr(message, "caption", None)))
+    for attr in ("entities", "caption_entities"):
+        for entity in getattr(message, attr, None) or ():
+            if url := getattr(entity, "url", None):
+                urls.append(url)
+    markup = getattr(message, "reply_markup", None)
+    for row in getattr(markup, "inline_keyboard", None) or ():
+        for button in row:
+            if url := getattr(button, "url", None):
+                urls.append(url)
+    return urls
 
 
 async def temp_download(msg):

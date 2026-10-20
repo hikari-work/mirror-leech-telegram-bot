@@ -305,6 +305,25 @@ def test_a_topic_prefix_survives_the_expansion():
     assert parsed.link_for(10) == "https://t.me/c/123/456/10"
 
 
+def test_the_mode_keyword_is_only_read_after_a_telegram_link():
+    assert mu.split_tg_command_text("https://t.me/c/1/5-7 terabox") == (
+        "https://t.me/c/1/5-7",
+        "terabox",
+    )
+    assert mu.split_tg_command_text("https://t.me/c/1/5-7") == (
+        "https://t.me/c/1/5-7",
+        None,
+    )
+    assert mu.split_tg_command_text("https://a.test/x terabox") == (
+        "https://a.test/x terabox",
+        None,
+    )
+    assert mu.split_tg_command_text("https://t.me/c/1/5-7 -doc") == (
+        "https://t.me/c/1/5-7 -doc",
+        None,
+    )
+
+
 # ── get_tg_link_message: ranges ─────────────────────────────────────
 
 
@@ -411,3 +430,254 @@ async def test_trailing_text_does_not_change_a_single_link(monkeypatch):
 
     assert session == "bot"
     assert message.id == 42
+
+
+# ── get_tg_link_batch: links mode ───────────────────────────────────
+
+
+class _TextMessage:
+    """A scanned message: text, caption, entities and inline buttons."""
+
+    empty = False
+
+    def __init__(
+        self, message_id, *, text=None, caption=None, entities=(), buttons=()
+    ):
+        self.id = message_id
+        self.text = text
+        self.caption = caption
+        self.entities = entities
+        self.caption_entities = ()
+        self.reply_markup = (
+            SimpleNamespace(inline_keyboard=buttons) if buttons else None
+        )
+
+
+class _ScanClient:
+    """Answers a list of ids, with empty placeholders for what it cannot see."""
+
+    def __init__(self, messages=(), unreadable=False):
+        self.by_id = {message.id: message for message in messages}
+        self.unreadable = unreadable
+        self.calls: list[tuple] = []
+
+    async def get_messages(self, chat_id, message_ids):
+        if self.unreadable:
+            raise ValueError(f"no access to {chat_id}")
+        self.calls.append((chat_id, list(message_ids)))
+        answer = []
+        for message_id in message_ids:
+            message = self.by_id.get(message_id)
+            if message is None:
+                message = _Message(message_id)
+                message.empty = True
+            answer.append(message)
+        return answer
+
+
+async def test_links_mode_collects_text_and_caption(monkeypatch):
+    client = _ScanClient(
+        [
+            _TextMessage(5, text="https://a.test/1"),
+            _TextMessage(6, caption="https://b.test/2 and https://a.test/1"),
+        ]
+    )
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, session = await mu.get_tg_link_batch(
+        "https://t.me/c/1/5-6 terabox", user_id=7
+    )
+
+    assert links == ["https://a.test/1", "https://b.test/2"]
+    assert session == "bot"
+
+
+@pytest.mark.parametrize("keyword", ["terabox", "links", "anything"])
+async def test_the_keyword_spelling_is_irrelevant(monkeypatch, keyword):
+    client = _ScanClient([_TextMessage(5, text="https://a.test/1")])
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, _ = await mu.get_tg_link_batch(
+        f"https://t.me/c/1/5 {keyword}", user_id=7
+    )
+
+    assert links == ["https://a.test/1"]
+
+
+async def test_links_mode_reads_a_single_message_too(monkeypatch):
+    client = _ScanClient([_TextMessage(5, text="https://a.test/1")])
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    await mu.get_tg_link_batch("https://t.me/c/1/5 terabox", user_id=7)
+
+    assert client.calls == [(-1001, [5])]
+
+
+async def test_hidden_links_in_entities_and_buttons_are_collected(monkeypatch):
+    entity = SimpleNamespace(url="https://hidden.test/x")
+    button = SimpleNamespace(url="https://button.test/y")
+    client = _ScanClient(
+        [
+            _TextMessage(
+                5,
+                text="the link is behind this text",
+                entities=[entity],
+                buttons=[[button]],
+            )
+        ]
+    )
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, _ = await mu.get_tg_link_batch("https://t.me/c/1/5 terabox", user_id=7)
+
+    assert links == ["https://hidden.test/x", "https://button.test/y"]
+
+
+async def test_deleted_messages_are_skipped(monkeypatch):
+    client = _ScanClient(
+        [
+            _TextMessage(5, text="https://a.test/1"),
+            _TextMessage(7, text="https://b.test/2"),
+        ]
+    )
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, _ = await mu.get_tg_link_batch("https://t.me/c/1/5-7 terabox", user_id=7)
+
+    assert links == ["https://a.test/1", "https://b.test/2"]
+
+
+async def test_the_scan_is_chunked(monkeypatch):
+    client = _ScanClient(
+        [_TextMessage(i, text=f"https://a.test/{i}") for i in range(1, 251)]
+    )
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, _ = await mu.get_tg_link_batch("https://t.me/c/1/1-250 terabox", user_id=7)
+
+    assert [len(call[1]) for call in client.calls] == [100, 100, 50]
+    assert len(links) == 250
+
+
+async def test_the_user_session_fills_only_what_the_bot_could_not_read(
+    monkeypatch, user_session
+):
+    bot = _ScanClient([_TextMessage(5, text="https://a.test/1")])
+    user = _ScanClient([_TextMessage(6, text="https://b.test/2")])
+    monkeypatch.setattr(mu.TgClient, "bot", bot)
+    user_session(user)
+
+    links, session = await mu.get_tg_link_batch(
+        "https://t.me/c/1/5-6 terabox", user_id=7
+    )
+
+    assert links == ["https://a.test/1", "https://b.test/2"]
+    assert session == "user"
+    assert user.calls == [(-1001, [6])]
+
+
+async def test_the_user_session_reads_when_the_bot_cannot(monkeypatch, user_session):
+    user = _ScanClient([_TextMessage(5, text="https://a.test/1")])
+    monkeypatch.setattr(mu.TgClient, "bot", _ScanClient(unreadable=True))
+    user_session(user)
+
+    links, session = await mu.get_tg_link_batch(
+        "https://t.me/c/1/5 terabox", user_id=7
+    )
+
+    assert links == ["https://a.test/1"]
+    assert session == "user"
+
+
+async def test_an_unreadable_chat_without_a_session_reports_the_reason(monkeypatch):
+    monkeypatch.setattr(mu.TgClient, "bot", _ScanClient(unreadable=True))
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    with pytest.raises(mu.TgLinkException, match="don't have access"):
+        await mu.get_tg_link_batch("https://t.me/c/1/5 terabox", user_id=7)
+
+
+async def test_a_range_with_no_readable_message_is_reported(monkeypatch):
+    monkeypatch.setattr(mu.TgClient, "bot", _ScanClient())
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    with pytest.raises(mu.TgLinkException, match="Can't read the messages"):
+        await mu.get_tg_link_batch("https://t.me/c/1/5-6 terabox", user_id=7)
+
+
+async def test_a_range_with_no_urls_is_reported(monkeypatch):
+    client = _ScanClient([_TextMessage(5, text="nothing to see")])
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    with pytest.raises(mu.TgLinkException, match="No links found"):
+        await mu.get_tg_link_batch("https://t.me/c/1/5 terabox", user_id=7)
+
+
+async def test_duplicate_urls_across_messages_are_dispatched_once(monkeypatch):
+    client = _ScanClient(
+        [
+            _TextMessage(5, text="https://a.test/1"),
+            _TextMessage(6, text="https://a.test/1"),
+        ]
+    )
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    links, _ = await mu.get_tg_link_batch("https://t.me/c/1/5-6 terabox", user_id=7)
+
+    assert links == ["https://a.test/1"]
+
+
+async def test_links_mode_never_downloads_media(monkeypatch):
+    """The scanner reads text; a message with media but no link adds nothing."""
+
+    class _MediaMessage:
+        empty = False
+        text = None
+        caption = None
+        entities = ()
+        caption_entities = ()
+        reply_markup = None
+
+        def __init__(self):
+            self.id = 5
+            self.document = object()
+
+        async def download(self):  # pragma: no cover - calling it fails the test
+            raise AssertionError("links mode must not download media")
+
+    client = _ScanClient([_MediaMessage()])
+    monkeypatch.setattr(mu.TgClient, "bot", client)
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    with pytest.raises(mu.TgLinkException, match="No links found"):
+        await mu.get_tg_link_batch("https://t.me/c/1/5 terabox", user_id=7)
+
+
+async def test_a_private_keyword_range_needs_a_session(monkeypatch):
+    monkeypatch.setattr(mu.TgClient, "bot", _ScanClient())
+    monkeypatch.setattr(mu, "get_user_client", _user_client_returning(None))
+    monkeypatch.setattr(mu.TgClient, "user", None)
+
+    with pytest.raises(mu.TgLinkException, match="USER_SESSION_STRING"):
+        await mu.get_tg_link_batch(
+            "tg://openmessage?user_id=123&message_id=5-7 terabox", user_id=7
+        )

@@ -507,6 +507,7 @@ class TestBulkChildCommands:
             ("/ytdl -b :50 -m Series One", True, False),
             ("/leech https://t.me/c/1/1-3 -doc", False, True),
             ("/leech https://t.me/c/1/1-3", False, True),
+            ("/leech https://t.me/c/1/1-3 terabox -doc", False, True),
             ("/leech https://t.me/c/1/1-3 -m Shared", False, True),
         ],
     )

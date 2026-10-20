@@ -43,7 +43,7 @@ from ..helper.download.yt_dlp_download import (
 )
 from ..helper.telegram.bot_commands import BotCommands
 from ..helper.telegram.message_utils import (
-    get_tg_link_message,
+    get_tg_link_batch,
     message_media,
     send_message,
 )
@@ -139,7 +139,7 @@ class Leech(CommandTask):
 
         if is_telegram_link(self.link):
             try:
-                reply_to, session = await get_tg_link_message(
+                reply_to, session = await get_tg_link_batch(
                     self.link, user_id=self.user_id
                 )
             except Exception as e:

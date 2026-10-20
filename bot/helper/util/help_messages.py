@@ -106,8 +106,16 @@ Public: https://t.me/channel_name/message_id
 Private: tg://openmessage?user_id=xxxxxx&message_id=xxxxx
 Super: https://t.me/c/channel_id/message_id
 Range: https://t.me/channel_name/first_message_id-last_message_id
-Range Example: tg://openmessage?user_id=xxxxxx&message_id=555-560 or https://t.me/channel_name/100-150
-Note: Range link will work only by replying cmd to it
+Range can also be written as two full links:
+https://t.me/channel_name/100-https://t.me/channel_name/150
+Either order works: 150-100 means the same messages as 100-150.
+A range is limited to 1000 messages.
+Links mode: add any word after the range, for example
+/cmd https://t.me/c/123/100-150 terabox
+Every http(s) link in those messages (text, caption and buttons) is leeched as
+a batch, and the media inside the range itself is not downloaded. The word is
+only a switch, not a host filter; it must come right after the link, before
+any other option.
 No link at all: a private chat -- a DM with a person or with a bot -- has neither a public nor a tg:// link you can copy. Use /{BotCommands.PrivateLeechCommand[0]} chat count instead, which needs your own session (/{BotCommands.LoginCommand}) for any chat the bot is not part of."""
 
 sample_video = """<b>Sample Video</b>: -sv
