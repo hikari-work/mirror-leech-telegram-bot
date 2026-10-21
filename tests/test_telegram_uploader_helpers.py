@@ -155,6 +155,7 @@ def uploader_module(monkeypatch):
             "bot.helper.telegram.message_utils",
             chat_of=lambda message: message.chat,
             delete_message=AsyncMock(),
+            rich_input=lambda text: ("rich", text),
         ),
         # Real path: the uploader, flood pacer and media-group batcher all live
         # in this package and load from disk.
@@ -619,3 +620,25 @@ async def test_a_file_that_vanished_during_a_shutdown_is_not_an_error(
     )
     assert len(logger.errors) == 1
     assert "not exists" in logger.errors[0]
+
+
+# --- _msg_to_reply ---------------------------------------------------------
+
+
+async def test_the_upload_placeholder_is_sent_as_a_rich_message(uploader_module):
+    """The message the uploads reply to is user-visible, so it is rich too."""
+    uploader = _make_uploader(uploader_module)
+    send = AsyncMock(return_value=FakeMessage())
+    uploader._listener.client = SimpleNamespace(send_rich_message=send)
+    uploader._listener.up_dest = -1001
+    uploader._listener.message = FakeMessage()
+    uploader._listener.chat_thread_id = 7
+
+    assert await uploader._msg_to_reply() is True
+
+    send.assert_awaited_once()
+    kwargs = send.await_args.kwargs
+    assert kwargs["rich_message"] == ("rich", uploader._listener.message.link)
+    assert "text" not in kwargs
+    assert kwargs["chat_id"] == -1001
+    assert kwargs["message_thread_id"] == 7

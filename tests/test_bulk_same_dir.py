@@ -355,7 +355,7 @@ def batch(monkeypatch):
     tag = "tst"
     anchor = SimpleNamespace(id=1)
     monkeypatch.setitem(bt.multi_batches, tag, bt.new_batch(anchor, 0, "bulk-tst"))
-    bt.multi_tags.add(tag)
+    bt.multi_tags[tag] = 123
     yield SimpleNamespace(
         tag=tag,
         anchor=anchor,
@@ -365,7 +365,7 @@ def batch(monkeypatch):
         deleted=deleted,
     )
     bt.multi_batches.pop(tag, None)
-    bt.multi_tags.discard(tag)
+    bt.multi_tags.pop(tag, None)
 
 
 def summaries(batch):

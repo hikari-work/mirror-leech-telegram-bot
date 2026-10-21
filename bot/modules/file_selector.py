@@ -10,6 +10,7 @@ from ..helper.util.bot_utils import (
 )
 from ..helper.util.status_utils import get_task_by_gid, MirrorStatus
 from ..helper.util.task_lookup import task_from_command, task_is_yours
+from ..helper.telegram.filters import CustomFilters
 from ..helper.telegram.message_utils import (
     send_message,
     send_status_message,
@@ -75,11 +76,76 @@ async def select(_, message):
     await send_message(message, msg, SBUTTONS)
 
 
+async def select_callback(query):
+    """Pause a task named by a status button and show its file menu.
+
+    Same checks as the ``/select`` command, answered on the callback instead of
+    in the chat: the status view offers the button for every downloadable
+    torrent, and a press there has no command message to reply to.
+    """
+    data = query.data.split()
+    user_id = query.from_user.id
+    task = await get_task_by_gid(data[2])
+    if task is None:
+        await query.answer("This task has been cancelled!", show_alert=True)
+        return
+    if user_id != task.listener.user_id and not await CustomFilters.is_sudo(query):
+        await query.answer("This task is not for you!", show_alert=True)
+        return
+    if not iscoroutinefunction(task.status):
+        await query.answer(
+            "The task have finished the download stage!", show_alert=True
+        )
+        return
+    if await task.status() not in [
+        MirrorStatus.STATUS_DOWNLOAD,
+        MirrorStatus.STATUS_PAUSED,
+        MirrorStatus.STATUS_QUEUEDL,
+    ]:
+        await query.answer(
+            "Task should be in download or pause or queued status", show_alert=True
+        )
+        return
+    if task.name().startswith("[METADATA]") or task.name().startswith("Trying"):
+        await query.answer(
+            "Try after downloading metadata finished!", show_alert=True
+        )
+        return
+    try:
+        await task.update()
+        id_ = task.hash() if task.listener.is_qbit else task.gid()
+        if not task.queued:
+            if task.listener.is_qbit:
+                await TorrentManager.qbittorrent.torrents.stop([id_])
+            else:
+                try:
+                    await TorrentManager.aria2.forcePause(id_)
+                except Exception as e:
+                    LOGGER.error(
+                        f"{e} Error in pause, this mostly happens after abuse aria2"
+                    )
+        task.listener.select = True
+    except Exception:
+        await query.answer("This is not a bittorrent task!", show_alert=True)
+        return
+    await query.answer()
+    SBUTTONS = bt_selection_buttons(id_)
+    msg = (
+        "Your download paused. Choose files then press Done Selecting button "
+        "to resume downloading."
+    )
+    await send_message(query.message, msg, SBUTTONS)
+
+
 @new_task
 async def confirm_selection(_, query):
     user_id = query.from_user.id
     data = query.data.split()
     message = query.message
+    if len(data) < 3:
+        await query.answer()
+        await delete_message(message)
+        return
     task = await get_task_by_gid(data[2])
     if task is None:
         await query.answer("This task has been cancelled!", show_alert=True)
@@ -87,6 +153,8 @@ async def confirm_selection(_, query):
         return
     if user_id != task.listener.user_id:
         await query.answer("This task is not for you!", show_alert=True)
+    elif data[1] == "select":
+        await select_callback(query)
     elif data[1] == "pin":
         await query.answer(data[3], show_alert=True)
     elif data[1] == "done":
@@ -127,6 +195,3 @@ async def confirm_selection(_, query):
                         )
         await send_status_message(message)
         await delete_message(message)
-    else:
-        await delete_message(message)
-        await task.cancel_task()

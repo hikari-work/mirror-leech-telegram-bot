@@ -194,6 +194,7 @@ def uploader_module(monkeypatch, store):
             "bot.helper.telegram.message_utils",
             chat_of=lambda message: message.chat,
             delete_message=AsyncMock(),
+            rich_input=lambda text: ("rich", text),
         ),
         "bot.helper.upload": _pkg(
             "bot.helper.upload", str(root / "bot" / "helper" / "upload")

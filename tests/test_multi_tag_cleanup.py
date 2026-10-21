@@ -22,6 +22,7 @@ class _Listener(ml.MultiLinkMixin):
     def __init__(self, multi: int = 1, multi_tag: str | None = None) -> None:
         self.multi = multi
         self.multi_tag = multi_tag
+        self.user_id = 1
         # ``run_multi`` returns early for a bulk child; this is a command.
         self.bulk_child = False
 
@@ -29,13 +30,13 @@ class _Listener(ml.MultiLinkMixin):
 async def test_cleanup_keeps_a_tag_a_bulk_installed_while_it_slept(monkeypatch):
     tag = "Race"
     listener = _Listener(multi=1)
-    monkeypatch.setattr(ml, "multi_tags", set())
+    monkeypatch.setattr(ml, "multi_tags", {})
     monkeypatch.setattr(ml, "multi_batches", {})
 
     async def sleep_then_start_bulk(_seconds):
         # exactly what ``_handle_bulk`` does during the wait
         listener.multi_tag = tag
-        ml.multi_tags.add(tag)
+        ml.multi_tags[tag] = listener.user_id
 
     monkeypatch.setattr(ml, "sleep", sleep_then_start_bulk)
 
@@ -49,7 +50,7 @@ async def test_cleanup_still_releases_the_tag_a_chained_task_was_given(monkeypat
 
     tag = "Givn"
     listener = _Listener(multi=1, multi_tag=tag)
-    tags = {tag}
+    tags = {tag: listener.user_id}
     monkeypatch.setattr(ml, "multi_tags", tags)
 
     async def no_sleep(_seconds):

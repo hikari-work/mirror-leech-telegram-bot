@@ -290,7 +290,47 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             msg += f" | <b>Time: </b>{task.seeding_time()}"
         else:
             msg += f"\n<b>Size: </b>{task.size()}"
-        msg += f"\n<b>Gid: </b><code>{task.gid()}</code>\n\n"
+        gid = task.gid()
+        msg += f"\n<b>Gid: </b><code>{gid}</code>"
+        msg += (
+            f" | <tg-button type='callback_data' data='cancel canconf {gid}'"
+            f" style='danger'>Cancel</tg-button>"
+        )
+        if getattr(task, "tool", "") in ("aria2", "qbittorrent") and tstatus in (
+            MirrorStatus.STATUS_DOWNLOAD,
+            MirrorStatus.STATUS_PAUSED,
+            MirrorStatus.STATUS_QUEUEDL,
+        ):
+            msg += (
+                f" | <tg-button type='callback_data' data='sel select {gid}'"
+                f" style='primary'>Select</tg-button>"
+            )
+        if tstatus != MirrorStatus.STATUS_UPLOAD and (
+            Config.QUEUE_ALL or Config.QUEUE_DOWNLOAD or Config.QUEUE_UPLOAD
+        ):
+            if tstatus == MirrorStatus.STATUS_QUEUEDL:
+                msg += (
+                    f" | <tg-button type='callback_data' data='force run {gid}'"
+                    f" style='success'>ForceRun</tg-button>"
+                )
+                msg += (
+                    f" | <tg-button type='callback_data' data='force fd {gid}'"
+                    f" style='success'>ForceDl</tg-button>"
+                )
+                if not task.listener.force_upload:
+                    msg += (
+                        f" | <tg-button type='callback_data' data='force fu {gid}'"
+                        f" style='success'>ForceUp</tg-button>"
+                    )
+            elif not task.listener.force_upload and (
+                tstatus == MirrorStatus.STATUS_DOWNLOAD
+                or not task.listener.force_run
+            ):
+                msg += (
+                    f" | <tg-button type='callback_data' data='force fu {gid}'"
+                    f" style='success'>ForceUp</tg-button>"
+                )
+        msg += "<br><br>"
 
     if len(msg) == 0:
         if status == "All":

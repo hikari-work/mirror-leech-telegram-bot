@@ -186,7 +186,7 @@ class _SendingBot:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def send_message(self, **kwargs):
+    async def send_rich_message(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(id=5)
 
@@ -205,7 +205,7 @@ async def test_a_notice_is_a_new_message_with_notification_on(monkeypatch):
     assert bot.calls == [
         {
             "chat_id": 99,
-            "text": "done",
+            "rich_message": mu.rich_input("done"),
             "message_thread_id": 7,
             "disable_notification": False,
         }

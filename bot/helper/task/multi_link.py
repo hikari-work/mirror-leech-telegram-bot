@@ -14,7 +14,6 @@ from ... import (
     task_dict,
     task_dict_lock,
 )
-from ..telegram.bot_commands import BotCommands
 from ..telegram.message_utils import (
     chat_of,
     delete_message,
@@ -151,7 +150,7 @@ class MultiLinkMixin(TaskConfigHost):
         own_tag = self.multi_tag
         if not own_tag and self.multi > 1:
             own_tag = self.multi_tag = token_urlsafe(3)
-            multi_tags.add(own_tag)
+            multi_tags[own_tag] = self.user_id
 
         if self.multi > 1 and self.multi_tag and self.multi_tag not in multi_batches:
             batch_name = (
@@ -172,7 +171,7 @@ class MultiLinkMixin(TaskConfigHost):
         await sleep(3)
         if self.multi <= 1:
             if own_tag in multi_tags:
-                multi_tags.discard(own_tag)
+                multi_tags.pop(own_tag, None)
             return
         if self.multi_tag and self.multi_tag not in multi_tags:
             await send_message(
@@ -196,7 +195,7 @@ class MultiLinkMixin(TaskConfigHost):
             msg.append(f"{self.bulk[0]} -i {self.multi - 1} {self.options}")
             msgts = " ".join(msg)
             if self.multi > 2:
-                msgts += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+                msgts += f"<br><tg-button type='callback_data' data='cancel multi {self.multi_tag}' style='danger'>Cancel Multi</tg-button>"
             nextmsg = await send_message(self.message, msgts)
         else:
             msg = [s.strip() for s in input_list]
@@ -227,7 +226,7 @@ class MultiLinkMixin(TaskConfigHost):
                 return
             msgts = " ".join(msg)
             if self.multi > 2:
-                msgts += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+                msgts += f"<br><tg-button type='callback_data' data='cancel multi {self.multi_tag}' style='danger'>Cancel Multi</tg-button>"
             nextmsg = await send_message(nextmsg, msgts)
 
         if isinstance(nextmsg, str):
@@ -265,7 +264,7 @@ class MultiLinkMixin(TaskConfigHost):
                 raise ValueError("Bulk Empty!")
 
             self.multi_tag = token_urlsafe(3)
-            multi_tags.add(self.multi_tag)
+            multi_tags[self.multi_tag] = self.user_id
 
             options = strip_link_tokens(input_list[1:], ytdlp=self.is_ytdlp)
             index = options.index("-b")
@@ -280,7 +279,7 @@ class MultiLinkMixin(TaskConfigHost):
             await self.get_tag([])
             await self.dispatch_bulk(input_list[0], links, obj)
         except Exception as e:
-            multi_tags.discard(self.multi_tag)
+            multi_tags.pop(self.multi_tag, None)
             await send_message(
                 self.message,
                 f"Reply to text file or to telegram message that have links separated by new line! {e}",
@@ -306,7 +305,7 @@ class MultiLinkMixin(TaskConfigHost):
         name = folder_name.strip("/") if folder_name else self.multi_tag
         header = f"<b>Batch {name}:</b> 0/{len(links)} completed"
         if len(links) > 2:
-            header += f"\nCancel Multi: <code>/{BotCommands.CancelTaskCommand[1]} {self.multi_tag}</code>"
+            header += f"<br><tg-button type='callback_data' data='cancel multi {self.multi_tag}' style='danger'>Cancel Multi</tg-button>"
         anchor = await send_message(self.message, header)
         if isinstance(anchor, str):
             raise ValueError(anchor)

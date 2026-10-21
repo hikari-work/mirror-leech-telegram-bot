@@ -28,7 +28,7 @@ from ...core.telegram_manager import TgClient, user_session
 from ..storage.copy_records import fan_out, group_unit, record, single_unit, strike
 from ..storage.db_handler import database
 from ..telegram.flood import flood_seconds
-from ..telegram.message_utils import chat_of, delete_message
+from ..telegram.message_utils import chat_of, delete_message, rich_input
 from ..util.bot_utils import sync_to_async
 from ..util.files_utils import get_base_name, is_archive
 from ..util.media_utils import (
@@ -181,17 +181,17 @@ class TelegramUploader:
             try:
                 if self._user_session:
                     self._sent_msg = await self._pacer.guard(
-                        user_session().send_message,
+                        user_session().send_rich_message,
                         chat_id=self._listener.up_dest,
-                        text=msg,
+                        rich_message=rich_input(msg),
                         message_thread_id=self._listener.chat_thread_id,
                         disable_notification=True,
                     )
                 else:
                     self._sent_msg = await self._pacer.guard(
-                        self._listener.client.send_message,
+                        self._listener.client.send_rich_message,
                         chat_id=self._listener.up_dest,
-                        text=msg,
+                        rich_message=rich_input(msg),
                         message_thread_id=self._listener.chat_thread_id,
                         disable_notification=True,
                     )
@@ -215,9 +215,11 @@ class TelegramUploader:
                 if self._listener.is_cancelled:
                     return False
                 self._sent_msg = await self._pacer.guard(
-                    user_session().send_message,
+                    user_session().send_rich_message,
                     chat_id=self._listener.message.chat.id,
-                    text="Deleted Cmd Message! Don't delete the cmd message again!",
+                    rich_message=rich_input(
+                        "Deleted Cmd Message! Don't delete the cmd message again!"
+                    ),
                     disable_notification=True,
                 )
                 if self._sent_msg is None:

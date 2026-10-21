@@ -10,6 +10,7 @@ from .. import intervals, scheduler, LOGGER
 from ..helper.util.bot_utils import new_task
 from ..helper.telegram.message_utils import (
     chat_of,
+    rich_input,
     send_message,
     delete_message,
 )
@@ -35,13 +36,13 @@ async def send_incomplete_task_message(cid, msg_id, msg):
             await TgClient.bot.edit_message_text(
                 chat_id=cid,
                 message_id=msg_id,
-                text=msg,
+                rich_message=rich_input(msg),
             )
             await remove(".restartmsg")
         else:
-            await TgClient.bot.send_message(
+            await TgClient.bot.send_rich_message(
                 chat_id=cid,
-                text=msg,
+                rich_message=rich_input(msg),
                 disable_notification=True,
             )
     except Exception as e:
@@ -72,7 +73,9 @@ async def restart_notification():
     if await aiopath.isfile(".restartmsg"):
         try:
             await TgClient.bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id, text="Restarted Successfully!"
+                chat_id=chat_id,
+                message_id=msg_id,
+                rich_message=rich_input("Restarted Successfully!"),
             )
         except Exception:
             pass

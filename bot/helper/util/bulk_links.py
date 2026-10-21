@@ -1,6 +1,8 @@
 from aiofiles import open as aiopen
 from aiofiles.os import remove
 
+from ..telegram.message_utils import message_text
+
 
 def filter_links(links_list, bulk_start, bulk_end):
     """Select ``bulk_start``..``bulk_end`` of the list, 1-based and inclusive.
@@ -40,6 +42,6 @@ async def extract_bulk_links(message, bulk_start, bulk_end):
     if reply_to := message.reply_to_message:
         if (file_ := reply_to.document) and (file_.mime_type == "text/plain"):
             links_list = await get_links_from_file(reply_to)
-        elif text := reply_to.text:
+        elif text := message_text(reply_to):
             links_list = get_links_from_message(text)
     return filter_links(links_list, bulk_start, bulk_end) if links_list else links_list

@@ -4,9 +4,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from re import compile as re_compile
 from time import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pyrogram.errors import FloodPremiumWait, FloodWait
+from pyrogram.types import InlineKeyboardMarkup, InputRichMessage
 
 from ... import DOWNLOAD_DIR, LOGGER, intervals, status_dict, task_dict_lock
 from ...core.config_manager import Config
@@ -83,10 +84,72 @@ def file_link_line(index: int, link: str, name: str) -> str:
     return f"{index}. <a href='{escaped_link}'>{html.escape(name)}</a>\n"
 
 
+def rich_html(text: str) -> str:
+    """Return *text* as the HTML body of a rich message.
+
+    Rich HTML is markup, so the ``\\n`` every caller in this repo writes is
+    ordinary whitespace and would collapse into a space. ``<br>`` is the line
+    break the format documents, so it is the one translation a plain message
+    needs before it can travel as a rich one.
+    """
+    return text.replace("\r\n", "\n").replace("\n", "<br>")
+
+
+def rich_input(text: str | InputRichMessage | None) -> InputRichMessage:
+    """Wrap *text* for a rich send, leaving an already-built input alone."""
+    if isinstance(text, InputRichMessage):
+        return text
+    return InputRichMessage(html=rich_html(text or ""))
+
+
+def _rich_value_text(value) -> str:
+    """Plain text carried by one parsed rich value.
+
+    The server answers with a tree rather than the string that was sent: a
+    paragraph is a ``RichText`` object, and styling wraps the run again. Text
+    nodes hold their characters in ``text``; custom emoji hold their fallback
+    in ``alternative_text``; a concatenation is a list. Divider and media
+    blocks carry none and contribute nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "".join(_rich_value_text(item) for item in value)
+    alternative = getattr(value, "alternative_text", None)
+    if isinstance(alternative, str):
+        return alternative
+    text = getattr(value, "text", None)
+    if text is not None:
+        return _rich_value_text(text)
+    return ""
+
+
+def message_text(message: Message) -> str:
+    """The text *message* carries, whether it was sent as plain or rich.
+
+    Commands are parsed from ``message.text``. A rich message leaves that
+    field empty and puts its content in ``rich_message``, so anything that
+    hands a bot-sent message back to a command parser -- a multi chain, a bulk
+    anchor, a reply the user made to one -- has to read both.
+    """
+    if text := message.text:
+        return str(text)
+    if rich := getattr(message, "rich_message", None):
+        blocks = getattr(rich, "blocks", None) or []
+        parts = [_rich_value_text(block) for block in blocks]
+        joined = "\n".join(part for part in parts if part)
+        if joined:
+            return joined
+    caption = getattr(message, "caption", None)
+    return str(caption) if caption else ""
+
+
 async def send_message(message, text, buttons=None, block=True):
     try:
-        return await message.reply(
-            text=text,
+        return await message.reply_rich(
+            rich_message=rich_input(text),
             disable_notification=True,
             reply_markup=buttons,
         )
@@ -101,18 +164,25 @@ async def send_message(message, text, buttons=None, block=True):
         return str(e)
 
 
-async def edit_message(message, text, buttons=None, block=True):
+async def edit_message(
+    message: Any,
+    text: str | InputRichMessage | None = None,
+    buttons: InlineKeyboardMarkup | None = None,
+    block: bool = True,
+    rich_message: InputRichMessage | None = None,
+) -> Message | str:
     try:
         return await message.edit(
-            text=text,
+            text=None,
             reply_markup=buttons,
+            rich_message=rich_message or rich_input(text),
         )
     except FloodWait as f:
         LOGGER.warning(str(f))
         if not block:
             return str(f)
         await sleep(flood_seconds(f) * 1.2)
-        return await edit_message(message, text, buttons, block)
+        return await edit_message(message, text, buttons, block, rich_message)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
@@ -140,9 +210,9 @@ async def send_notice(
         LOGGER.error("Cannot send a notice: the message has no chat")
         return "No chat to send to"
     try:
-        return await TgClient.bot.send_message(
+        return await TgClient.bot.send_rich_message(
             chat_id=chat_id,
-            text=text,
+            rich_message=rich_input(text),
             message_thread_id=getattr(message, "message_thread_id", None),
             disable_notification=not notify,
         )
@@ -171,9 +241,9 @@ async def send_file(message, file, caption=""):
 
 async def send_rss(text, chat_id, thread_id):
     try:
-        return await TgClient.bot.send_message(
+        return await TgClient.bot.send_rich_message(
             chat_id=chat_id,
-            text=text,
+            rich_message=rich_input(text),
             message_thread_id=thread_id,
             disable_notification=True,
         )

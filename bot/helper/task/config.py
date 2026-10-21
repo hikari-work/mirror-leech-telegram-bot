@@ -6,7 +6,7 @@ from . import (
     MultiLinkMixin,
     SettingsResolverMixin,
 )
-from ..telegram.message_utils import chat_of
+from ..telegram.message_utils import chat_of, message_text
 
 
 class TaskConfig(
@@ -29,9 +29,7 @@ class TaskConfig(
         self.mid = getattr(self, "_forced_mid", 0) or self.message.id
         self.bulk_child = bool(getattr(self, "_forced_mid", 0))
         self.cmd_msg_id = self.message.id
-        self.cmd_text = getattr(self, "_cmd_text", "") or (
-            self.message.text or self.message.caption or ""
-        )
+        self.cmd_text = getattr(self, "_cmd_text", "") or message_text(self.message)
         # A command reaching a handler was sent by someone: a user, or the chat
         # itself for a channel post or an anonymous admin. ``user_id`` on the
         # next line has always assumed that, so it is stated here instead.

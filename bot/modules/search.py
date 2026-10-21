@@ -9,7 +9,7 @@ from ..helper.util.bot_utils import new_task
 from ..helper.util.status_utils import get_readable_file_size
 from ..helper.util.telegraph_helper import telegraph
 from ..helper.telegram.button_build import ButtonMaker
-from ..helper.telegram.message_utils import edit_message, send_message
+from ..helper.telegram.message_utils import edit_message, message_text, send_message
 
 PLUGINS = []
 SITES: dict[str, str] | None = None
@@ -261,7 +261,7 @@ async def torrent_search(_, message):
 async def torrent_search_update(_, query):
     user_id = query.from_user.id
     message = query.message
-    key = message.reply_to_message.text.split(maxsplit=1)
+    key = message_text(message.reply_to_message).split(maxsplit=1)
     key = key[1].strip() if len(key) > 1 else None
     data = query.data.split()
     if user_id != int(data[1]):

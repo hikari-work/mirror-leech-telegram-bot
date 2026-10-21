@@ -199,7 +199,7 @@ class Leech(CommandTask):
 
         if not self.multi_tag:
             self.multi_tag = token_urlsafe(3)
-            multi_tags.add(self.multi_tag)
+            multi_tags[self.multi_tag] = self.user_id
 
         if "-m" not in self.options:
             self.options += f" -m bulk-{self.multi_tag}"
@@ -207,7 +207,7 @@ class Leech(CommandTask):
         try:
             await self.dispatch_bulk(cmd or BotCommands.LeechCommand[0], links, Leech)
         except Exception as e:
-            multi_tags.discard(self.multi_tag)
+            multi_tags.pop(self.multi_tag, None)
             LOGGER.error(f"Can't start bulk from telegram links: {e}")
             await send_message(self.message, f"Can't start bulk: {e}")
 

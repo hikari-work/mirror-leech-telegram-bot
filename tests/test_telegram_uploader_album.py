@@ -162,6 +162,7 @@ def uploader_module(monkeypatch):
             "bot.helper.telegram.message_utils",
             chat_of=lambda message: message.chat,
             delete_message=AsyncMock(),
+            rich_input=lambda text: ("rich", text),
         ),
         # Real path: the uploader, flood pacer and media-group batcher all live
         # in this package and load from disk.

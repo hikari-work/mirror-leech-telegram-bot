@@ -225,7 +225,7 @@ class BatchTrackerMixin(TaskConfigHost):
 
     async def _release(self, batch) -> None:
         """Drop the batch bookkeeping and the command messages it owns."""
-        multi_tags.discard(self.multi_tag)
+        multi_tags.pop(self.multi_tag, None)
         if multi_batches.pop(self.multi_tag, None) is None:
             return
         for cmd_msg in batch.get("cmd_msgs", []):

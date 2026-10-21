@@ -4,28 +4,34 @@ from .. import task_dict, task_dict_lock, multi_tags
 from ..helper.util.bot_utils import new_task
 from ..helper.util.status_utils import (
     get_all_tasks,
+    get_task_by_gid,
     MirrorStatus,
 )
 from ..helper.util.task_lookup import task_from_command, task_is_yours
 from ..helper.telegram import button_build
 from ..helper.telegram.bot_commands import BotCommands
+from ..helper.telegram.button_build import ButtonMaker
 from ..helper.telegram.filters import CustomFilters
 from ..helper.telegram.message_utils import (
     send_message,
     auto_delete_message,
     delete_message,
     edit_message,
+    message_text,
 )
 
 
 @new_task
 async def cancel(_, message):
     user_id = message.from_user.id if message.from_user else message.sender_chat.id
-    msg = message.text.split()
+    msg = message_text(message).split()
     gid = msg[1] if len(msg) > 1 else ""
-    if len(gid) == 4:
-        # four characters is a bulk's tag, not a task's gid
-        multi_tags.discard(gid)
+    if gid in multi_tags:
+        # a bulk's tag, not a task's gid; only its owner (or a sudo) may stop it
+        if multi_tags[gid] != user_id and not await CustomFilters.is_sudo(message):
+            await send_message(message, "Not Yours!")
+            return
+        del multi_tags[gid]
         return
     task = await task_from_command(
         message,
@@ -40,20 +46,49 @@ async def cancel(_, message):
 
 
 @new_task
-async def cancel_multi(_, query):
+async def cancel_updates(_, query):
     data = query.data.split()
     user_id = query.from_user.id
-    if user_id != int(data[1]) and not await CustomFilters.is_sudo(query):
+    if data[1] == "close":
+        await query.answer()
+        await delete_message(query.message)
+        return
+    if data[1] == "multi":
+        tag = data[2]
+        if tag not in multi_tags:
+            await query.answer("Already Stopped/Finished!", show_alert=True)
+            return
+        if multi_tags[tag] != user_id and not await CustomFilters.is_sudo(query):
+            await query.answer("Not Yours!", show_alert=True)
+            return
+        del multi_tags[tag]
+        await query.answer("Stopped!", show_alert=True)
+        return
+
+    gid = data[2]
+    task = await get_task_by_gid(gid)
+    if task is None:
+        await query.answer("Task already cancelled or finished!", show_alert=True)
+        return
+    if user_id != task.listener.user_id and not await CustomFilters.is_sudo(query):
         await query.answer("Not Yours!", show_alert=True)
         return
-    tag = int(data[2])
-    if tag in multi_tags:
-        multi_tags.discard(int(data[2]))
-        msg = "Stopped!"
-    else:
-        msg = "Already Stopped/Finished!"
-    await query.answer(msg, show_alert=True)
+    if data[1] == "canconf":
+        await query.answer()
+        button = ButtonMaker()
+        button.data_button("Yes", f"cancel conf {gid}", style="green")
+        button.data_button("No", "cancel close", style="red")
+        res = await send_message(
+            query.message,
+            "Are you sure you want to cancel this task?",
+            buttons=button.build_menu(2),
+        )
+        await auto_delete_message(res)
+        return
+    await query.answer()
     await delete_message(query.message)
+    obj = task.task()
+    await obj.cancel_task()
 
 
 async def cancel_all(status, user_id):

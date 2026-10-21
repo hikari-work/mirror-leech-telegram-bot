@@ -1,11 +1,11 @@
 from .bot_settings import send_bot_settings, edit_bot_settings
 from .bypass import bypass_scrape_cmd
-from .cancel_task import cancel, cancel_multi, cancel_all_buttons, cancel_all_update
+from .cancel_task import cancel, cancel_updates, cancel_all_buttons, cancel_all_update
 from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo
 from .copy import copy_task, copy_choice
 from .exec import aioexecute, execute, clear
 from .file_selector import select, confirm_selection
-from .force_start import remove_from_queue
+from .force_start import remove_from_queue, remove_from_queue_callback
 from .help import arg_usage, bot_help
 from .leech import leech, qb_leech
 from .live import live_callback, live_menu
@@ -29,7 +29,7 @@ __all__ = [
     "send_bot_settings",
     "edit_bot_settings",
     "cancel",
-    "cancel_multi",
+    "cancel_updates",
     "cancel_all_buttons",
     "cancel_all_update",
     "authorize",
@@ -45,6 +45,7 @@ __all__ = [
     "select",
     "confirm_selection",
     "remove_from_queue",
+    "remove_from_queue_callback",
     "arg_usage",
     "leech",
     "qb_leech",

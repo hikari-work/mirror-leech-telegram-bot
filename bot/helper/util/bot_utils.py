@@ -11,6 +11,8 @@ from asyncio import (
 )
 from typing import Any
 
+from pyrogram.types import InlineKeyboardMarkup
+
 from ... import user_data, bot_loop
 from ...core.config_manager import Config
 from ..telegram.button_build import ButtonMaker
@@ -20,7 +22,7 @@ from .help_messages import (
     LEECH_HELP_DICT,
 )
 
-COMMAND_USAGE = {}
+COMMAND_USAGE: dict[str, tuple[str, InlineKeyboardMarkup]] = {}
 
 THREAD_POOL = ThreadPoolExecutor(max_workers=500)
 
@@ -40,12 +42,12 @@ class SetInterval:
         self.task.cancel()
 
 
-def _build_command_usage(help_dict, command_key):
+def _build_command_usage(help_dict: dict[str, Any], command_key: str) -> None:
     buttons = ButtonMaker()
     for name in list(help_dict.keys())[1:]:
         buttons.data_button(name, f"help {command_key} {name}")
     buttons.data_button("Close", "help close")
-    COMMAND_USAGE[command_key] = [help_dict["main"], buttons.build_menu(3)]
+    COMMAND_USAGE[command_key] = (help_dict["main"], buttons.build_menu(3))
     buttons.reset()
 
 
@@ -66,7 +68,7 @@ def bt_selection_buttons(id_):
             "Select Files", f"{Config.BASE_URL}/app/files?gid={id_}&pin={pin}"
         )
     buttons.data_button("Done Selecting", f"sel done {gid} {id_}")
-    buttons.data_button("Cancel", f"sel cancel {gid}")
+    buttons.data_button("Close", "sel close")
     return buttons.build_menu(2)
 
 

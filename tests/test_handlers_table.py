@@ -81,8 +81,9 @@ EXPECTED_COMMANDS = [
 EXPECTED_CALLBACKS = [
     ("edit_bot_settings", "^botset", "sudo"),
     ("cancel_all_update", "^canall", None),
-    ("cancel_multi", "^stopm", None),
+    ("cancel_updates", "^cancel", None),
     ("confirm_selection", "^sel", None),
+    ("remove_from_queue_callback", "^force", None),
     ("arg_usage", "^help", None),
     ("rss_listener", "^rss", None),
     ("confirm_restart", "^botrestart", "sudo"),
