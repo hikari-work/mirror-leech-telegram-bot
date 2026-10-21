@@ -14,6 +14,7 @@ branches that now live in different modules and interleave across them.
 from . import (
     bunkr,  # noqa: F401
     cloud,  # noqa: F401
+    doodstream,  # noqa: F401
     filehosts,  # noqa: F401
     gofile,  # noqa: F401
     imgbb,  # noqa: F401

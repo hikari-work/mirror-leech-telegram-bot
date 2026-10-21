@@ -1,6 +1,10 @@
-"""Streaming site handlers: doods, streamtape, filelions, streamwish, streamhub, streamvid."""
+"""Streaming site handlers: streamtape, filelions, streamwish, streamhub, streamvid.
 
-from re import findall, search
+DoodStream used to live here as a page scraper. Its player stopped minting links
+that way, so the gateway-backed handler in ``doodstream.py`` replaced it.
+"""
+
+from re import findall
 from time import sleep
 from urllib.parse import urlparse
 
@@ -16,64 +20,6 @@ from .._common import (
     user_agent,
 )
 from ..registry import register
-
-# --- DoodStream ---
-
-_DOOD_DOMAINS = (
-    "dood.watch",
-    "doodstream.com",
-    "dood.to",
-    "dood.so",
-    "dood.cx",
-    "dood.la",
-    "dood.ws",
-    "dood.sh",
-    "doodstream.co",
-    "dood.pm",
-    "dood.wf",
-    "dood.re",
-    "dood.video",
-    "dooood.com",
-    "dood.yt",
-    "doods.yt",
-    "dood.stream",
-    "doods.pro",
-    "ds2play.com",
-    "d0o0d.com",
-    "ds2video.com",
-    "do0od.com",
-    "d000d.com",
-)
-
-
-@register(*_DOOD_DOMAINS, order=32)
-def doods(url):
-    if "/e/" in url:
-        url = url.replace("/e/", "/d/")
-    parsed_url = urlparse(url)
-    with create_scraper() as session:
-        try:
-            html = HTML(session.get(url).text)
-        except Exception as e:
-            raise DirectDownloadLinkException(
-                f"ERROR: {e.__class__.__name__} While fetching token link"
-            ) from e
-        if not (link := html.xpath("//div[@class='download-content']//a/@href")):
-            raise DirectDownloadLinkException(
-                "ERROR: Token Link not found or maybe not allow to download! open in browser."
-            )
-        link = f"{parsed_url.scheme}://{parsed_url.hostname}{link[0]}"
-        sleep(2)
-        try:
-            _res = session.get(link)
-        except Exception as e:
-            raise DirectDownloadLinkException(
-                f"ERROR: {e.__class__.__name__} While fetching download link"
-            ) from e
-    if not (link := search(r"window\.open\('(\S+)'", _res.text)):
-        raise DirectDownloadLinkException("ERROR: Download link not found try again")
-    return (link.group(1), [f"Referer: {parsed_url.scheme}://{parsed_url.hostname}/"])
-
 
 # --- Streamtape ---
 

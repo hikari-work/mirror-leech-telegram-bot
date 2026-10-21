@@ -22,6 +22,15 @@ from .hosts.bunkr import (
     bunkr_resolve_many,
     is_bunkr_link,
 )
+from .hosts.doodstream import (
+    DOODSTREAM_ATTEMPTS,
+    DOODSTREAM_DOMAINS,
+    DOODSTREAM_HOST,
+    doodstream,
+    doodstream_headers,
+    doodstream_stem,
+    is_doodstream_link,
+)
 from .hosts.imgbb import (
     IMGBB_DOMAINS,
     imgbb,
@@ -151,6 +160,13 @@ __all__ = [
     "bunkr",
     "bunkr_resolve_download",
     "bunkr_resolve_many",
+    "is_doodstream_link",
+    "doodstream",
+    "doodstream_headers",
+    "doodstream_stem",
+    "DOODSTREAM_HOST",
+    "DOODSTREAM_DOMAINS",
+    "DOODSTREAM_ATTEMPTS",
     "IMGBB_DOMAINS",
     "is_imgbb_link",
     "imgbb",

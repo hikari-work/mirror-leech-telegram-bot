@@ -134,6 +134,70 @@ def vidara(monkeypatch):
 
 
 @pytest.fixture
+def doodstream(monkeypatch):
+    """Load ``hosts/doodstream.py`` with its package stubbed out.
+
+    Same recipe as the ``vidara`` fixture. The module reads the gateway through
+    ``_common`` and decides what to hand aria2 from the JSON alone, so the tests
+    replace ``Session`` with one that replays canned responses.
+    """
+    path = (
+        _ROOT
+        / "bot" / "helper" / "download" / "direct_link_generators" / "hosts"
+        / "doodstream.py"
+    )
+
+    pkg = ModuleType("dood_stub")
+    pkg.__path__ = []
+    hosts_pkg = ModuleType("dood_stub.hosts")
+    hosts_pkg.__path__ = []
+
+    class _Logger:
+        @staticmethod
+        def info(msg):
+            pass
+
+        error = warning = debug = info
+
+    class DirectDownloadLinkException(Exception):
+        pass
+
+    def _safe_name(name, fallback):
+        from re import sub
+
+        cleaned = sub(r'[<>:"/\\|?*\x00-\x1f]', "", (name or "").strip()).strip(" .")
+        return cleaned[:200] or fallback
+
+    common = ModuleType("dood_stub._common")
+    common.LOGGER = _Logger()
+    common.DirectDownloadLinkException = DirectDownloadLinkException
+    common.user_agent = "UA"
+    common.safe_name = _safe_name
+    common.header_lines = lambda headers: [
+        f"{key}: {value}" for key, value in sorted(headers.items())
+    ]
+    common.gateway_url = lambda path="": f"https://gateway.test{path}"
+    common.gateway_headers = lambda accept_json=True: {"accept": "application/json"}
+
+    registry = ModuleType("dood_stub.registry")
+    registry.register = lambda **kwargs: (lambda func: func)
+
+    for name, mod in {
+        "dood_stub": pkg,
+        "dood_stub.hosts": hosts_pkg,
+        "dood_stub._common": common,
+        "dood_stub.registry": registry,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    spec = importlib.util.spec_from_file_location("dood_stub.hosts.doodstream", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "dood_stub.hosts.doodstream", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
 def seedbox(monkeypatch):
     """Load ``hosts/seedbox.py`` with its package stubbed out.
 
