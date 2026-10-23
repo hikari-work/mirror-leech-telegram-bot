@@ -198,6 +198,70 @@ def doodstream(monkeypatch):
 
 
 @pytest.fixture
+def terabox(monkeypatch):
+    """Load ``hosts/terabox.py`` with its package stubbed out.
+
+    Same recipe as the ``vidara`` fixture. ``Config`` carries a real-looking
+    ``TERABOX_NDUS`` so the ``ndus`` query param and the cookie fallback can both
+    be exercised; the tests replace ``Session`` and set the attribute when they
+    want it empty.
+    """
+    path = (
+        _ROOT
+        / "bot" / "helper" / "download" / "direct_link_generators" / "hosts"
+        / "terabox.py"
+    )
+
+    pkg = ModuleType("tb_stub")
+    pkg.__path__ = []
+    hosts_pkg = ModuleType("tb_stub.hosts")
+    hosts_pkg.__path__ = []
+
+    class _Logger:
+        def __init__(self):
+            self.messages: list[str] = []
+
+        def _record(self, msg):
+            self.messages.append(str(msg))
+
+        info = warning = error = debug = _record
+
+    class Config:
+        GATEWAY_URL = "https://gateway.test"
+        GATEWAY_TOKEN = ""
+        TERABOX_NDUS = ""
+
+    class DirectDownloadLinkException(Exception):
+        pass
+
+    common = ModuleType("tb_stub._common")
+    common.LOGGER = _Logger()
+    common.Config = Config
+    common.DirectDownloadLinkException = DirectDownloadLinkException
+    common.user_agent = "UA"
+    common.gateway_url = lambda path="": f"{Config.GATEWAY_URL}{path}"
+    common.gateway_headers = lambda accept_json=True: {"accept": "application/json"}
+
+    registry = ModuleType("tb_stub.registry")
+    # terabox registers its domains positionally, unlike vidara's predicate form
+    registry.register = lambda *args, **kwargs: (lambda func: func)
+
+    for name, mod in {
+        "tb_stub": pkg,
+        "tb_stub.hosts": hosts_pkg,
+        "tb_stub._common": common,
+        "tb_stub.registry": registry,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    spec = importlib.util.spec_from_file_location("tb_stub.hosts.terabox", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "tb_stub.hosts.terabox", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
 def seedbox(monkeypatch):
     """Load ``hosts/seedbox.py`` with its package stubbed out.
 
