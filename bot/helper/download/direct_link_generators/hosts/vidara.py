@@ -107,15 +107,29 @@ def vidara_gateway(endpoint=""):
     return gateway_url(f"/api/v1/scrape/vidara{endpoint}"), gateway_headers()
 
 
-def vidara_read(session, endpoint, params, timeout):
+def vidara_read(
+    session: Session,
+    endpoint: str,
+    params: dict,
+    timeout: int,
+    nocache: bool = False,
+) -> tuple[dict | None, str | None, bool, str | None]:
     """Read one gateway endpoint and classify what came back.
 
     Returns (response, reason, retryable, retry_after). A gateway hiccup or a
     rate limit is worth another attempt, a removed video is not; retry_after is
     the gateway's own hint when it sent one. The single-video endpoint and the
     folder endpoint answer in the same envelope, so both are read here.
+
+    ``nocache`` asks the gateway to skip its stored answer. The gateway keeps a
+    failed response for a short while, which is longer than this module's own
+    retry window: without this, every attempt would be served the same stored
+    failure and a transient hiccup would read as a dead video. The first attempt
+    still takes the cached answer; only a retry asks for a fresh one.
     """
     api, headers = vidara_gateway(endpoint)
+    if nocache:
+        params = {**params, "nocache": "1"}
     try:
         resp = session.get(api, params=params, headers=headers, timeout=timeout)
     except Exception as e:
@@ -141,12 +155,16 @@ def vidara_read(session, endpoint, params, timeout):
     return response, None, False, None
 
 
-def vidara_scrape(session, target, probe=False):
+def vidara_scrape(
+    session: Session, target: str, probe: bool = False, nocache: bool = False
+) -> tuple[dict | None, str | None, bool, str | None]:
     """One video page, resolved to the response that carries its HLS ladder."""
     params = {"q": target}
     if probe:
         params["probe"] = "true"
-    response, reason, retryable, retry_after = vidara_read(session, "", params, 60)
+    response, reason, retryable, retry_after = vidara_read(
+        session, "", params, 60, nocache
+    )
     if not response:
         return None, reason, retryable, retry_after
 
@@ -204,7 +222,9 @@ def vidara_safe_name(name, fallback):
     return name or fallback
 
 
-def vidara_folder_scrape(session, target):
+def vidara_folder_scrape(
+    session: Session, target: str, nocache: bool = False
+) -> tuple[dict | None, str | None, bool, str | None]:
     """Return (response, reason, retryable, retry_after) for one folder page.
 
     ``resolve`` is left off deliberately. The gateway can resolve every video in
@@ -214,7 +234,7 @@ def vidara_folder_scrape(session, target):
     when its turn comes.
     """
     return vidara_read(
-        session, "/folder", {"q": target, "resolve": "false"}, 90
+        session, "/folder", {"q": target, "resolve": "false"}, 90, nocache
     )
 
 
@@ -224,7 +244,9 @@ def vidara_targets(url):
     return [url] if sanitized == url else [url, sanitized]
 
 
-def vidara_scrape_targets(session, targets, probe=False):
+def vidara_scrape_targets(
+    session: Session, targets: list[str], probe: bool = False, nocache: bool = False
+) -> tuple[dict | None, str | None, bool, str | None]:
     """Scrape each spelling of a video page, stopping at the first that answers.
 
     Answers like ``vidara_scrape`` does; when none of them resolved, the reason
@@ -233,7 +255,7 @@ def vidara_scrape_targets(session, targets, probe=False):
     reason, retryable, retry_after = "unknown error", False, None
     for target in targets:
         response, reason, retryable, retry_after = vidara_scrape(
-            session, target, probe
+            session, target, probe, nocache
         )
         if response:
             return response, None, retryable, retry_after
@@ -241,17 +263,21 @@ def vidara_scrape_targets(session, targets, probe=False):
     return None, reason, retryable, retry_after
 
 
-def vidara_retry(scrape, label=""):
+def vidara_retry(scrape: Callable[[bool], tuple], label: str = "") -> dict:
     """Call *scrape* until it answers, backing off on the answers worth retrying.
 
-    *scrape* hands back the ``(response, reason, retryable, retry_after)`` a
-    gateway read produces. The jittered backoff is the point of doing this in one
-    place: a bulk retries in lockstep otherwise. Raises with the last reason once
-    the attempts are spent, or as soon as one comes back final.
+    *scrape* takes the ``nocache`` flag the gateway understands and hands back
+    the ``(response, reason, retryable, retry_after)`` a gateway read produces.
+    The jittered backoff is the point of doing this in one place: a bulk retries
+    in lockstep otherwise. Raises with the last reason once the attempts are
+    spent, or as soon as one comes back final.
+
+    Only a retry asks for a fresh read: the first attempt still takes the
+    gateway's stored answer, which is what a repeat of the same link wants.
     """
     reason = "unknown error"
     for attempt in range(1, VIDARA_ATTEMPTS + 1):
-        response, reason, retryable, retry_after = scrape()
+        response, reason, retryable, retry_after = scrape(attempt > 1)
         if response:
             return response
         if not retryable or attempt == VIDARA_ATTEMPTS:
@@ -272,8 +298,8 @@ def vidara_folder_fetch(session, url):
     another attempt, a folder that no longer exists is not.
     """
 
-    def _scrape():
-        answer = vidara_folder_scrape(session, url)
+    def _scrape(nocache: bool = False):
+        answer = vidara_folder_scrape(session, url, nocache)
         if not answer[0]:
             LOGGER.info(f"Vidara: folder {url} rejected by the API ({answer[1]})")
         return answer
@@ -419,7 +445,11 @@ def vidara_resolve(url, name=""):
     targets = vidara_targets(url)
 
     with Session() as session:
-        response = vidara_retry(lambda: vidara_scrape_targets(session, targets))
+        response = vidara_retry(
+            lambda nocache=False: vidara_scrape_targets(
+                session, targets, nocache=nocache
+            )
+        )
 
     master_url = response.get("master_url") or response.get("master_playlist_url")
     return (
@@ -505,7 +535,7 @@ def _resolve_with_retries(
     with Session() as session:
         for attempt in range(1, max_attempts + 1):
             response, reason, retryable, retry_after = vidara_scrape_targets(
-                session, targets, probe=True
+                session, targets, probe=True, nocache=attempt > 1
             )
 
             if response:

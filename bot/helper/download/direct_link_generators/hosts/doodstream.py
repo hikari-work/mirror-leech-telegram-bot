@@ -131,15 +131,23 @@ def doodstream_targets(url: str) -> list[str]:
 
 
 def doodstream_read(
-    session: Session, target: str, verify: bool = True
+    session: Session, target: str, verify: bool = True, nocache: bool = False
 ) -> ScrapeAnswer:
     """Read the gateway endpoint for one page and classify what came back.
 
     ``verify`` makes the gateway range-probe the CDN, which is also where the
     size this module reports comes from. Returns the retry hint the gateway sent
     as ``Retry-After``, when it sent one.
+
+    ``nocache`` asks the gateway to skip its stored answer. The gateway keeps a
+    failed response for a short while, which is longer than this module's own
+    retry window: without it, every attempt would be served the same stored
+    failure and a transient hiccup would read as a dead page. Only a retry sets
+    it, so a first attempt still takes the cached answer.
     """
     params = {"q": target, "verify": "true" if verify else "false"}
+    if nocache:
+        params["nocache"] = "1"
     try:
         resp = session.get(
             gateway_url("/api/v1/scrape/doodstream"),
@@ -173,17 +181,18 @@ def doodstream_read(
 
 
 def doodstream_scrape_targets(
-    session: Session, targets: list[str], verify: bool = True
+    session: Session, targets: list[str], verify: bool = True, nocache: bool = False
 ) -> ScrapeAnswer:
     """Scrape each spelling, stopping at the first that answers.
 
     When none of them resolved, the reason and retry hint are the last one's,
-    which is what decides the next attempt.
+    which is what decides the next attempt. ``nocache`` reaches the gateway, as
+    it does in :func:`doodstream_read`.
     """
     reason, retryable, retry_after = "unknown error", False, None
     for target in targets:
         response, reason, retryable, retry_after = doodstream_read(
-            session, target, verify
+            session, target, verify, nocache
         )
         if response:
             return response, None, retryable, retry_after
@@ -192,16 +201,18 @@ def doodstream_scrape_targets(
 
 
 def doodstream_retry(
-    scrape: Callable[[], ScrapeAnswer], label: str = ""
+    scrape: Callable[[bool], ScrapeAnswer], label: str = ""
 ) -> dict[str, Any]:
     """Call *scrape* until it answers, backing off on the answers worth retrying.
 
-    Raises with the last reason once the attempts are spent, or as soon as one
-    comes back final.
+    *scrape* takes the ``nocache`` flag the gateway understands: a retry is
+    asking again because the stored answer was the problem, so only a retry
+    bypasses it. Raises with the last reason once the attempts are spent, or as
+    soon as one comes back final.
     """
     reason = "unknown error"
     for attempt in range(1, DOODSTREAM_ATTEMPTS + 1):
-        response, reason, retryable, retry_after = scrape()
+        response, reason, retryable, retry_after = scrape(attempt > 1)
         if response:
             return response
         if not retryable or attempt == DOODSTREAM_ATTEMPTS:
@@ -274,7 +285,9 @@ def doodstream(url: str) -> dict[str, Any]:
 
     with Session() as session:
         response = doodstream_retry(
-            lambda: doodstream_scrape_targets(session, targets)
+            lambda nocache=False: doodstream_scrape_targets(
+                session, targets, nocache=nocache
+            )
         )
 
     headers = doodstream_headers(response.get("download") or {})

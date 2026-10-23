@@ -288,6 +288,25 @@ def test_handler_does_not_retry_a_dead_link(doodstream, monkeypatch):
     assert session.calls == 1
 
 
+def test_only_a_retry_bypasses_the_gateway_cache(doodstream, monkeypatch):
+    """A stored failure outlives this module's retry window.
+
+    Without ``nocache`` on the retries, every attempt is served the same stored
+    failure and a one-off hiccup reads as a dead page.
+    """
+    session = _Session(
+        _Resp(429, {"success": False, "error": "slow down"}),
+        _Resp(200, _ok_body()),
+    )
+    monkeypatch.setattr(doodstream, "Session", lambda: session)
+    monkeypatch.setattr(doodstream, "sleep", lambda seconds: None)
+
+    doodstream.doodstream("https://playmogo.com/e/abc123")
+
+    assert "nocache" not in session.params[0]
+    assert session.params[1]["nocache"] == "1"
+
+
 def test_gateway_endpoint_is_the_doodstream_one(doodstream, monkeypatch):
     session = _Session(_Resp(200, _ok_body()))
     monkeypatch.setattr(doodstream, "Session", lambda: session)

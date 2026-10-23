@@ -42,9 +42,11 @@ class _Session:
     def __init__(self, *responses):
         self._q = list(responses)
         self.calls = 0
+        self.params = []
 
     def get(self, url, **kwargs):
         self.calls += 1
+        self.params.append(kwargs.get("params") or {})
         item = self._q.pop(0) if len(self._q) > 1 else self._q[0]
         if isinstance(item, Exception):
             raise item
@@ -182,6 +184,23 @@ def test_resolve_does_not_retry_a_dead_link(vidara, monkeypatch):
         vidara.vidara_resolve("https://vidara.to/abc")
 
     assert session.calls == 1
+
+
+def test_only_a_retry_bypasses_the_gateway_cache(vidara, monkeypatch):
+    """The gateway stores a failed answer past this module's retry window.
+
+    Without ``nocache`` on the retries, every attempt is served the same stored
+    failure and a one-off hiccup reads as a dead video.
+    """
+    session = _Session(_Resp(429, {"success": False, "error": "slow down"}),
+                       _Resp(200, _ok_body()))
+    monkeypatch.setattr(vidara, "Session", lambda: session)
+    monkeypatch.setattr(vidara, "sleep", lambda seconds: None)
+
+    vidara.vidara_resolve("https://vidara.to/abc")
+
+    assert "nocache" not in session.params[0]
+    assert session.params[1]["nocache"] == "1"
 
 
 def test_handler_retries_a_rate_limit_then_returns_an_ytdlp_link(vidara, monkeypatch):
